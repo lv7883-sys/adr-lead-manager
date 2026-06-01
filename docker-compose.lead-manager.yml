@@ -1,0 +1,36 @@
+# ============================================================
+# E6-01 | AI Lead Manager — stack isolada do Scheduler.
+# Compose próprio (não compartilha serviços/volumes com o Scheduler).
+# Conecta-se à rede externa "coolify" para alcançar o Postgres
+# (exp44a3i0nnip54f4xc0is0i) e o Redis (coolify-redis).
+# ============================================================
+
+services:
+  lead-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: adr-lead-manager:latest
+    container_name: adr-lead-manager
+    restart: unless-stopped
+    env_file:
+      - .env.claude-code
+    environment:
+      NODE_ENV: production
+      PORT: "3002"
+    expose:
+      - "3002"
+    ports:
+      - "3002:3002"
+    networks:
+      - coolify
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  coolify:
+    external: true
