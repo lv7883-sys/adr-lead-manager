@@ -6,6 +6,7 @@ const { redis } = require('./redisClient');
 const logger = require('./logger');
 const webhookRouter = require('./routes/webhook');
 const adminRouter = require('./routes/admin');
+const tenantRouter = require('./routes/tenant');
 
 const PORT = process.env.PORT || 3002;
 
@@ -40,6 +41,9 @@ app.use('/webhook', webhookRouter);
 
 // API administrativa (protegida por JWT + role PLATFORM_ADMIN).
 app.use('/admin', adminRouter);
+
+// Self-service da unidade (protegido por JWT + requireTenantRole).
+app.use('/tenant', tenantRouter);
 
 // Só sobe o listener quando executado diretamente (não nos testes que
 // importam o app).
