@@ -12,8 +12,11 @@ const { pool, withTenant } = require('../src/db');
 const TENANT_ID = crypto.randomUUID();
 const JWT_SECRET = process.env.JWT_SECRET;
 
-const adminToken = jwt.sign({ sub: 'admin-1', role: 'PLATFORM_ADMIN' }, JWT_SECRET);
-const userToken = jwt.sign({ sub: 'user-1', role: 'TENANT_USER' }, JWT_SECRET);
+// Auth agora é por is_platform_admin no banco (ADR-004/005), não por claim.
+const PLATFORM_USER = crypto.randomUUID();
+const REGULAR_USER = crypto.randomUUID();
+const adminToken = jwt.sign({ sub: PLATFORM_USER }, JWT_SECRET);
+const userToken = jwt.sign({ sub: REGULAR_USER }, JWT_SECRET);
 
 let baseUrl;
 let server;
@@ -32,6 +35,11 @@ before(async () => {
   server = app.listen(0);
   await new Promise((r) => server.once('listening', r));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
+  // Usuários: um PLATFORM_ADMIN, um comum (tabela users sem RLS).
+  await pool.query(
+    `INSERT INTO users (id, email, is_platform_admin) VALUES ($1,'padmin-e7@t', true), ($2,'reg-e7@t', false)`,
+    [PLATFORM_USER, REGULAR_USER]
+  );
   // Cria o tenant alvo (com contexto RLS = próprio id).
   await withTenant(TENANT_ID, (c) =>
     c.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [TENANT_ID, 'Academia do Rock'])
@@ -40,6 +48,7 @@ before(async () => {
 
 after(async () => {
   await withTenant(TENANT_ID, (c) => c.query('DELETE FROM tenants WHERE id = $1', [TENANT_ID]));
+  await pool.query('DELETE FROM users WHERE id = ANY($1)', [[PLATFORM_USER, REGULAR_USER]]);
   await new Promise((r) => server.close(r));
   await pool.end();
 });

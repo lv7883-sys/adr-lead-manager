@@ -77,4 +77,28 @@ function requireTenantRole(allowedRoles) {
   };
 }
 
-module.exports = { requireTenantRole };
+/**
+ * Exige PLATFORM_ADMIN (flag is_platform_admin no banco — ADR-004/005).
+ * Deve rodar APÓS `authenticate`. Não depende de claim de role no token.
+ */
+function requirePlatformAdmin() {
+  return async (req, res, next) => {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ error: 'unauthenticated' });
+    if (!isUuid(userId)) return res.status(403).json({ error: 'forbidden' });
+    try {
+      const user = await getUser(userId);
+      if (!user || !user.is_platform_admin) {
+        logger.warn('rbac.not_platform_admin', { subject: userId });
+        return res.status(403).json({ error: 'forbidden' });
+      }
+      req.platformAdmin = true;
+      return next();
+    } catch (err) {
+      logger.error('rbac.platform_admin_error', { error: err.message });
+      return res.status(500).json({ error: 'internal error' });
+    }
+  };
+}
+
+module.exports = { requireTenantRole, requirePlatformAdmin };
