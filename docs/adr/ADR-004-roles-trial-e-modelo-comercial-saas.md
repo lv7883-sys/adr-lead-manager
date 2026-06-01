@@ -325,7 +325,7 @@ adaptador fino — exatamente o que "migrar sem reescrever" exige.
 - Gating de assinatura precisa entrar no **caminho quente** do webhook (ADR-003).
 
 **Backlog / próximos ADRs**
-- ADR-00x: contrato de **auditoria de impersonation** e retenção de logs.
+- **ADR-007**: contrato de **auditoria de impersonation** e retenção de logs.
 - E-stories: `tenant_members` + RBAC middleware; SubscriptionService + máquina de
   estado; cron de expiração + notificações; painel comercial `/admin`; gating de
   feature no webhook; migração de papéis legados.
