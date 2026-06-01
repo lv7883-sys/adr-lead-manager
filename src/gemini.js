@@ -34,8 +34,12 @@ async function classify({ message }) {
 }
 
 // Portão 2 — geração da resposta, com system prompt do tenant + histórico.
-async function generateReply({ systemPrompt, history = [], message }) {
-  const model = client().getGenerativeModel({ model: MODEL, systemInstruction: systemPrompt });
+// `clarification` (opcional): instrução para repergunta de dado ambíguo (E1-03).
+async function generateReply({ systemPrompt, history = [], message, clarification }) {
+  const sys = clarification
+    ? `${systemPrompt}\n\nNESTA RESPOSTA, peça educadamente que o lead esclareça: ${clarification}.`
+    : systemPrompt;
+  const model = client().getGenerativeModel({ model: MODEL, systemInstruction: sys });
   const contents = [
     ...history.map((m) => ({
       role: m.role === 'ASSISTANT' ? 'model' : 'user',
@@ -47,4 +51,51 @@ async function generateReply({ systemPrompt, history = [], message }) {
   return res.response.text();
 }
 
-module.exports = { classify, generateReply, MODEL };
+// E1-02 — classifica a intenção do lead em uma das 4 categorias.
+const INTENTS = ['SCHEDULE_INTEREST', 'PRICE_INQUIRY', 'GENERAL_INFO', 'OUT_OF_SCOPE'];
+const INTENT_PROMPT = `Classifique a intenção principal da mensagem do lead de uma escola de música em UMA categoria:
+- SCHEDULE_INTEREST: quer agendar/marcar aula experimental, visita ou horário.
+- PRICE_INQUIRY: pergunta sobre preço, valores, mensalidade ou planos.
+- GENERAL_INFO: dúvidas gerais sobre a escola, instrumentos ou funcionamento.
+- OUT_OF_SCOPE: assunto não relacionado a aulas/escola de música.
+Responda SOMENTE com JSON: {"intent":"<categoria>"}`;
+
+async function classifyIntent({ message }) {
+  const model = client().getGenerativeModel({
+    model: MODEL,
+    generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+  });
+  const res = await model.generateContent(`${INTENT_PROMPT}\n\nMensagem: """${message ?? ''}"""`);
+  const parsed = JSON.parse(res.response.text());
+  return INTENTS.includes(parsed.intent) ? parsed.intent : 'GENERAL_INFO';
+}
+
+// E1-03 — extrai nome, instrumento e disponibilidade da conversa.
+const EXTRACT_PROMPT = `Extraia da conversa os dados do lead para matrícula em escola de música.
+Campos:
+- name: nome da pessoa.
+- instrument: instrumento de interesse.
+- availability: disponibilidade de horário.
+Para cada campo: se informado de forma clara, retorne o valor (string); se foi mencionado mas está
+ambíguo/incompleto, retorne null e inclua o nome do campo em "ambiguous"; se não foi mencionado, null.
+Responda SOMENTE com JSON: {"name":<str|null>,"instrument":<str|null>,"availability":<str|null>,"ambiguous":[<campos>]}`;
+
+async function extractQualification({ history = [], message }) {
+  const model = client().getGenerativeModel({
+    model: MODEL,
+    generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+  });
+  const convo = history.map((m) => `${m.role}: ${m.content ?? ''}`).join('\n');
+  const res = await model.generateContent(
+    `${EXTRACT_PROMPT}\n\nConversa:\n${convo}\nUSER: ${message ?? ''}`
+  );
+  const p = JSON.parse(res.response.text());
+  return {
+    name: p.name ?? null,
+    instrument: p.instrument ?? null,
+    availability: p.availability ?? null,
+    ambiguous: Array.isArray(p.ambiguous) ? p.ambiguous : [],
+  };
+}
+
+module.exports = { classify, generateReply, classifyIntent, extractQualification, INTENTS, MODEL };

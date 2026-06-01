@@ -17,7 +17,11 @@ Diretrizes:
 - Sempre que fizer sentido, convide a pessoa para uma aula experimental gratuita.
 - Não invente valores ou condições que você não conhece; ofereça encaminhar
   para um atendente humano quando necessário.
-- Se a pessoa demonstrar interesse real, colete nome e instrumento desejado.`;
+- Se a pessoa demonstrar interesse real, procure descobrir, de forma natural,
+  o nome dela, o instrumento de interesse e a disponibilidade de horário.
+- Se a mensagem fugir do tema de aulas/escola de música (assunto fora do
+  escopo), NÃO tente resolver o assunto: redirecione a pessoa educadamente
+  para um atendente humano.`;
 
 const DAY_LABELS = {
   mon: 'Seg',

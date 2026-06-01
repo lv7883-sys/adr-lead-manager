@@ -10,6 +10,49 @@ const redisClient = require('./redisClient');
 
 const CONFIDENCE_THRESHOLD = 0.7;
 
+const QUAL_FIELDS = ['name', 'instrument', 'availability'];
+const FIELD_LABELS = {
+  name: 'seu nome',
+  instrument: 'o instrumento de interesse',
+  availability: 'a disponibilidade de horário',
+};
+
+/**
+ * Mescla a extração da IA com a qualificação já armazenada, aplicando a regra
+ * "repergunta única antes de marcar como unclear" (E1-03).
+ *  - valor concreto -> grava.
+ *  - ambíguo e ainda não reperguntado -> pede esclarecimento e marca reasked.
+ *  - ambíguo e já reperguntado -> marca 'unclear' (terminal).
+ * qualification_complete = os 3 campos com valor concreto (≠ null/unclear).
+ */
+function mergeQualification(stored, extraction) {
+  const values = {
+    name: stored?.name ?? null,
+    instrument: stored?.instrument ?? null,
+    availability: stored?.availability ?? null,
+  };
+  const reasked = new Set(stored?.reasked || []);
+  const clarify = [];
+
+  for (const f of QUAL_FIELDS) {
+    if (values[f] && values[f] !== 'unclear') continue; // já conhecido
+    const val = extraction?.[f];
+    if (val) {
+      values[f] = String(val);
+      reasked.delete(f);
+    } else if (extraction?.ambiguous?.includes(f)) {
+      if (reasked.has(f)) values[f] = 'unclear';
+      else {
+        reasked.add(f);
+        clarify.push(f);
+      }
+    }
+  }
+
+  const complete = QUAL_FIELDS.every((f) => values[f] && values[f] !== 'unclear');
+  return { values, reasked: [...reasked], clarify, complete };
+}
+
 // Histórico: tenta o cache Redis; em miss/erro, reconstrói do PostgreSQL e
 // repovoa o cache. Retorna também a origem (para observabilidade).
 async function loadHistory(tenantId, conversationId, redis) {
@@ -34,11 +77,13 @@ async function loadHistory(tenantId, conversationId, redis) {
  * Idempotente, assíncrono e tolerante a falhas: qualquer erro é logado e
  * encerra o processamento sem lançar (o webhook já respondeu 200).
  *
- * deps injetáveis (testes): { classify, generate, notify, redis }.
+ * deps injetáveis (testes): { classify, generate, classifyIntent, extract, notify, redis }.
  */
 async function processInbound(tenant, msg, rawBody, deps = {}) {
   const classify = deps.classify || gemini.classify;
   const generate = deps.generate || gemini.generateReply;
+  const classifyIntent = deps.classifyIntent || gemini.classifyIntent;
+  const extract = deps.extract || gemini.extractQualification;
   const notify = deps.notify || notifyModule.notifyReceptionist;
   const redis = deps.redis || redisClient;
 
@@ -108,10 +153,19 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     ).rows[0];
     const name = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
 
+    const qual = (
+      await c.query(
+        `SELECT name, instrument, availability, reasked
+           FROM lead_qualifications WHERE tenant_id = $1 AND lead_id = $2`,
+        [tenantId, lead.rows[0].id]
+      )
+    ).rows[0] || null;
+
     return {
       leadId: lead.rows[0].id,
       leadStatus: lead.rows[0].status,
       conversationId: conv.rows[0].id,
+      storedQual: qual,
       config: cfg || {
         school_name: name || 'Escola',
         system_prompt_override: null,
@@ -138,14 +192,43 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   const { messages: history, source } = await loadHistory(tenantId, ctx.conversationId, redis);
   log2.info('gate2.history_loaded', { gate: 2, history_source: source, turns: history.length });
 
+  // E1-03 — extração (antes de gerar, para a repergunta entrar na resposta).
+  // Falha de extração é não-fatal: segue sem atualizar a qualificação.
+  let qual = null;
+  let clarification = null;
+  try {
+    const extraction = await extract({ history, message: msg.body });
+    qual = mergeQualification(ctx.storedQual, extraction);
+    if (qual.clarify.length) {
+      clarification = qual.clarify.map((f) => FIELD_LABELS[f]).join(' e ');
+    }
+    log2.info('gate2.extracted', {
+      gate: 2,
+      fields: qual.values,
+      qualification_complete: qual.complete,
+      clarify: qual.clarify,
+    });
+  } catch (err) {
+    log2.warn('gate2.extract_error', { gate: 2, error: err.message });
+  }
+
   // Geração da resposta (rede; fora de transação).
   const systemPrompt = resolveSystemPrompt(ctx.config);
   let reply;
   try {
-    reply = await generate({ systemPrompt, history, message: msg.body });
+    reply = await generate({ systemPrompt, history, message: msg.body, clarification });
   } catch (err) {
     log2.error('gate2.generate_error', { gate: 2, error: err.message });
     return; // não trava
+  }
+
+  // E1-02 — classifica a intenção APÓS gerar a resposta (não-fatal).
+  let intent = null;
+  try {
+    intent = await classifyIntent({ message: msg.body, reply });
+    log2.info('gate2.intent_classified', { gate: 2, intent });
+  } catch (err) {
+    log2.warn('gate2.intent_error', { gate: 2, error: err.message });
   }
 
   // tx2: persiste USER + ASSISTANT, promove o lead e cria a aprovação pendente.
@@ -171,6 +254,44 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       [ctx.leadId]
     );
 
+    // E1-02 — grava a intenção classificada.
+    if (intent) {
+      await c.query('UPDATE leads SET intent = $2, updated_at = now() WHERE id = $1', [
+        ctx.leadId,
+        intent,
+      ]);
+    }
+
+    // E1-03 — upsert da qualificação extraída.
+    if (qual) {
+      await c.query(
+        `INSERT INTO lead_qualifications
+           (tenant_id, lead_id, name, instrument, availability, qualification_complete, reasked, extracted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+         ON CONFLICT (tenant_id, lead_id) DO UPDATE SET
+           name = EXCLUDED.name, instrument = EXCLUDED.instrument,
+           availability = EXCLUDED.availability,
+           qualification_complete = EXCLUDED.qualification_complete,
+           reasked = EXCLUDED.reasked, extracted_at = now()`,
+        [
+          tenantId,
+          ctx.leadId,
+          qual.values.name,
+          qual.values.instrument,
+          qual.values.availability,
+          qual.complete,
+          qual.reasked,
+        ]
+      );
+      // QUALIFYING -> QUALIFIED quando os 3 dados estão completos.
+      if (qual.complete) {
+        await c.query(
+          "UPDATE leads SET status = 'QUALIFIED', updated_at = now() WHERE id = $1",
+          [ctx.leadId]
+        );
+      }
+    }
+
     // MODO OBSERVAÇÃO: não envia; cria aprovação pendente.
     const pa = await c.query(
       `INSERT INTO pending_approvals
@@ -195,4 +316,4 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   await notify({ tenantId, to: ctx.config.notification_whatsapp });
 }
 
-module.exports = { processInbound, CONFIDENCE_THRESHOLD, loadHistory };
+module.exports = { processInbound, mergeQualification, CONFIDENCE_THRESHOLD, loadHistory };
