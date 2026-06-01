@@ -37,6 +37,12 @@ before(async () => {
        VALUES ($1, 'Academia do Rock', $2, $3::jsonb, '+5511999990000')`,
       [TENANT_ID, ['Guitarra', 'Bateria'], JSON.stringify({ mon: '09:00-18:00' })]
     );
+    // E9-05: gating exige assinatura ativa para processar.
+    await c.query(
+      `INSERT INTO tenant_subscriptions (tenant_id, feature, status, valid_until)
+       VALUES ($1, 'LEAD_MANAGER', 'ACTIVE', now() + interval '30 days')`,
+      [TENANT_ID]
+    );
   });
 });
 

@@ -6,6 +6,7 @@
 // (append-only) e respeita idempotência por idempotencyKey.
 
 const { pool, withTenant } = require('./db');
+const redisClient = require('./redisClient');
 const logger = require('./logger');
 
 const addDays = (n) => new Date(Date.now() + n * 86400000);
@@ -47,7 +48,7 @@ async function applyTransition({
   allowCreate = false,
   fields = {},
 }) {
-  return withTenant(tenantId, async (c) => {
+  const result = await withTenant(tenantId, async (c) => {
     // Idempotência: a mesma chave não re-aplica nem duplica evento.
     if (idempotencyKey) {
       const dup = await c.query(
@@ -143,6 +144,13 @@ async function applyTransition({
     });
     return { idempotent: false, subscription: sub };
   });
+
+  // E9-05: invalida o cache de gating após uma mudança real de status
+  // (idempotente = no-op, não precisa invalidar). Chave por feature.
+  if (!result.idempotent) {
+    await redisClient.invalidateSubStatus(tenantId, feature.toLowerCase());
+  }
+  return result;
 }
 
 // ---------------- API pública (máquina de estado) ----------------

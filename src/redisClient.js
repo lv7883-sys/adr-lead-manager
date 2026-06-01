@@ -59,6 +59,38 @@ async function invalidateHistory(conversationId) {
   }
 }
 
+// ---- Cache de gating de assinatura (E9-05; TTL 5min — padrão ADR-002) ----
+const SUB_TTL_SECONDS = 5 * 60;
+const subStatusKey = (tenantId, feature = 'lead_manager') => `sub:${tenantId}:${feature}`;
+
+async function getCachedSubStatus(tenantId, feature = 'lead_manager') {
+  try {
+    await ensureConnected();
+    return (await redis.get(subStatusKey(tenantId, feature))) || null;
+  } catch (err) {
+    logger.warn('redis.sub_get_failed', { tenant_id: tenantId, error: err.message });
+    return null;
+  }
+}
+
+async function setCachedSubStatus(tenantId, feature, value) {
+  try {
+    await ensureConnected();
+    await redis.set(subStatusKey(tenantId, feature), value, 'EX', SUB_TTL_SECONDS);
+  } catch (err) {
+    logger.warn('redis.sub_set_failed', { tenant_id: tenantId, error: err.message });
+  }
+}
+
+async function invalidateSubStatus(tenantId, feature = 'lead_manager') {
+  try {
+    await ensureConnected();
+    await redis.del(subStatusKey(tenantId, feature));
+  } catch (err) {
+    logger.warn('redis.sub_del_failed', { tenant_id: tenantId, error: err.message });
+  }
+}
+
 module.exports = {
   redis,
   historyKey,
@@ -66,4 +98,9 @@ module.exports = {
   getCachedHistory,
   setCachedHistory,
   invalidateHistory,
+  SUB_TTL_SECONDS,
+  subStatusKey,
+  getCachedSubStatus,
+  setCachedSubStatus,
+  invalidateSubStatus,
 };

@@ -7,6 +7,7 @@ const { resolveSystemPrompt } = require('./templates');
 const gemini = require('./gemini');
 const notifyModule = require('./notify');
 const redisClient = require('./redisClient');
+const gating = require('./gating');
 
 const CONFIDENCE_THRESHOLD = 0.7;
 
@@ -90,6 +91,20 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   const tenantId = tenant.id;
   const phone = toE164(msg.externalId);
   const log = logger.child({ tenant_id: tenantId, phone });
+
+  // -------- GATING DE ASSINATURA (E9-05): antes de qualquer custo --------
+  // Só ACTIVE/TRIALING (válido) processam. GRACE/EXPIRED/SUSPENDED/ausente
+  // são barrados aqui — não chama Gemini nem cria pending_approval.
+  const sub = await gating.resolveStatus(tenantId, { redis });
+  if (!gating.isAllowed(sub.verdict)) {
+    log.info('gate.subscription_blocked', {
+      reason: 'subscription_inactive',
+      status: sub.verdict,
+      db_status: sub.dbStatus ?? null,
+      source: sub.source,
+    });
+    return;
+  }
 
   // ---------------- PORTÃO 0: filtro determinístico ----------------
   const known = await withTenant(tenantId, (c) =>
