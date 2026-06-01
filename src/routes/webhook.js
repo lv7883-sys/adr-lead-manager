@@ -5,6 +5,7 @@ const express = require('express');
 const { withTenant } = require('../db');
 const logger = require('../logger');
 const engine = require('../engine');
+const staffSamples = require('../staffSamples');
 
 const router = express.Router();
 
@@ -29,10 +30,11 @@ function normalizeMessage(body) {
       externalMessageId: body.messageId ? String(body.messageId) : null,
       fromMe: Boolean(body.fromMe),
       sender: body.senderName || body.chatName || null,
+      source: null,
       body: body.text?.message ?? body.image?.caption ?? null,
     };
   }
-  // Evolution API: { data: { key: { remoteJid, fromMe, id }, pushName, message } }
+  // Evolution API: { data: { key: { remoteJid, fromMe, id }, pushName, message }, source }
   const data = body?.data;
   if (data && data.key) {
     const jid = data.key.remoteJid || '';
@@ -41,6 +43,8 @@ function normalizeMessage(body) {
       externalMessageId: data.key.id ? String(data.key.id) : null,
       fromMe: Boolean(data.key.fromMe),
       sender: data.pushName || null,
+      // device de origem (android/ios/web = recepção digitando; outros = API/automático)
+      source: data.source ?? body.source ?? null,
       body:
         data.message?.conversation ??
         data.message?.extendedTextMessage?.text ??
@@ -123,6 +127,10 @@ async function handleZapiWebhook(req, res) {
   }
   if (msg.fromMe) {
     log.info('webhook.skipped', { reason: 'from_me' });
+    // Aprendizado de estilo: guarda a mensagem da recepção (best-effort).
+    staffSamples
+      .captureOutbound(tenant.id, msg, req.body)
+      .catch((err) => log.warn('staff_sample.unhandled', { error: err.message }));
     return;
   }
 
