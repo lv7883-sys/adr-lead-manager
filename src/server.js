@@ -1,27 +1,19 @@
 'use strict';
 
 const express = require('express');
-const { Pool } = require('pg');
+const { pool } = require('./db');
+const logger = require('./logger');
+const webhookRouter = require('./routes/webhook');
 
 const PORT = process.env.PORT || 3002;
 
-// Pool compartilhado. O search_path do lead_manager_user já aponta para
-// o schema lead_manager (definido via ALTER ROLE na migration 001).
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 10,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
-});
-
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const startedAt = Date.now();
 
-// Liveness: o processo está de pé? Não toca no banco — usado pelo
-// orchestrator para reiniciar o container se travar.
+// Liveness: o processo está de pé? Não toca no banco.
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -41,13 +33,18 @@ app.get('/health/ready', async (_req, res) => {
   }
 });
 
+// Webhooks de provedores externos (Z-API / Evolution API).
+// Namespace próprio (/webhook/zapi/:tenantId) + container/porta isolados
+// do Scheduler: nenhuma rota colide.
+app.use('/webhook', webhookRouter);
+
 const server = app.listen(PORT, () => {
-  console.log(`[adr-lead-manager] ouvindo na porta ${PORT}`);
+  logger.info('server.started', { port: Number(PORT) });
 });
 
 // Encerramento gracioso para deploys/rolling restarts.
 function shutdown(signal) {
-  console.log(`[adr-lead-manager] recebido ${signal}, encerrando...`);
+  logger.info('server.shutdown', { signal });
   server.close(() => pool.end().then(() => process.exit(0)));
   setTimeout(() => process.exit(1), 10000).unref();
 }
