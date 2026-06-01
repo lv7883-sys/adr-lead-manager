@@ -4,6 +4,7 @@ const express = require('express');
 const { pool } = require('./db');
 const logger = require('./logger');
 const webhookRouter = require('./routes/webhook');
+const adminRouter = require('./routes/admin');
 
 const PORT = process.env.PORT || 3002;
 
@@ -34,19 +35,26 @@ app.get('/health/ready', async (_req, res) => {
 });
 
 // Webhooks de provedores externos (Z-API / Evolution API).
-// Namespace próprio (/webhook/zapi/:tenantId) + container/porta isolados
-// do Scheduler: nenhuma rota colide.
 app.use('/webhook', webhookRouter);
 
-const server = app.listen(PORT, () => {
-  logger.info('server.started', { port: Number(PORT) });
-});
+// API administrativa (protegida por JWT + role PLATFORM_ADMIN).
+app.use('/admin', adminRouter);
 
-// Encerramento gracioso para deploys/rolling restarts.
-function shutdown(signal) {
-  logger.info('server.shutdown', { signal });
-  server.close(() => pool.end().then(() => process.exit(0)));
-  setTimeout(() => process.exit(1), 10000).unref();
+// Só sobe o listener quando executado diretamente (não nos testes que
+// importam o app).
+if (require.main === module) {
+  const server = app.listen(PORT, () => {
+    logger.info('server.started', { port: Number(PORT) });
+  });
+
+  // Encerramento gracioso para deploys/rolling restarts.
+  const shutdown = (signal) => {
+    logger.info('server.shutdown', { signal });
+    server.close(() => pool.end().then(() => process.exit(0)));
+    setTimeout(() => process.exit(1), 10000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+
+module.exports = app;
