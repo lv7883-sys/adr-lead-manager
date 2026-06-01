@@ -2,7 +2,9 @@
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+// gemini-2.0-flash foi descontinuado (404). Default atual: gemini-2.5-flash;
+// sobrescrevível por GEMINI_MODEL.
+const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
 function client() {
   const key = process.env.GEMINI_API_KEY;
