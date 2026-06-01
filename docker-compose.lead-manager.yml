@@ -24,6 +24,24 @@ services:
       - "3002:3002"
     networks:
       - coolify
+    # Roteamento via Traefik (proxy do Coolify) — domínio leads-api.leovecchi.com.
+    # Padrão idêntico ao adr-dashboard: entrypoints http/https, redirect-to-https,
+    # gzip e TLS Let's Encrypt. Service aponta para a porta 3002 do container.
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.middlewares.gzip.compress=true"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      - "traefik.http.routers.adr-lead-manager-http.entryPoints=http"
+      - "traefik.http.routers.adr-lead-manager-http.rule=Host(`leads-api.leovecchi.com`) && PathPrefix(`/`)"
+      - "traefik.http.routers.adr-lead-manager-http.middlewares=redirect-to-https"
+      - "traefik.http.routers.adr-lead-manager-http.service=adr-lead-manager"
+      - "traefik.http.routers.adr-lead-manager-https.entryPoints=https"
+      - "traefik.http.routers.adr-lead-manager-https.rule=Host(`leads-api.leovecchi.com`) && PathPrefix(`/`)"
+      - "traefik.http.routers.adr-lead-manager-https.middlewares=gzip"
+      - "traefik.http.routers.adr-lead-manager-https.service=adr-lead-manager"
+      - "traefik.http.routers.adr-lead-manager-https.tls=true"
+      - "traefik.http.routers.adr-lead-manager-https.tls.certresolver=letsencrypt"
+      - "traefik.http.services.adr-lead-manager.loadbalancer.server.port=3002"
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3002/health"]
       interval: 30s
