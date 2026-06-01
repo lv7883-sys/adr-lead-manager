@@ -7,11 +7,22 @@ const express = require('express');
 const { withTenant } = require('../db');
 const { authenticate } = require('../auth');
 const { requireTenantRole } = require('../rbac');
+const { patchLeadConfig } = require('../leadConfig');
 const logger = require('../logger');
 
 const router = express.Router();
 
 const READ_ROLES = ['TENANT_ADMIN', 'RECEPCAO', 'VISUALIZADOR'];
+
+// Self-service: o TENANT_ADMIN configura o Lead Manager da própria unidade
+// (E9-06). PLATFORM_ADMIN também acessa via impersonation (requireTenantRole).
+// RECEPCAO/VISUALIZADOR -> 403; outro tenant -> 403.
+router.patch(
+  '/:tenantId/lead-config',
+  authenticate,
+  requireTenantRole(['TENANT_ADMIN']),
+  patchLeadConfig
+);
 
 // Ver leads — leitura permitida a todos os papéis do tenant (ADR-004 §4b).
 router.get(
