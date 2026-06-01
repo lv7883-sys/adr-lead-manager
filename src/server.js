@@ -2,6 +2,7 @@
 
 const express = require('express');
 const { pool } = require('./db');
+const { redis } = require('./redisClient');
 const logger = require('./logger');
 const webhookRouter = require('./routes/webhook');
 const adminRouter = require('./routes/admin');
@@ -50,7 +51,9 @@ if (require.main === module) {
   // Encerramento gracioso para deploys/rolling restarts.
   const shutdown = (signal) => {
     logger.info('server.shutdown', { signal });
-    server.close(() => pool.end().then(() => process.exit(0)));
+    server.close(() =>
+      Promise.allSettled([pool.end(), redis.quit()]).then(() => process.exit(0))
+    );
     setTimeout(() => process.exit(1), 10000).unref();
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));

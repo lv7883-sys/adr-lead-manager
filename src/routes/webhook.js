@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const express = require('express');
 const { withTenant } = require('../db');
 const logger = require('../logger');
+const engine = require('../engine');
 
 const router = express.Router();
 
@@ -103,56 +104,32 @@ async function authenticateTenant(req, res, next) {
   }
 }
 
-/** Handler: persiste a mensagem recebida e a roteia para o Lead Manager. */
+/**
+ * Handler: responde 200 IMEDIATAMENTE e roteia a mensagem para o motor de
+ * funil (ADR-003) de forma assíncrona. Falhas no processamento são logadas,
+ * nunca propagadas — o provedor não deve receber erro nem reentregar.
+ */
 async function handleZapiWebhook(req, res) {
-  const tenantId = req.tenant.id;
+  const tenant = req.tenant;
   const log = req.log;
-
   const msg = normalizeMessage(req.body);
+
+  // ACK imediato (processamento é assíncrono).
+  res.status(200).json({ status: 'ok' });
+
   if (!msg || !msg.externalId) {
     log.info('webhook.no_message', { reason: 'unparseable_payload' });
-    return res.status(200).json({ status: 'ok' });
+    return;
   }
   if (msg.fromMe) {
     log.info('webhook.skipped', { reason: 'from_me' });
-    return res.status(200).json({ status: 'ok' });
+    return;
   }
 
-  try {
-    const result = await withTenant(tenantId, async (client) => {
-      // upsert da conversa (uma thread por contato)
-      const conv = await client.query(
-        `INSERT INTO conversations (tenant_id, channel, external_id)
-         VALUES ($1, 'whatsapp', $2)
-         ON CONFLICT (tenant_id, channel, external_id)
-         DO UPDATE SET updated_at = now()
-         RETURNING id`,
-        [tenantId, msg.externalId]
-      );
-      const conversationId = conv.rows[0].id;
-
-      // insere a mensagem (idempotente por external_message_id)
-      const inserted = await client.query(
-        `INSERT INTO messages
-           (tenant_id, conversation_id, direction, external_message_id, sender, body, raw)
-         VALUES ($1, $2, 'inbound', $3, $4, $5, $6)
-         ON CONFLICT (tenant_id, external_message_id)
-           WHERE external_message_id IS NOT NULL DO NOTHING
-         RETURNING id`,
-        [tenantId, conversationId, msg.externalMessageId, msg.sender, msg.body, req.body]
-      );
-      return { conversationId, duplicate: inserted.rowCount === 0 };
-    });
-
-    log.info(result.duplicate ? 'webhook.duplicate' : 'webhook.received', {
-      conversation_id: result.conversationId,
-      external_message_id: msg.externalMessageId,
-    });
-    return res.status(200).json({ status: 'ok' });
-  } catch (err) {
-    log.error('webhook.process_error', { error: err.message });
-    return res.status(500).json({ error: 'internal error' });
-  }
+  // Funil de triagem (Portões 0/1/2). Fire-and-forget com captura de erro.
+  engine
+    .processInbound(tenant, msg, req.body)
+    .catch((err) => log.error('engine.unhandled_error', { error: err.message }));
 }
 
 router.post('/zapi/:tenantId', authenticateTenant, handleZapiWebhook);

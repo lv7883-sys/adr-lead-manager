@@ -13,6 +13,14 @@ const TIME_RANGE_RE = /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
 const isUuid = (v) => typeof v === 'string' && UUID_RE.test(v);
 const isE164 = (v) => typeof v === 'string' && E164_RE.test(v);
 
+// Normaliza um identificador de telefone vindo do provedor para E.164.
+// Z-API entrega "5511988887777" (sem '+'); known_contacts armazena "+5511...".
+function toE164(raw) {
+  if (raw == null) return null;
+  const digits = String(raw).replace(/\D/g, '');
+  return digits ? `+${digits}` : null;
+}
+
 // Retorna mensagem de erro (string) ou null se válido.
 function validateBusinessHours(bh) {
   if (typeof bh !== 'object' || bh === null || Array.isArray(bh)) {
@@ -38,6 +46,7 @@ module.exports = {
   E164_RE,
   isUuid,
   isE164,
+  toE164,
   isStringArray,
   validateBusinessHours,
 };
