@@ -1,6 +1,6 @@
 # ADR-003 — Estratégia de classificação, triagem e convivência do AI Lead Manager
 
-- **Status:** Proposto
+- **Status:** Aprovado
 - **Data:** 2026-06-01
 - **Autor:** ATLAS (arquitetura)
 - **Relacionados:** ADR-001 (isolamento Lead Manager × Scheduler), ADR-002 (multi-tenant + RLS), E6-02 (webhook Z-API), E7-01 (config por tenant)
@@ -232,7 +232,7 @@ Concretamente:
   documentado no runbook de deploy.
 - O Scheduler **não** conhece o conceito de ownership hoje → na borda crítica,
   a precedência é aplicada do lado do LM (ele se cala); fechar o ciclo no
-  Scheduler fica como evolução (ver ADR futuro).
+  Scheduler fica como evolução (ver **ADR-005**).
 
 ---
 
@@ -355,9 +355,9 @@ arquitetural quando os canais chegarem.
   provider.
 
 **Itens que viram backlog / próximos ADRs**
-- ADR-00x: contrato de **ownership de conversa** entre LM e Scheduler (fechar o
-  ciclo do lado do Scheduler).
-- ADR-00x: **identidade unificada de contato** cross-canal.
+- **ADR-005**: contrato de **ownership de conversa** entre LM e Scheduler (fechar
+  o ciclo do lado do Scheduler).
+- **ADR-006**: **identidade unificada de contato** cross-canal.
 - E-story: tabela + sync de `known_contacts`.
 - E-story: fila de aprovação + console da recepcionista.
 - E-story: classificador leve (Gemini Flash) + métricas de precisão/recall.

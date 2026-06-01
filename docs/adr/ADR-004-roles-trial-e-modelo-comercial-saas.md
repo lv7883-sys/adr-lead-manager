@@ -1,6 +1,6 @@
 # ADR-004 — Roles, modelo de trial e gestão comercial SaaS
 
-- **Status:** Proposto (em revisão — não commitado)
+- **Status:** Aprovado
 - **Data:** 2026-06-01
 - **Autor:** ATLAS (arquitetura)
 - **Relacionados:** ADR-001 (isolamento + RLS + middleware de tenant context),
@@ -83,11 +83,11 @@ flag global `users.is_platform_admin` (não atrelado a tenant).
 par (usuário, tenant) é o mínimo que modela a realidade sem inventar hierarquia.
 
 ### 1c. PLATFORM_ADMIN sem violar o RLS
-Esta é a decisão sensível — detalhada na **Decisão 4**. Em resumo: **dois
-caminhos disjuntos** — *impersonation* (define `app.current_tenant` no tenant
-alvo) para agir **dentro de um** tenant; e um **papel de banco read-only com
-BYPASSRLS** para **métricas agregadas** entre tenants. O papel de aplicação
-comum **nunca** ganha bypass.
+Esta é a decisão sensível — detalhada na **Decisão 4**. Em resumo (MVP):
+*impersonation* (define `app.current_tenant` no tenant alvo) tanto para **agir
+dentro de um** tenant quanto para **métricas agregadas** (somando ao iterar por
+tenant). **Sem BYPASSRLS** no MVP — o papel de aplicação comum **nunca** ganha
+bypass; o papel read-only `platform_reader` fica **adiado** (DP-001).
 
 ### Riscos residuais
 - Resolver papel por request adiciona uma query — mitigado por cache de poucos
@@ -185,8 +185,8 @@ O painel é um cliente desse serviço; nada de SQL de status espalhado em handle
 ### Riscos residuais
 - MRR é **estimado** (sem Stripe não há cobrança real conciliada) — rotular como
   estimativa para não virar fonte de verdade financeira.
-- Métricas agregadas exigem o caminho **BYPASSRLS** (Decisão 4) — superfície
-  sensível.
+- Métricas agregadas no MVP são calculadas **iterando por tenant** (impersonation),
+  cujo custo cresce com o nº de tenants — gatilho de revisão em **DP-001**.
 
 ---
 
@@ -250,13 +250,15 @@ fica pré-desenhado, mas não ativado.
 5. handler
 ```
 O middleware do ADR-001-B passa a **derivar o contexto da membership** (ou da
-impersonation do PLATFORM_ADMIN), não de um header confiável. Endpoints de
-plataforma (agregados) pulam o passo 4 e usam o pool `platform_reader`.
+impersonation do PLATFORM_ADMIN), não de um header confiável. No MVP, endpoints
+de plataforma (agregados) também passam pelo passo 4, **iterando o contexto por
+tenant** — sem pool com bypass.
 
 ### Riscos residuais
 - **Impersonation precisa de auditoria completa** — sem log, vira acesso opaco.
-- `platform_reader` é BYPASSRLS: qualquer endpoint que o use por engano vaza —
-  isolar num módulo/pool com nome explícito e revisão obrigatória.
+- Métricas por iteração de tenant não escalam indefinidamente — se/quando ativar
+  o `platform_reader` (BYPASSRLS) via **DP-001**, isolá-lo num módulo/pool com
+  nome explícito e revisão obrigatória, pois qualquer uso indevido vaza.
 - Resolução de papel por request: caching com TTL curto para não pesar.
 
 ---
@@ -309,7 +311,7 @@ adaptador fino — exatamente o que "migrar sem reescrever" exige.
 - Papéis e assinaturas modelados por chave composta correta ((user,tenant) e
   (tenant,feature)); nada de gambiarra global.
 - RLS do ADR-001 preservado: poder cross-tenant confinado a impersonation
-  auditada + um papel read-only estreito.
+  auditada (sem BYPASSRLS no MVP; `platform_reader` adiado — DP-001).
 - Trial com expiração, grace e métricas reais (events append-only).
 - Caminho para Stripe sem reescrita (serviço idempotente + colunas nullable).
 
