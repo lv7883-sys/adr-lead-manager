@@ -34,9 +34,13 @@
 
 | ID (proposto) | Tema | Origem | Notas |
 |---|---|---|---|
-| **ADR-005** | Contrato de *ownership* de conversa do lado do **Scheduler** | ADR-003, Decisão 3 | Hoje a precedência é aplicada só pelo LM (ele se cala). Fechar o ciclo no Scheduler. |
-| **ADR-006** | Identidade unificada de contato **cross-canal** (mesma pessoa em WhatsApp/IG/…) | ADR-003, Decisão 5 | Adiar até existir o 2º canal. Deduplicação de pessoa. |
-| **ADR-007** | Auditoria de *impersonation* do `PLATFORM_ADMIN` + retenção de logs | ADR-004, Decisão 4 | Formalizar trilha de auditoria antes de ampliar o uso de impersonation. |
+| **ADR-006** | Contrato de *ownership* de conversa do lado do **Scheduler** | ADR-003, Decisão 3 | Hoje a precedência é aplicada só pelo LM (ele se cala). Fechar o ciclo no Scheduler. |
+| **ADR-007** | Identidade unificada de contato **cross-canal** (mesma pessoa em WhatsApp/IG/…) | ADR-003, Decisão 5 | Adiar até existir o 2º canal. Deduplicação de pessoa. |
+| **ADR-008** | Auditoria de *impersonation* do `PLATFORM_ADMIN` + retenção de logs | ADR-004, Decisão 4 | Formalizar trilha de auditoria antes de ampliar o uso de impersonation. |
+
+> **ADR-005** (autenticação + identidade Scheduler↔LM) já foi escrito e aprovado
+> (`docs/adr/ADR-005-autenticacao-identidade.md`) — não confundir com a numeração
+> antiga, em que ADR-005 era ownership.
 
 > Decisões pendentes de revisão com gatilho/prazo: ver `docs/decisoes-pendentes.md`
 > (DP-001 `platform_reader` BYPASSRLS, DP-002 notificações ao TENANT_ADMIN).

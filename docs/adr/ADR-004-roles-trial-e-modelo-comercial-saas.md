@@ -74,6 +74,12 @@ curto. Backend (Express) e app (Next.js) compartilham `JWT_SECRET`. A
 **Justificativa:** mudanças de papel/suspensão valem na hora; o token não incha
 com franquias; mantém um só IdP.
 
+> **Emenda (ver ADR-005):** a premissa "NextAuth como IdP" está **incorreta** —
+> o Scheduler usa autenticação própria (`senha_hash` + `app.sessao`), não
+> NextAuth. O IdP de fato é o Scheduler, e a identidade entra no LM via **troca
+> de token** (ADR-005). A resolução de papel no servidor (esta decisão)
+> permanece válida; muda apenas a origem da identidade.
+
 ### 1b. Usuário com papéis diferentes por tenant
 **✅ Decisão: sim.** Modelado por `tenant_members(user_id, tenant_id, role)`
 (um papel por par). Um diretor regional é `VISUALIZADOR` em várias unidades; um
@@ -325,7 +331,7 @@ adaptador fino — exatamente o que "migrar sem reescrever" exige.
 - Gating de assinatura precisa entrar no **caminho quente** do webhook (ADR-003).
 
 **Backlog / próximos ADRs**
-- **ADR-007**: contrato de **auditoria de impersonation** e retenção de logs.
+- **ADR-008**: contrato de **auditoria de impersonation** e retenção de logs.
 - E-stories: `tenant_members` + RBAC middleware; SubscriptionService + máquina de
   estado; cron de expiração + notificações; painel comercial `/admin`; gating de
   feature no webhook; migração de papéis legados.
