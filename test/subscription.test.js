@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 
 require('../src/server'); // carrega módulos/env
 const { pool, withTenant } = require('../src/db');
+const redisClient = require('../src/redisClient');
 const svc = require('../src/subscriptionService');
 
 const TENANT = crypto.randomUUID();
@@ -18,6 +19,7 @@ before(async () => {
 
 after(async () => {
   await withTenant(TENANT, (c) => c.query('DELETE FROM tenants WHERE id = $1', [TENANT]));
+  await redisClient.redis.quit().catch(() => {});
   await pool.end();
 });
 

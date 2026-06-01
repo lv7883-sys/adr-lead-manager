@@ -21,6 +21,11 @@ async function getDefaultTrialDays() {
   return rows[0]?.default_trial_days ?? 7;
 }
 
+async function getGraceDays() {
+  const { rows } = await pool.query('SELECT grace_days FROM platform_settings LIMIT 1');
+  return rows[0]?.grace_days ?? 3;
+}
+
 async function getSubscription({ tenantId, feature }) {
   return withTenant(tenantId, (c) =>
     c.query('SELECT * FROM tenant_subscriptions WHERE tenant_id = $1 AND feature = $2', [
@@ -213,6 +218,15 @@ async function cancel({ tenantId, feature, source = 'MANUAL', actor, idempotency
   });
 }
 
+// TRIALING -> GRACE (cron E9-03): trial vencido entra no período de carência.
+async function enterGrace({ tenantId, feature, graceDays, source = 'SYSTEM', actor = 'system', idempotencyKey }) {
+  const days = graceDays ?? (await getGraceDays());
+  return applyTransition({
+    tenantId, feature, type: 'GRACE_STARTED', toStatus: 'GRACE', source, actor, idempotencyKey,
+    fields: { grace_until: addDays(days) },
+  });
+}
+
 // Tipicamente disparado pelo cron de expiração (E9-03) -> source SYSTEM.
 async function expire({ tenantId, feature, source = 'SYSTEM', actor = 'system', idempotencyKey }) {
   return applyTransition({
@@ -226,7 +240,9 @@ module.exports = {
   suspend,
   reactivate,
   cancel,
+  enterGrace,
   expire,
   getSubscription,
   getDefaultTrialDays,
+  getGraceDays,
 };

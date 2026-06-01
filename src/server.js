@@ -52,6 +52,19 @@ if (require.main === module) {
     logger.info('server.started', { port: Number(PORT) });
   });
 
+  // E9-03: cron diário de expiração de trial — 06:00 America/Sao_Paulo.
+  const cron = require('node-cron');
+  const { runTrialExpiry } = require('./jobs/trialExpiry');
+  cron.schedule(
+    '0 6 * * *',
+    () => {
+      runTrialExpiry()
+        .then((s) => logger.info('cron.trial_expiry.done', s))
+        .catch((e) => logger.error('cron.trial_expiry.error', { error: e.message }));
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+
   // Encerramento gracioso para deploys/rolling restarts.
   const shutdown = (signal) => {
     logger.info('server.shutdown', { signal });
