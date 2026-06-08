@@ -53,6 +53,9 @@ router.get(
                        FROM messages m
                        JOIN conversations cv ON cv.id = m.conversation_id
                       WHERE cv.external_id = l.phone) AS last_contact_at,
+                    (SELECT cv.channel FROM conversations cv
+                      WHERE cv.external_id = l.phone
+                      ORDER BY cv.updated_at DESC LIMIT 1) AS channel,
                     EXISTS (SELECT 1 FROM pending_approvals pa
                              WHERE pa.lead_id = l.id AND pa.status = 'PENDING') AS pending_approval
                FROM leads l
@@ -99,7 +102,10 @@ router.get(
                     l.created_at, l.updated_at,
                     q.name AS qual_name, q.instrument, q.availability,
                     COALESCE(q.qualification_complete, false) AS qualification_complete,
-                    q.reasked
+                    q.reasked,
+                    (SELECT cv.channel FROM conversations cv
+                      WHERE cv.external_id = l.phone
+                      ORDER BY cv.updated_at DESC LIMIT 1) AS channel
                FROM leads l
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
               WHERE l.id = $1`,
@@ -153,6 +159,7 @@ router.get(
           phone: l.phone,
           status: l.status,
           intent: l.intent,
+          channel: l.channel,
           instrument: l.instrument,
           availability: l.availability,
           qualification_complete: l.qualification_complete,
