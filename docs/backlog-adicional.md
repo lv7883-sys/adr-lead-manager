@@ -10,7 +10,7 @@
 | ID (proposto) | Story | Origem (ADR-003) | Prioridade | Notas |
 |---|---|---|---|---|
 | **E8-01** | Tabela `known_contacts` por tenant (RLS) + CRUD admin | Decisão 2 (A+C) | Alta | Portão 0 do funil; bloqueia o risco crítico de falso positivo. Schema esboçado no ADR §4. |
-| **E8-02** | Job de sync periódico da extranet/CRM → alunos matriculados em `known_contacts` | Decisão 2 (A) | Alta | Mitiga staleness; definir frequência e fonte. Depende de E8-01. |
+| **E8-02** | Job de sync periódico da extranet/CRM → alunos matriculados em `known_contacts` | Decisão 2 (A) | Alta | **Concreto:** job periódico (ex.: diário) que busca alunos ativos na **extranet da Academia do Rock via Playwright** (reusar o scraper do Scheduler — `lib/agenda.js`/extranet) e popula `known_contacts` com `type='STUDENT'`, `source='EXTRANET_SYNC'` (a coluna `type` ∈ STAFF/STUDENT/SUPPLIER/OTHER já prevê isso). **Ativa o Portão 0 do funil com dados reais** — alunos atuais deixam de ser tratados como leads. Mitiga staleness; definir frequência. Depende de E8-01. Dependência externa: credenciais/sessão da extranet. |
 | **E8-03** | Classificador leve (Gemini Flash) com prompt de triagem curto + saída estruturada `{label, confidence, reason}` | Decisão 1 (cascata B→A) | Alta | Portão 1. Threshold inicial conservador (alto). |
 | **E8-04** | Métricas de precisão/recall do classificador + instrumentação de decisão | Decisão 1 e 4 | Alta | Pré-requisito para graduar segmentos do modo observação → automático. |
 | **E8-05** | Fila de aprovação + console da recepcionista (aprovar/editar antes do 1º envio) | Decisão 4 (A) | Alta | Habilita o **go-live em modo observação total**. |
@@ -35,7 +35,7 @@
 | ID (proposto) | Tema | Origem | Notas |
 |---|---|---|---|
 | **ADR-006** | Contrato de *ownership* de conversa do lado do **Scheduler** | ADR-003, Decisão 3 | Hoje a precedência é aplicada só pelo LM (ele se cala). Fechar o ciclo no Scheduler. |
-| **ADR-007** | Identidade unificada de contato **cross-canal** (mesma pessoa em WhatsApp/IG/…) | ADR-003, Decisão 5 | Adiar até existir o 2º canal. Deduplicação de pessoa. |
+| **ADR-007** | **Multicanal (Instagram, Facebook, Google)** — webhook por canal, identidade não-telefônica `(canal, id externo)`, adaptador de envio por canal | ADR-003, Decisão 5 | ✍️ **Escrito como placeholder PENDENTE** em `docs/adr/ADR-007-multicanal.md`. **Absorve** a antiga reserva "identidade unificada cross-canal" (dedup de pessoa vira §2.4 do ADR-007). |
 | **ADR-008** | Auditoria de *impersonation* do `PLATFORM_ADMIN` + retenção de logs | ADR-004, Decisão 4 | Formalizar trilha de auditoria antes de ampliar o uso de impersonation. |
 
 > **ADR-005** (autenticação + identidade Scheduler↔LM) já foi escrito e aprovado
