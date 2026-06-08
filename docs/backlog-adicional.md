@@ -37,6 +37,26 @@
 | **E10-01** | **Origem do lead (source tracking)**: campo de origem específica — `whatsapp_organic`, `whatsapp_ad`, `instagram`, `facebook`, `landing_page` — com **badge de origem no card** do lead (tela da recepção) e **filtro por origem** na listagem | E3 (console) · ADR-007 (multicanal) · ADR-003 Decisão 4 | Média | Hoje `conversations.channel` é só `'whatsapp'`. Modelar a origem no lead (coluna `source`, ou derivar de `channel` + sinais de entrada). **Distinguir orgânico × anúncio depende de proveniência** (deep links `wa.me`/UTM — **E8-06**, dependência de Marketing). UI: reusar `.badge` no card e o mesmo padrão do **filtro por status** já existente no E3 (`recep-leads.js`). Origens não-WhatsApp dependem do **ADR-007** (webhook por canal). |
 | **E10-02** | **Modo automático por tipo de ação (implementa ADR-006)**: toggle por tenant **MANUAL → SEMI → AUTO** por tipo de ação, configurável pela recepção/gestor no dashboard | **ADR-006** (centro de controle de automação) | Média | Tabela `tenant_automation_settings(tenant_id, action, level)` (RLS) ou JSONB; endpoint self-service `/tenant/:id/automacao` (`TENANT_ADMIN`, namespace do **E9-06**). **Default permanente `SEMI`** (aprovação manual) — nada de envio automático ao cliente até o tenant **ativar `AUTO` explicitamente** e a recepção estar onboarded (guardrail). `AUTO` exige: caminho de **envio real** (ainda não implementado), **ownership** (E8-07) e **gating** de assinatura (E9-05). Auditar mudanças de nível e todo envio `AUTO`. |
 
+## Épico E11 — Importação automática de leads históricos (Fase 2)
+
+> Origem: tela de **Reativação** do E3 (`/f/:slug/leads/historico`). A separação
+> ativo × histórico e o seletor de período já existem; falta a **aquisição** dos
+> contatos. **Prioridade: Fase 2** (depois do go-live do console em modo
+> observação). Bloqueios de infra conhecidos — registrados nas notas. Toda
+> importação cria leads `status='COLD'` + `origin=HISTORICAL_*`, **cruzando com
+> `known_contacts` para ignorar quem já é aluno ativo** (Portão 0).
+
+| ID (proposto) | Story | Origem | Prioridade | Notas |
+|---|---|---|---|---|
+| **E11-01** | Importar **histórico do WhatsApp** (instância Evolution do tenant) → leads `COLD` `origin=HISTORICAL_WHATSAPP` | E3/Reativação | **Fase 2** | **Bloqueio:** o LM não acessa a Evolution (sem URL/instância/credenciais — isso vive no Scheduler) e `lib/evolution.js` não tem wrapper de histórico (`findChats`/`findMessages`); a Evolution só retém o que recebeu conectada. Precisa: wrapper de histórico + credenciais por tenant + dedup contra `known_contacts`. |
+| **E11-02** | Importar **ex-alunos da Extranet** (cancelados) → leads `COLD` `origin=EX_ALUNO` | E3/Reativação · relaciona [[E8-02]] | **Fase 2** | **Bloqueio:** não há Playwright; o cliente da Extranet (HTTP, no Scheduler) raspa **grade de aulas**, não ex-alunos. Precisa: novo scraper de ex-alunos/cancelados + credenciais + dedup contra `known_contacts`. Complementa o E8-02 (sync de alunos ATIVOS → `known_contacts`). |
+| **E11-03** | Importar **planilha .xlsx** (upload) → leads `COLD` `origin=PLANILHA` | E3/Reativação | **Fase 2** | **Bloqueio:** sem SheetJS na stack e sem middleware de upload (multer); `leads` não tem coluna `origin` e é do `postgres` (sem ALTER) → usar **tabela lateral** `lead_origin(lead_id, origin)` ou migration via superuser. Alternativa sem deps: importação por **CSV colado**. |
+
+> **Infra a destravar para o E11:** acesso do LM à Evolution (ou orquestrar a
+> importação pelo Scheduler, que já tem as credenciais, criando os leads via API
+> do LM); scraper de ex-alunos na Extranet; deps `xlsx`/`multer`; coluna/tabela
+> de origem do lead. Nenhum desses existe hoje — por isso é Fase 2.
+
 ## ADRs futuros (decisões adiadas explicitamente)
 
 | ID (proposto) | Tema | Origem | Notas |
