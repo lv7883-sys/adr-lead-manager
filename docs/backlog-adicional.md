@@ -30,6 +30,13 @@
 | **E9-05** | Gating de assinatura no **caminho quente** do webhook (LM só processa se a feature `LEAD_MANAGER` estiver `TRIALING`/`ACTIVE`/`GRACE`) | Decisões 2 e 4 | Alta | Conecta com ADR-003; `lead_manager_active` passa a derivar do status da assinatura. |
 | **E9-06** | Separar namespaces `/admin/*` (plataforma) vs `/tenant/:id/*` (self-service) e ampliar `PATCH …/lead-config` (E7-01) para `TENANT_ADMIN` do próprio tenant | Decisão 4 | Média | Impersonation do `PLATFORM_ADMIN` segue válida; autorização escopada por membership. |
 
+## Stories de implementação — E3 (console de leads) / ADR-006 / ADR-007
+
+| ID (proposto) | Story | Origem | Prioridade | Notas |
+|---|---|---|---|---|
+| **E10-01** | **Origem do lead (source tracking)**: campo de origem específica — `whatsapp_organic`, `whatsapp_ad`, `instagram`, `facebook`, `landing_page` — com **badge de origem no card** do lead (tela da recepção) e **filtro por origem** na listagem | E3 (console) · ADR-007 (multicanal) · ADR-003 Decisão 4 | Média | Hoje `conversations.channel` é só `'whatsapp'`. Modelar a origem no lead (coluna `source`, ou derivar de `channel` + sinais de entrada). **Distinguir orgânico × anúncio depende de proveniência** (deep links `wa.me`/UTM — **E8-06**, dependência de Marketing). UI: reusar `.badge` no card e o mesmo padrão do **filtro por status** já existente no E3 (`recep-leads.js`). Origens não-WhatsApp dependem do **ADR-007** (webhook por canal). |
+| **E10-02** | **Modo automático por tipo de ação (implementa ADR-006)**: toggle por tenant **MANUAL → SEMI → AUTO** por tipo de ação, configurável pela recepção/gestor no dashboard | **ADR-006** (centro de controle de automação) | Média | Tabela `tenant_automation_settings(tenant_id, action, level)` (RLS) ou JSONB; endpoint self-service `/tenant/:id/automacao` (`TENANT_ADMIN`, namespace do **E9-06**). **Default permanente `SEMI`** (aprovação manual) — nada de envio automático ao cliente até o tenant **ativar `AUTO` explicitamente** e a recepção estar onboarded (guardrail). `AUTO` exige: caminho de **envio real** (ainda não implementado), **ownership** (E8-07) e **gating** de assinatura (E9-05). Auditar mudanças de nível e todo envio `AUTO`. |
+
 ## ADRs futuros (decisões adiadas explicitamente)
 
 | ID (proposto) | Tema | Origem | Notas |
