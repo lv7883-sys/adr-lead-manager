@@ -78,6 +78,44 @@ function requireTenantRole(allowedRoles) {
 }
 
 /**
+ * Autorização para endpoints consumidos tanto por humanos quanto por serviços
+ * internos (ex.: o Scheduler, que lista/aprova leads).
+ *
+ * Deve rodar APÓS `authenticate`.
+ *  - token de serviço (claim role/roles inclui 'service', assinado com o
+ *    JWT_SECRET — confiança de backend interno): acessa qualquer tenant,
+ *    apenas valida o formato do tenantId. req.tenantRole = 'SERVICE'.
+ *  - demais usuários: delega ao requireTenantRole(allowedRoles) (papel por
+ *    tenant resolvido no banco, sob RLS — comportamento inalterado).
+ */
+function requireTenantAccess(allowedRoles) {
+  const humanGuard = requireTenantRole(allowedRoles);
+  return (req, res, next) => {
+    const claims = req.user || {};
+    const roles = Array.isArray(claims.roles)
+      ? claims.roles
+      : claims.role
+        ? [claims.role]
+        : [];
+    if (roles.includes('service')) {
+      const tenantId = req.params.tenantId;
+      if (!isUuid(tenantId)) return res.status(400).json({ error: 'invalid tenantId' });
+      req.tenantId = tenantId;
+      req.tenantRole = 'SERVICE';
+      req.impersonation = false;
+      req.service = claims.service ?? true;
+      logger.info('rbac.service_access', {
+        tenant_id: tenantId,
+        service: claims.service ?? null,
+        action: `${req.method} ${req.originalUrl}`,
+      });
+      return next();
+    }
+    return humanGuard(req, res, next);
+  };
+}
+
+/**
  * Exige PLATFORM_ADMIN (flag is_platform_admin no banco — ADR-004/005).
  * Deve rodar APÓS `authenticate`. Não depende de claim de role no token.
  */
@@ -101,4 +139,4 @@ function requirePlatformAdmin() {
   };
 }
 
-module.exports = { requireTenantRole, requirePlatformAdmin };
+module.exports = { requireTenantRole, requireTenantAccess, requirePlatformAdmin };
