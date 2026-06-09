@@ -72,6 +72,18 @@ if (require.main === module) {
     { timezone: 'America/Sao_Paulo' }
   );
 
+  // LGPD (item 4): retenção automática — 1º dia do mês, 03:00 America/Sao_Paulo.
+  const { runDataRetention } = require('./jobs/dataRetention');
+  cron.schedule(
+    '0 3 1 * *',
+    () => {
+      runDataRetention()
+        .then((s) => logger.info('cron.data_retention.done', s))
+        .catch((e) => logger.error('cron.data_retention.error', { error: e.message }));
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+
   // Encerramento gracioso para deploys/rolling restarts.
   const shutdown = (signal) => {
     logger.info('server.shutdown', { signal });

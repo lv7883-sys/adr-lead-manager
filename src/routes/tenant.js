@@ -3,9 +3,9 @@
 // Namespace self-service da unidade (ADR-004, Decisão 4): /tenant/:tenantId/*.
 // Distinto de /admin/* (plataforma). Autorização por (tenant, role).
 
-const crypto = require('crypto');
 const express = require('express');
 const { withTenant } = require('../db');
+const { anonymizeLead } = require('../anonymize');
 const { authenticate } = require('../auth');
 const { requireTenantRole, requireTenantAccess } = require('../rbac');
 const { patchLeadConfig } = require('../leadConfig');
@@ -301,33 +301,11 @@ router.post(
       const result = await withTenant(req.tenantId, async (c) => {
         const lead = (await c.query('SELECT id, phone FROM leads WHERE id = $1', [id])).rows[0];
         if (!lead) return { notFound: true };
-        const anonPhone = 'anonimizado_' +
-          crypto.createHash('sha256').update(String(lead.phone || id)).digest('hex').slice(0, 16);
-
-        // Conteúdo das mensagens da conversa do lead -> removido (body/sender/raw).
-        if (lead.phone) {
-          await c.query(
-            `UPDATE messages SET body = '[removido]', sender = NULL, raw = NULL
-              WHERE conversation_id IN (SELECT id FROM conversations WHERE external_id = $1)`,
-            [lead.phone]
-          );
-          // O external_id da conversa continha o telefone -> anonimiza também.
-          await c.query('UPDATE conversations SET external_id = $2 WHERE external_id = $1', [lead.phone, anonPhone]);
-        }
-        // Nome extraído na qualificação é PII -> remove (mantém instrumento/disponibilidade/completude).
-        await c.query('UPDATE lead_qualifications SET name = NULL WHERE lead_id = $1', [id]);
-        // Anonimiza o lead. MANTÉM status, datas e intent (métricas).
-        await c.query(
-          "UPDATE leads SET name = 'Anonimizado', phone = $2, email = NULL, updated_at = now() WHERE id = $1",
-          [id, anonPhone]
-        );
-        // Trilha de auditoria (sem PII).
-        await c.query(
-          `INSERT INTO audit_log (tenant_id, actor, action, target_type, target_id, details)
-           VALUES ($1, $2, 'lead.forget', 'lead', $3, $4)`,
-          [req.tenantId, req.user?.sub ?? null, id,
-           JSON.stringify({ role: req.tenantRole, impersonation: !!req.impersonation })]
-        );
+        await anonymizeLead(c, {
+          tenantId: req.tenantId, leadId: id, phone: lead.phone,
+          actor: req.user?.sub ?? null, action: 'lead.forget',
+          details: { role: req.tenantRole, impersonation: !!req.impersonation },
+        });
         return { ok: true };
       });
       if (result.notFound) return res.status(404).json({ error: 'lead not found' });
