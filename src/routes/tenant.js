@@ -263,6 +263,29 @@ router.post(
   }
 );
 
+// POST /tenant/:tid/leads/:id/optout — LGPD: marca OPTED_OUT (lead não recebe
+// mais nenhuma mensagem). Chamado pelo Scheduler após validar o token do link.
+router.post(
+  '/:tenantId/leads/:id/optout',
+  authenticate,
+  requireTenantAccess(WRITE_ROLES),
+  async (req, res) => {
+    const { id } = req.params;
+    if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+    try {
+      const r = await withTenant(req.tenantId, (c) =>
+        c.query("UPDATE leads SET status = 'OPTED_OUT', updated_at = now() WHERE id = $1 RETURNING id", [id])
+      );
+      if (r.rowCount === 0) return res.status(404).json({ error: 'lead not found' });
+      logger.info('tenant.lead.opted_out', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
+      res.json({ ok: true });
+    } catch (err) {
+      logger.error('tenant.lead.optout_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+      res.status(500).json({ error: 'internal error' });
+    }
+  }
+);
+
 // Gerenciar membros da unidade — somente TENANT_ADMIN.
 router.get(
   '/:tenantId/members',

@@ -8,8 +8,18 @@ const gemini = require('./gemini');
 const notifyModule = require('./notify');
 const redisClient = require('./redisClient');
 const gating = require('./gating');
+const { makeOptoutToken } = require('./optoutToken');
 
 const CONFIDENCE_THRESHOLD = 0.7;
+
+// LGPD (item 2) — rodapé discreto de opt-out, SÓ na 1ª mensagem (lead NEW).
+// Sem mencionar IA/assistente/tecnologia; link único por lead (token HMAC).
+const OPTOUT_BASE = process.env.OPTOUT_BASE_URL || 'https://agenda.leovecchi.com';
+const CONSENT_VERSION = 'optout-footer-v1';
+function optoutFooter(tenantId, leadId) {
+  const token = makeOptoutToken(tenantId, leadId);
+  return `Não quer receber mensagens? Clique aqui: ${OPTOUT_BASE}/optout/${token}`;
+}
 
 const QUAL_FIELDS = ['name', 'instrument', 'availability'];
 const FIELD_LABELS = {
@@ -112,6 +122,15 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   );
   if (known.rowCount > 0) {
     log.info('gate0.ignored', { gate: 0, contact_type: known.rows[0].type });
+    return;
+  }
+
+  // ---- LGPD: lead que pediu opt-out NUNCA mais é processado/respondido ----
+  const optedOut = await withTenant(tenantId, (c) =>
+    c.query("SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2 AND status = 'OPTED_OUT'", [tenantId, phone])
+  );
+  if (optedOut.rowCount > 0) {
+    log.info('gate0.opted_out', { gate: 0 });
     return;
   }
 
@@ -246,6 +265,12 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     log2.warn('gate2.intent_error', { gate: 2, error: err.message });
   }
 
+  // LGPD — rodapé de opt-out só na PRIMEIRA mensagem (lead recém-criado: NEW).
+  const primeiraMensagem = ctx.leadStatus === 'NEW';
+  if (primeiraMensagem) {
+    reply = `${reply}\n\n${optoutFooter(tenantId, ctx.leadId)}`;
+  }
+
   // tx2: persiste USER + ASSISTANT, promove o lead e cria a aprovação pendente.
   const result = await withTenant(tenantId, async (c) => {
     await c.query(
@@ -305,6 +330,16 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
           [ctx.leadId]
         );
       }
+    }
+
+    // LGPD — consentimento implícito: registra no 1º contato (rodapé de
+    // opt-out apresentado). Não clicar no opt-out configura o consentimento.
+    if (primeiraMensagem) {
+      await c.query(
+        `INSERT INTO consent_records (tenant_id, lead_id, channel, text_version)
+         VALUES ($1, $2, 'whatsapp', $3)`,
+        [tenantId, ctx.leadId, CONSENT_VERSION]
+      );
     }
 
     // MODO OBSERVAÇÃO: não envia; cria aprovação pendente.
