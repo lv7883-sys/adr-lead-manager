@@ -7,11 +7,18 @@ const logger = require('./logger');
 const webhookRouter = require('./routes/webhook');
 const adminRouter = require('./routes/admin');
 const tenantRouter = require('./routes/tenant');
+const cors = require('cors');
 
 const PORT = process.env.PORT || 3002;
 
 const app = express();
 app.disable('x-powered-by');
+// CORS — whitelist de origens de navegador (item de segurança 1). Chamadas
+// server-to-server (ex.: Scheduler -> LM) não enviam Origin e não são afetadas.
+app.use(cors({
+  origin: ['https://agenda.leovecchi.com', 'https://leads-api.leovecchi.com'],
+  methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+}));
 app.use(express.json({ limit: '1mb' }));
 
 const startedAt = Date.now();
