@@ -8,10 +8,12 @@ const webhookRouter = require('./routes/webhook');
 const adminRouter = require('./routes/admin');
 const tenantRouter = require('./routes/tenant');
 const cors = require('cors');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 
 const PORT = process.env.PORT || 3002;
 
 const app = express();
+app.set('trust proxy', 1);   // atrás do Traefik — req.ip = IP real do cliente (rate limit)
 app.disable('x-powered-by');
 // CORS — whitelist de origens de navegador (item de segurança 1). Chamadas
 // server-to-server (ex.: Scheduler -> LM) não enviam Origin e não são afetadas.
@@ -43,14 +45,36 @@ app.get('/health/ready', async (_req, res) => {
   }
 });
 
+// ---- Rate limiting (item de segurança 5). Janela de 1 min; limites por env ----
+const RL_WINDOW_MS = 60_000;
+function rl429(req, res) {
+  const reset = req.rateLimit && req.rateLimit.resetTime
+    ? new Date(req.rateLimit.resetTime).getTime() : Date.now() + RL_WINDOW_MS;
+  res.status(429).json({ error: 'rate_limit_exceeded', retry_after: Math.max(1, Math.ceil((reset - Date.now()) / 1000)) });
+}
+// Chave por tenant extraído da URL; fallback para o IP (normalizado p/ IPv6).
+function tenantUrlKey(re) {
+  return (req) => {
+    const m = (req.originalUrl || '').match(re);
+    return (m && m[1]) ? `t:${m[1].toLowerCase()}` : ipKeyGenerator(req.ip);
+  };
+}
+const mkLimiter = (limit, keyGenerator) => rateLimit({
+  windowMs: RL_WINDOW_MS, limit, standardHeaders: true, legacyHeaders: false, keyGenerator, handler: rl429,
+});
+// /webhook/* e /tenant/*: por tenant (id na URL). /admin/*: por IP.
+const webhookLimiter = mkLimiter(Number(process.env.RL_WEBHOOK || 100), tenantUrlKey(/\/webhook\/[^/]+\/([0-9a-f-]{36})/i));
+const tenantLimiter  = mkLimiter(Number(process.env.RL_TENANT  || 500), tenantUrlKey(/\/tenant\/([0-9a-f-]{36})/i));
+const adminLimiter   = mkLimiter(Number(process.env.RL_ADMIN   || 200), (req) => ipKeyGenerator(req.ip));
+
 // Webhooks de provedores externos (Z-API / Evolution API).
-app.use('/webhook', webhookRouter);
+app.use('/webhook', webhookLimiter, webhookRouter);
 
 // API administrativa (protegida por JWT + role PLATFORM_ADMIN).
-app.use('/admin', adminRouter);
+app.use('/admin', adminLimiter, adminRouter);
 
 // Self-service da unidade (protegido por JWT + requireTenantRole).
-app.use('/tenant', tenantRouter);
+app.use('/tenant', tenantLimiter, tenantRouter);
 
 // Só sobe o listener quando executado diretamente (não nos testes que
 // importam o app).
