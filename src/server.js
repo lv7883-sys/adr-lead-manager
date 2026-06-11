@@ -67,6 +67,10 @@ const webhookLimiter = mkLimiter(Number(process.env.RL_WEBHOOK || 100), tenantUr
 const tenantLimiter  = mkLimiter(Number(process.env.RL_TENANT  || 500), tenantUrlKey(/\/tenant\/([0-9a-f-]{36})/i));
 const adminLimiter   = mkLimiter(Number(process.env.RL_ADMIN   || 200), (req) => ipKeyGenerator(req.ip));
 
+// Webhook da Meta (Lead Ads / IG DM / Messenger) — fora do limiter keyed-por-tenant
+// (a URL /webhook/meta não tem tenant na path). Verificação + log por enquanto.
+app.use('/webhook', require('./routes/webhook-meta'));
+
 // Webhooks de provedores externos (Z-API / Evolution API).
 app.use('/webhook', webhookLimiter, webhookRouter);
 
