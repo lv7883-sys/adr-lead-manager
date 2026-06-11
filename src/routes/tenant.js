@@ -11,6 +11,8 @@ const { requireTenantRole, requireTenantAccess } = require('../rbac');
 const { patchLeadConfig } = require('../leadConfig');
 const { isUuid } = require('../validation');
 const logger = require('../logger');
+const evolution = require('../evolution');   // E4: envio direto via Evolution
+const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 
 const router = express.Router();
 
@@ -217,6 +219,32 @@ async function decidePending(tenantId, leadId, { status, response }) {
   });
 }
 
+// E4 — Envio HUMAN-IN-THE-LOOP da resposta aprovada ao lead, via Evolution, com a
+// credencial DO TENANT. Chamado SÓ no approve (nunca no reject, nunca automático) —
+// respeita o guardrail de não-auto-envio: quem decide enviar é a recepcionista.
+// Best-effort: devolve { sent, reason?, messageId? } e o chamador trata erro sem
+// derrubar o approve (o status da aprovação já está gravado nesse ponto).
+async function enviarRespostaAprovada(tenantId, leadId, texto) {
+  if (!texto || !texto.trim()) return { sent: false, reason: 'empty_text' };
+  // Telefone do lead + credencial Evolution do tenant, na mesma transação (RLS).
+  const dados = await withTenant(tenantId, async (c) => {
+    const lead = (await c.query('SELECT phone FROM leads WHERE id = $1', [leadId])).rows[0];
+    const tnt = (await c.query(
+      'SELECT evolution_instance, evolution_token_enc FROM tenants WHERE id = $1', [tenantId]
+    )).rows[0];
+    return { phone: lead && lead.phone, tnt: tnt || {} };
+  });
+  if (!dados.phone) return { sent: false, reason: 'no_phone' };
+  const instance = dados.tnt.evolution_instance;
+  const apikey = decrypt(dados.tnt.evolution_token_enc);
+  if (!instance || !apikey) return { sent: false, reason: 'tenant_sem_evolution' };
+  // Só envia se a instância estiver conectada (evita gastar a chamada à toa).
+  const st = await evolution.status({ instance, apikey });
+  if (st.state !== 'open') return { sent: false, reason: 'instancia=' + st.state };
+  const res = await evolution.sendText({ instance, apikey }, dados.phone, texto);
+  return { sent: true, messageId: evolution.pickMessageId(res) };
+}
+
 // POST /tenant/:tid/leads/:id/approve  — body opcional { response }
 router.post(
   '/:tenantId/leads/:id/approve',
@@ -229,12 +257,21 @@ router.post(
     try {
       const r = await decidePending(req.tenantId, id, { status: 'APPROVED', response });
       if (r.notFound) return res.status(404).json({ error: 'no pending approval' });
+      // E4 — após gravar o status, envia a resposta aprovada ao lead. Best-effort:
+      // falha de envio NÃO derruba o approve (a aprovação já está persistida).
+      let envio = { sent: false, reason: 'not_attempted' };
+      try {
+        envio = await enviarRespostaAprovada(req.tenantId, id, r.approval.suggested_response);
+      } catch (sendErr) {
+        envio = { sent: false, reason: 'error', error: sendErr.message };
+        logger.error('tenant.lead.send_error', { tenant_id: req.tenantId, lead_id: id, error: sendErr.message });
+      }
       logger.info('tenant.lead.approved', {
         tenant_id: req.tenantId, lead_id: id,
         approval_id: r.approval.id, status: r.approval.status,
-        by: req.tenantRole,
+        by: req.tenantRole, sent: envio.sent, send_reason: envio.reason,
       });
-      res.json({ ok: true, approval: r.approval });
+      res.json({ ok: true, approval: r.approval, sent: envio.sent, send_reason: envio.reason });
     } catch (err) {
       logger.error('tenant.lead.approve_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
       res.status(500).json({ error: 'internal error' });
