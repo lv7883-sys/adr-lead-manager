@@ -7,6 +7,9 @@
 
 const crypto = require('crypto');
 const express = require('express');
+const logger = require('../logger');
+const meta = require('../meta');
+const metaIngest = require('../metaIngest');
 
 const router = express.Router();
 
@@ -37,14 +40,27 @@ router.get('/meta', (req, res) => {
 
 // POST /webhook/meta — recebe os eventos (Lead Ads / IG DM / Messenger).
 // Responde 200 IMEDIATAMENTE (a Meta exige 200 rápido; senão reenvia e acaba
-// desabilitando a inscrição). Por enquanto só loga o payload — sem processar.
+// desabilitando a inscrição) e processa de forma assíncrona (fire-and-forget).
+// Segurança: valida a assinatura X-Hub-Signature-256 (HMAC do corpo bruto com o
+// META_APP_SECRET). Política:
+//   - assinatura inválida  -> descarta (não processa).
+//   - META_APP_SECRET ausente -> processa mesmo assim (fail-open durante o rollout),
+//     com aviso no log — DEFINA META_APP_SECRET p/ passar a exigir a assinatura.
 router.post('/meta', (req, res) => {
   res.sendStatus(200);
-  try {
-    console.log('[webhook/meta] payload:', JSON.stringify(req.body));
-  } catch (_e) {
-    console.log('[webhook/meta] payload (não serializável):', req.body);
+
+  const sig = meta.verifySignature(req.rawBody, req.get('x-hub-signature-256'));
+  if (sig === false) {
+    logger.warn('webhook.meta.bad_signature', {});
+    return;
   }
+  if (sig === null) {
+    logger.warn('webhook.meta.signature_unconfigured', {});
+  }
+
+  metaIngest.ingest(req.body).catch((err) =>
+    logger.error('webhook.meta.ingest_error', { error: err.message })
+  );
 });
 
 module.exports = router;

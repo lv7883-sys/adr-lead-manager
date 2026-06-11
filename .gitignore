@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+.meta-token
+.app-secret
+.user-token
 
 # Dependências
 node_modules/

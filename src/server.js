@@ -21,7 +21,12 @@ app.use(cors({
   origin: ['https://agenda.leovecchi.com', 'https://leads-api.leovecchi.com'],
   methods: ['GET', 'POST', 'PATCH', 'DELETE'],
 }));
-app.use(express.json({ limit: '1mb' }));
+// Guarda o corpo BRUTO em req.rawBody (necessário pra verificar a assinatura
+// X-Hub-Signature-256 dos webhooks da Meta, que é HMAC do payload original).
+app.use(express.json({
+  limit: '1mb',
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 
 const startedAt = Date.now();
 

@@ -99,8 +99,13 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   const redis = deps.redis || redisClient;
 
   const tenantId = tenant.id;
-  const phone = toE164(msg.externalId);
-  const log = logger.child({ tenant_id: tenantId, phone });
+  // E5 — canal e identidade. WhatsApp/leadgen são identificados por TELEFONE;
+  // DM da Meta (Messenger/IG) por PSID (sem telefone). Default = comportamento
+  // original do WhatsApp (channel 'whatsapp', sem psid).
+  const channel = msg.channel || 'whatsapp';
+  const psid = msg.psid || null;
+  const phone = psid ? null : toE164(msg.phone || msg.externalId);
+  const log = logger.child({ tenant_id: tenantId, channel, phone, psid });
 
   // -------- GATING DE ASSINATURA (E9-05): antes de qualquer custo --------
   // Só ACTIVE/TRIALING (válido) processam. GRACE/EXPIRED/SUSPENDED/ausente
@@ -135,17 +140,21 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   }
 
   // ---------------- PORTÃO 1: classificador leve -------------------
-  let cls;
-  try {
-    cls = await classify({ message: msg.body, tenantId });
-  } catch (err) {
-    log.error('gate1.error', { gate: 1, error: err.message });
-    return; // não trava: webhook já retornou 200
-  }
-  log.info('gate1.classified', { gate: 1, label: cls.label, confidence: cls.confidence });
-  if (cls.label !== 'LEAD' || cls.confidence < CONFIDENCE_THRESHOLD) {
-    log.info('gate1.ignored', { gate: 1, label: cls.label, confidence: cls.confidence });
-    return;
+  // skipTriage: um lead vindo de Lead Ads (leadgen) já É um lead por definição —
+  // pula o classificador (não há mensagem conversacional pra triar).
+  if (!msg.skipTriage) {
+    let cls;
+    try {
+      cls = await classify({ message: msg.body, tenantId });
+    } catch (err) {
+      log.error('gate1.error', { gate: 1, error: err.message });
+      return; // não trava: webhook já retornou 200
+    }
+    log.info('gate1.classified', { gate: 1, label: cls.label, confidence: cls.confidence });
+    if (cls.label !== 'LEAD' || cls.confidence < CONFIDENCE_THRESHOLD) {
+      log.info('gate1.ignored', { gate: 1, label: cls.label, confidence: cls.confidence });
+      return;
+    }
   }
 
   // ---------------- PORTÃO 2: fluxo completo -----------------------
@@ -159,22 +168,49 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       if (dup.rowCount > 0) return { duplicate: true };
     }
 
-    const lead = await c.query(
-      `INSERT INTO leads (tenant_id, name, phone, status)
-       VALUES ($1, $2, $3, 'NEW')
-       ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
-       DO UPDATE SET updated_at = now()
-       RETURNING id, status`,
-      [tenantId, msg.sender || phone, phone]
-    );
+    // Upsert do lead pela identidade do canal:
+    //  - leadgen (Lead Ads): dedup por meta_leadgen_id (mantém/atualiza nome+telefone).
+    //  - DM (Messenger/IG):  dedup por meta_psid (sem telefone).
+    //  - WhatsApp:           dedup por phone (comportamento original).
+    let lead;
+    if (msg.leadgenId) {
+      lead = await c.query(
+        `INSERT INTO leads (tenant_id, name, phone, status, meta_leadgen_id)
+         VALUES ($1, $2, $3, 'NEW', $4)
+         ON CONFLICT (tenant_id, meta_leadgen_id) WHERE meta_leadgen_id IS NOT NULL
+         DO UPDATE SET name = COALESCE(EXCLUDED.name, leads.name),
+                       phone = COALESCE(EXCLUDED.phone, leads.phone),
+                       updated_at = now()
+         RETURNING id, status`,
+        [tenantId, msg.sender || phone, phone, msg.leadgenId]
+      );
+    } else if (psid) {
+      lead = await c.query(
+        `INSERT INTO leads (tenant_id, name, status, meta_psid)
+         VALUES ($1, $2, 'NEW', $3)
+         ON CONFLICT (tenant_id, meta_psid) WHERE meta_psid IS NOT NULL
+         DO UPDATE SET name = COALESCE(EXCLUDED.name, leads.name), updated_at = now()
+         RETURNING id, status`,
+        [tenantId, msg.sender || psid, psid]
+      );
+    } else {
+      lead = await c.query(
+        `INSERT INTO leads (tenant_id, name, phone, status)
+         VALUES ($1, $2, $3, 'NEW')
+         ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
+         DO UPDATE SET updated_at = now()
+         RETURNING id, status`,
+        [tenantId, msg.sender || phone, phone]
+      );
+    }
 
     const conv = await c.query(
       `INSERT INTO conversations (tenant_id, channel, external_id)
-       VALUES ($1, 'whatsapp', $2)
+       VALUES ($1, $2, $3)
        ON CONFLICT (tenant_id, channel, external_id)
        DO UPDATE SET updated_at = now()
        RETURNING id`,
-      [tenantId, phone]
+      [tenantId, channel, phone || psid]
     );
 
     const cfg = (
@@ -337,8 +373,8 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     if (primeiraMensagem) {
       await c.query(
         `INSERT INTO consent_records (tenant_id, lead_id, channel, text_version)
-         VALUES ($1, $2, 'whatsapp', $3)`,
-        [tenantId, ctx.leadId, CONSENT_VERSION]
+         VALUES ($1, $2, $3, $4)`,
+        [tenantId, ctx.leadId, channel, CONSENT_VERSION]
       );
     }
 
