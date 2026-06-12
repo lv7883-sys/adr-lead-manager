@@ -121,16 +121,9 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     return;
   }
 
-  // ---------------- PORTÃO 0: contato conhecido (contexto, não exclusão) ----------------
-  // Antes, contato conhecido era DESCARTADO direto. Mas um aluno/contato atual pode
-  // querer um NOVO curso, ou perguntar por outra pessoa — então não dá pra excluir no
-  // determinístico. Aqui só descobrimos o tipo e passamos como CONTEXTO ao classificador
-  // (Portão 1), que decide LEAD vs NOT_LEAD avaliando a mensagem.
-  const known = await withTenant(tenantId, (c) =>
-    c.query('SELECT type FROM known_contacts WHERE tenant_id = $1 AND phone = $2', [tenantId, phone])
-  );
-  const knownContactType = known.rowCount > 0 ? known.rows[0].type : null;
-  if (knownContactType) log.info('gate0.known_contact', { gate: 0, contact_type: knownContactType });
+  // NB: NÃO há mais filtro por "contato conhecido". O critério de LEAD vs NOT_LEAD é o
+  // CONTEXTO DA MENSAGEM (avaliado pela IA no Portão 1) — não se o número já existe no
+  // banco. Um cliente atual pode querer um curso adicional ou perguntar por outra pessoa.
 
   // ---- LGPD: lead que pediu opt-out NUNCA mais é processado/respondido ----
   const optedOut = await withTenant(tenantId, (c) =>
@@ -147,7 +140,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   if (!msg.skipTriage) {
     let cls;
     try {
-      cls = await classify({ message: msg.body, tenantId, knownContactType });
+      cls = await classify({ message: msg.body, tenantId });
     } catch (err) {
       log.error('gate1.error', { gate: 1, error: err.message });
       return; // não trava: webhook já retornou 200

@@ -61,7 +61,10 @@ const failingDeps = () => ({
   redis: redisClient,
 });
 
-test('Portão 0: contato conhecido passa pela IA com contexto; NOT_LEAD não vira lead', async () => {
+test('contato conhecido NÃO é mais descartado: a IA decide pela mensagem', async () => {
+  // Um número já cadastrado em known_contacts não deve mais ser ignorado no determinístico.
+  // O critério é o CONTEÚDO da mensagem (cliente atual pode querer novo curso / perguntar
+  // por outra pessoa) — a IA classifica normalmente, sem atalho por existência no banco.
   const phone = '+5511900000001';
   await q(
     `INSERT INTO known_contacts (tenant_id, phone, type, source)
@@ -69,48 +72,24 @@ test('Portão 0: contato conhecido passa pela IA com contexto; NOT_LEAD não vir
     [TENANT_ID, phone]
   );
 
-  let recebido = null;
-  const deps = failingDeps();
-  deps.classify = async (args) => {
-    recebido = args;
-    return { label: 'NOT_LEAD', confidence: 0.9, reason: 'assunto interno' };
-  };
-
-  await engine.processInbound(
-    tenant,
-    { externalId: '5511900000001', externalMessageId: 'g0-1', sender: 'Gestor', body: 'oi equipe' },
-    {},
-    deps
-  );
-
-  assert.equal(recebido && recebido.knownContactType, 'STAFF', 'classify recebe o tipo do contato conhecido');
-  const leads = await q('SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2', [TENANT_ID, phone]);
-  assert.equal(leads.length, 0, 'NOT_LEAD de contato conhecido não cria lead');
-});
-
-test('Portão 0: contato conhecido com interesse em novo curso é classificado LEAD', async () => {
-  const phone = '+5511900000009';
-  await q(
-    `INSERT INTO known_contacts (tenant_id, phone, type, source)
-     VALUES ($1, $2, 'STAFF', 'MANUAL')`,
-    [TENANT_ID, phone]
-  );
+  let chamouClassify = false;
   const deps = {
-    classify: async () => ({ label: 'LEAD', confidence: 0.9, reason: 'novo curso' }),
-    generate: async () => 'Que bom! Vamos agendar sua aula de violino?',
+    classify: async () => { chamouClassify = true; return { label: 'LEAD', confidence: 0.9, reason: 'novo curso' }; },
+    generate: async () => 'Que bom! Vamos agendar sua aula?',
     notify: async () => ({ sent: false }),
     redis: redisClient,
   };
 
   await engine.processInbound(
     tenant,
-    { externalId: '5511900000009', externalMessageId: 'g0-2', sender: 'Aluna', body: 'quero fazer violino também' },
+    { externalId: '5511900000001', externalMessageId: 'g0-1', sender: 'Cliente', body: 'quero fazer violino também' },
     {},
     deps
   );
 
+  assert.ok(chamouClassify, 'classify deve ser chamado mesmo para número em known_contacts');
   const leads = await q('SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2', [TENANT_ID, phone]);
-  assert.equal(leads.length, 1, 'contato conhecido com novo interesse deve virar lead');
+  assert.equal(leads.length, 1, 'contato conhecido com interesse vira lead (sem atalho de exclusão)');
 });
 
 test('Portão 1: mensagem NOT_LEAD é ignorada (não gera resposta)', async () => {

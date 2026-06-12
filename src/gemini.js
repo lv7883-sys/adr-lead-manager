@@ -69,22 +69,13 @@ administrativos, fornecedor, parceiro, spam, mensagem irrelevante ou ambígua).
 Na dúvida, classifique como NOT_LEAD. Responda SOMENTE com JSON no formato:
 {"label":"LEAD"|"NOT_LEAD","confidence":<0.0-1.0>,"reason":"<curto>"}`;
 
-async function classify({ message, knownContactType }) {
-  // Contato já conhecido (aluno atual, equipe, etc.): não é exclusão automática — pode
-  // ser interesse em NOVO curso (pra si ou pra outra pessoa). Damos esse contexto pro
-  // modelo decidir, mantendo NOT_LEAD para assunto administrativo/conversa interna.
-  const ctx = knownContactType
-    ? `\n\nOBS IMPORTANTE: este número JÁ É um contato conhecido (tipo: ${knownContactType}). `
-      + `Classifique como LEAD apenas se a mensagem indicar interesse em um NOVO curso/aula `
-      + `(para a própria pessoa OU para outra pessoa). Se for assunto administrativo de aluno `
-      + `atual, conversa interna de equipe ou rotina, classifique NOT_LEAD.`
-    : '';
+async function classify({ message }) {
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0 },
     });
-    const res = await model.generateContent(`${TRIAGE_PROMPT}${ctx}\n\nMensagem: """${message ?? ''}"""`);
+    const res = await model.generateContent(`${TRIAGE_PROMPT}\n\nMensagem: """${message ?? ''}"""`);
     const parsed = JSON.parse(res.response.text());
     return {
       label: parsed.label === 'LEAD' ? 'LEAD' : 'NOT_LEAD',
