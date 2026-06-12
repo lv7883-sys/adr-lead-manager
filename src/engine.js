@@ -181,7 +181,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
          DO UPDATE SET name = COALESCE(EXCLUDED.name, leads.name),
                        phone = COALESCE(EXCLUDED.phone, leads.phone),
                        updated_at = now()
-         RETURNING id, status`,
+         RETURNING id, status, (xmax = 0) AS inserted`,
         [tenantId, msg.sender || phone, phone, msg.leadgenId]
       );
     } else if (psid) {
@@ -190,7 +190,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
          VALUES ($1, $2, 'NEW', $3)
          ON CONFLICT (tenant_id, meta_psid) WHERE meta_psid IS NOT NULL
          DO UPDATE SET name = COALESCE(EXCLUDED.name, leads.name), updated_at = now()
-         RETURNING id, status`,
+         RETURNING id, status, (xmax = 0) AS inserted`,
         [tenantId, msg.sender || psid, psid]
       );
     } else {
@@ -199,7 +199,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
          VALUES ($1, $2, $3, 'NEW')
          ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
          DO UPDATE SET updated_at = now()
-         RETURNING id, status`,
+         RETURNING id, status, (xmax = 0) AS inserted`,
         [tenantId, msg.sender || phone, phone]
       );
     }
@@ -209,7 +209,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
        VALUES ($1, $2, $3)
        ON CONFLICT (tenant_id, channel, external_id)
        DO UPDATE SET updated_at = now()
-       RETURNING id`,
+       RETURNING id, (xmax = 0) AS inserted`,
       [tenantId, channel, phone || psid]
     );
 
@@ -234,7 +234,9 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     return {
       leadId: lead.rows[0].id,
       leadStatus: lead.rows[0].status,
+      leadInserted: lead.rows[0].inserted === true,
       conversationId: conv.rows[0].id,
+      convInserted: conv.rows[0].inserted === true,
       storedQual: qual,
       config: cfg || {
         school_name: name || 'Escola',
@@ -289,6 +291,20 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     reply = await generate({ systemPrompt, history, message: msg.body, clarification });
   } catch (err) {
     log2.error('gate2.generate_error', { gate: 2, error: err.message });
+    // Anti-órfão: se o lead/conversa foram CRIADOS agora e a resposta não saiu,
+    // desfaz — não deixa lead vazio (sem mensagem nem rascunho) poluindo o console.
+    // Só apaga o que acabamos de inserir; lead/conversa pré-existentes são preservados.
+    if (ctx.leadInserted || ctx.convInserted) {
+      await withTenant(tenantId, async (c) => {
+        if (ctx.leadInserted) {
+          await c.query("DELETE FROM leads WHERE id = $1 AND status = 'NEW'", [ctx.leadId]);
+        }
+        if (ctx.convInserted) {
+          await c.query('DELETE FROM conversations WHERE id = $1', [ctx.conversationId]);
+        }
+      }).catch((e) => log2.warn('gate2.orphan_cleanup_failed', { gate: 2, error: e.message }));
+      log2.info('gate2.orphan_cleaned', { gate: 2, lead: ctx.leadInserted, conv: ctx.convInserted });
+    }
     return; // não trava
   }
 
