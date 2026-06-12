@@ -142,21 +142,40 @@ router.get(
           ? (
               await c.query(
                 `SELECT received_at, kind, sender, body FROM (
-                   SELECT m.received_at,
-                          CASE WHEN m.role = 'USER' THEN 'lead' ELSE 'ia' END AS kind,
-                          m.sender, m.body
+                   -- Entrada do LEAD (USER). Rascunhos da IA (ASSISTANT) NÃO entram na
+                   -- conversa: os pendentes pertencem ao bloco "Resposta sugerida".
+                   SELECT m.received_at, 'lead' AS kind, m.sender, m.body
                      FROM messages m
                      JOIN conversations cv ON cv.id = m.conversation_id
                     WHERE cv.tenant_id = $1
                       AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                      AND m.role = 'USER'
                    UNION ALL
+                   -- Respostas REAIS da recepção (fromMe). Exclui GRUPOS (@g.us — nunca
+                   -- são conversa com o lead) e os textos que a IA já enviou (mostrados
+                   -- abaixo como 'ia', pra não duplicar).
                    SELECT s.received_at, 'recepcao' AS kind, s.sender, s.body
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
                       AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
+                      AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+                      AND s.body NOT IN (
+                        SELECT pa.suggested_response FROM pending_approvals pa
+                         WHERE pa.tenant_id = $1 AND pa.lead_id = $3
+                           AND pa.status IN ('APPROVED', 'EDITED')
+                           AND pa.suggested_response IS NOT NULL
+                      )
+                   UNION ALL
+                   -- Respostas da IA que foram APROVADAS/ENVIADAS ao cliente (tag "IA").
+                   SELECT pa.created_at AS received_at, 'ia' AS kind, NULL AS sender,
+                          pa.suggested_response AS body
+                     FROM pending_approvals pa
+                    WHERE pa.tenant_id = $1 AND pa.lead_id = $3
+                      AND pa.status IN ('APPROVED', 'EDITED')
+                      AND pa.suggested_response IS NOT NULL
                  ) t
                  ORDER BY received_at ASC`,
-                [req.tenantId, ident]
+                [req.tenantId, ident, id]
               )
             ).rows
           : [];
