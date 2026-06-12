@@ -130,6 +130,29 @@ test('Portão 1: confidence < 0.7 é tratado como NOT_LEAD (conservador)', async
   assert.equal(leads.length, 0, 'baixa confiança não deve criar lead');
 });
 
+test('F: inbound NOT_LEAD é capturado no histórico (sem virar lead)', async () => {
+  const phone = '+5511900000050';
+  const deps = failingDeps();
+  deps.classify = async () => ({ label: 'NOT_LEAD', confidence: 0.95, reason: 'spam' });
+
+  await engine.processInbound(
+    tenant,
+    { externalId: '5511900000050', externalMessageId: 'f-1', sender: 'X', body: 'ok, obrigado!' },
+    {},
+    deps
+  );
+
+  const leads = await q('SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2', [TENANT_ID, phone]);
+  assert.equal(leads.length, 0, 'NOT_LEAD não cria lead');
+  const msgs = await q(
+    `SELECT m.body FROM messages m
+       JOIN conversations cv ON cv.id = m.conversation_id
+      WHERE cv.tenant_id = $1 AND cv.external_id = $2 AND m.role = 'USER'`,
+    [TENANT_ID, phone]
+  );
+  assert.equal(msgs.length, 1, 'a mensagem inbound deve ser capturada mesmo sendo NOT_LEAD');
+});
+
 test('Portão 2: lead novo passa todos os portões e gera pending_approval', async () => {
   const phone = '+5511900000004';
   const deps = {

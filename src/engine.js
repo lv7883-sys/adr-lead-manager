@@ -83,6 +83,35 @@ async function loadHistory(tenantId, conversationId, redis) {
   return { messages, source: 'pg' };
 }
 
+// F — captura do inbound mesmo quando NÃO vira lead (NOT_LEAD ou erro de triagem), pra
+// o histórico do thread ficar completo. Grava só a conversa + a mensagem do lead (sem
+// criar lead nem rascunho). Idempotente por external_message_id. Best-effort: nunca lança.
+async function captureInboundOnly(tenantId, channel, externalId, msg, rawBody) {
+  if (!externalId || !msg.body) return;
+  try {
+    await withTenant(tenantId, async (c) => {
+      const conv = (
+        await c.query(
+          `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
+           ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
+           RETURNING id`,
+          [tenantId, channel, externalId]
+        )
+      ).rows[0];
+      await c.query(
+        `INSERT INTO messages
+           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw)
+         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6)
+         ON CONFLICT (tenant_id, external_message_id)
+           WHERE external_message_id IS NOT NULL DO NOTHING`,
+        [tenantId, conv.id, msg.externalMessageId, msg.sender, msg.body, rawBody]
+      );
+    });
+  } catch (e) {
+    logger.warn('gate1.capture_inbound_failed', { tenant_id: tenantId, error: e.message });
+  }
+}
+
 /**
  * Processa uma mensagem recebida pelo funil de triagem do ADR-003.
  * Idempotente, assíncrono e tolerante a falhas: qualquer erro é logado e
@@ -143,11 +172,13 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       cls = await classify({ message: msg.body, tenantId });
     } catch (err) {
       log.error('gate1.error', { gate: 1, error: err.message });
+      await captureInboundOnly(tenantId, channel, phone || psid, msg, rawBody); // F: thread completo
       return; // não trava: webhook já retornou 200
     }
     log.info('gate1.classified', { gate: 1, label: cls.label, confidence: cls.confidence });
     if (cls.label !== 'LEAD' || cls.confidence < CONFIDENCE_THRESHOLD) {
       log.info('gate1.ignored', { gate: 1, label: cls.label, confidence: cls.confidence });
+      await captureInboundOnly(tenantId, channel, phone || psid, msg, rawBody); // F: thread completo
       return;
     }
   }
