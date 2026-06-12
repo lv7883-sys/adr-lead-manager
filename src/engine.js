@@ -83,6 +83,40 @@ async function loadHistory(tenantId, conversationId, redis) {
   return { messages, source: 'pg' };
 }
 
+// Conversa REAL mesclada pra a IA gerar com contexto verdadeiro (não só o que passou
+// pelo funil): entrada do LEAD (messages USER) + respostas REAIS da recepção
+// (staff_outbound_samples fromMe, exclui grupos @g.us) + respostas da IA já
+// aprovadas/enviadas (pending_approvals APPROVED/EDITED). Lead -> USER; escola -> ASSISTANT.
+// Sem cache: as respostas da recepção não passam por invalidação de cache.
+async function loadRealHistory(tenantId, { conversationId, ident, leadId }) {
+  const rows = await withTenant(tenantId, (c) =>
+    c
+      .query(
+        `SELECT role, content FROM (
+           SELECT m.received_at, 'USER' AS role, m.body AS content
+             FROM messages m
+            WHERE m.conversation_id = $1 AND m.role = 'USER' AND m.body IS NOT NULL
+           UNION ALL
+           SELECT s.received_at, 'ASSISTANT' AS role, s.body AS content
+             FROM staff_outbound_samples s
+            WHERE s.tenant_id = $2 AND $3 <> ''
+              AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $3
+              AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+              AND s.body IS NOT NULL
+           UNION ALL
+           SELECT pa.created_at, 'ASSISTANT' AS role, pa.suggested_response AS content
+             FROM pending_approvals pa
+            WHERE pa.tenant_id = $2 AND pa.lead_id = $4
+              AND pa.status IN ('APPROVED', 'EDITED') AND pa.suggested_response IS NOT NULL
+         ) t
+         ORDER BY received_at ASC`,
+        [conversationId, tenantId, ident, leadId]
+      )
+      .then((r) => r.rows)
+  );
+  return rows.map((r) => ({ role: r.role, content: r.content }));
+}
+
 // F — captura do inbound mesmo quando NÃO vira lead (NOT_LEAD ou erro de triagem), pra
 // o histórico do thread ficar completo. Grava só a conversa + a mensagem do lead (sem
 // criar lead nem rascunho). Idempotente por external_message_id. Best-effort: nunca lança.
@@ -286,9 +320,11 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     conversation_id: ctx.conversationId,
   });
 
-  // Histórico (prévio) carregado antes de persistir a mensagem atual.
-  const { messages: history, source } = await loadHistory(tenantId, ctx.conversationId, redis);
-  log2.info('gate2.history_loaded', { gate: 2, history_source: source, turns: history.length });
+  // Histórico REAL (lead + recepção + IA aprovada) carregado antes de persistir a
+  // mensagem atual. É o que dá contexto pra IA gerar uma retomada (não primeiro contato).
+  const ident = String(phone || psid || '').replace(/\D/g, '');
+  const history = await loadRealHistory(tenantId, { conversationId: ctx.conversationId, ident, leadId: ctx.leadId });
+  log2.info('gate2.history_loaded', { gate: 2, turns: history.length });
 
   // E1-03 — extração (antes de gerar, para a repergunta entrar na resposta).
   // Falha de extração é não-fatal: segue sem atualizar a qualificação.
@@ -314,7 +350,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   const systemPrompt = resolveSystemPrompt(ctx.config);
   let reply;
   try {
-    reply = await generate({ systemPrompt, history, message: msg.body, clarification });
+    reply = await generate({ systemPrompt, history, message: msg.body, clarification, retomada: history.length > 0 });
   } catch (err) {
     log2.error('gate2.generate_error', { gate: 2, error: err.message });
     // Anti-órfão: se o lead/conversa foram CRIADOS agora e a resposta não saiu,

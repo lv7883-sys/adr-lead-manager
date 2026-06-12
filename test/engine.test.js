@@ -195,10 +195,11 @@ test('Portão 2: lead novo passa todos os portões e gera pending_approval', asy
   assert.deepEqual(roles, ['ASSISTANT', 'USER'], 'deve salvar mensagem USER e ASSISTANT');
 });
 
-test('Portão 2: lead existente carrega histórico do Redis', async () => {
+test('Portão 2: lead existente — generate recebe a conversa REAL mesclada + retomada', async () => {
   const phone = '+5511900000005';
-  // Cria lead + conversa previamente.
-  const conv = await withTenant(TENANT_ID, async (c) => {
+  // Lead + conversa + entrada anterior do lead (messages USER) + resposta REAL da
+  // recepção (staff_outbound_samples fromMe).
+  await withTenant(TENANT_ID, async (c) => {
     await c.query(
       `INSERT INTO leads (tenant_id, name, phone, status) VALUES ($1, 'Recorrente', $2, 'QUALIFYING')`,
       [TENANT_ID, phone]
@@ -207,21 +208,25 @@ test('Portão 2: lead existente carrega histórico do Redis', async () => {
       `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, 'whatsapp', $2) RETURNING id`,
       [TENANT_ID, phone]
     );
-    return r.rows[0].id;
+    await c.query(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, role, body, received_at)
+       VALUES ($1, $2, 'inbound', 'USER', 'oi, vi o anúncio', now() - interval '2 minutes')`,
+      [TENANT_ID, r.rows[0].id]
+    );
+    await c.query(
+      `INSERT INTO staff_outbound_samples (tenant_id, channel, external_id, body, received_at)
+       VALUES ($1, 'whatsapp', '5511900000005', 'oi! que bom, sobre qual instrumento?', now() - interval '1 minute')`,
+      [TENANT_ID]
+    );
   });
 
-  // Semeia o cache Redis com histórico conhecido.
-  const seeded = [
-    { role: 'USER', content: 'oi, vi o anúncio' },
-    { role: 'ASSISTANT', content: 'oi! que bom, sobre qual instrumento?' },
-  ];
-  await redisClient.setCachedHistory(conv, seeded);
-
   let capturedHistory = null;
+  let capturedRetomada = null;
   const deps = {
     classify: async () => ({ label: 'LEAD', confidence: 0.9, reason: 'retorno' }),
-    generate: async ({ history }) => {
+    generate: async ({ history, retomada }) => {
       capturedHistory = history;
+      capturedRetomada = retomada;
       return 'perfeito, podemos seguir!';
     },
     notify: async () => ({ sent: true }),
@@ -235,7 +240,15 @@ test('Portão 2: lead existente carrega histórico do Redis', async () => {
     deps
   );
 
-  assert.deepEqual(capturedHistory, seeded, 'histórico deve vir do cache Redis');
+  assert.deepEqual(
+    capturedHistory,
+    [
+      { role: 'USER', content: 'oi, vi o anúncio' },
+      { role: 'ASSISTANT', content: 'oi! que bom, sobre qual instrumento?' },
+    ],
+    'generate recebe a conversa real mesclada (lead + recepção), em ordem cronológica'
+  );
+  assert.equal(capturedRetomada, true, 'com histórico real, retomada = true');
 });
 
 test('webhook retorna 200 mesmo quando o Gemini falha', async () => {

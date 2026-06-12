@@ -87,10 +87,23 @@ async function classify({ message }) {
 
 // Portão 2 — geração da resposta, com system prompt do tenant + histórico.
 // `clarification` (opcional): instrução para repergunta de dado ambíguo (E1-03).
-async function generateReply({ systemPrompt, history = [], message, clarification }) {
-  const sys = clarification
-    ? `${systemPrompt}\n\nNESTA RESPOSTA, peça educadamente que o lead esclareça: ${clarification}.`
-    : systemPrompt;
+async function generateReply({ systemPrompt, history = [], message, clarification, retomada }) {
+  let sys = systemPrompt;
+  // RETOMADA: quando JÁ existe conversa anterior (histórico real), a IA não deve tratar
+  // como primeiro contato. Condiciona a apresentação/"REFERÊNCIA DE VOZ" do prompt a só
+  // valerem sem histórico, e orienta uma retomada contextualizada.
+  if (retomada) {
+    sys +=
+      '\n\nRETOMADA — JÁ EXISTE conversa anterior com esta pessoa (veja o histórico acima). ' +
+      'NÃO se apresente de novo nem trate como primeiro contato. IGNORE a instrução de ' +
+      '"primeira mensagem" e a "REFERÊNCIA DE VOZ" (elas valem só quando NÃO há histórico). ' +
+      'Identifique onde a conversa parou e qual foi o último assunto, referencie isso de forma ' +
+      'natural e calorosa, e reconecte avançando para o agendamento da aula experimental. ' +
+      'Não invente nada que não foi discutido.';
+  }
+  if (clarification) {
+    sys += `\n\nNESTA RESPOSTA, peça educadamente que o lead esclareça: ${clarification}.`;
+  }
   return withModelFallback(async (modelName) => {
     // temperature baixa (0.3) = respostas mais consistentes e ancoradas no prompt,
     // menos "criativas"/inventadas. Os classificadores já rodam em 0; aqui mantemos um
