@@ -101,7 +101,7 @@ router.get(
       const data = await withTenant(req.tenantId, async (c) => {
         const lead = (
           await c.query(
-            `SELECT l.id, l.name, l.phone, l.status, l.intent,
+            `SELECT l.id, l.name, l.phone, l.status, l.intent, l.meta_psid,
                     l.created_at, l.updated_at,
                     q.name AS qual_name, q.instrument, q.availability,
                     COALESCE(q.qualification_complete, false) AS qualification_complete,
@@ -128,6 +128,37 @@ router.get(
           )
         ).rows;
 
+        // TIMELINE REAL (C): mescla a conversa que de fato capturamos —
+        //  - 'lead'     : mensagens de entrada do lead (messages role USER)
+        //  - 'ia'       : mensagens/rascunhos gerados pela IA (messages role ASSISTANT)
+        //  - 'recepcao' : respostas REAIS da recepção no WhatsApp/redes (fromMe,
+        //                 capturadas em staff_outbound_samples)
+        // Casamento por dígitos do external_id (conversations usa "+55..."; o capture
+        // de fromMe usa "55..."). Vale pra todos os canais (telefone OU psid).
+        const ident = String(lead.phone || lead.meta_psid || '').replace(/\D/g, '');
+        const timeline = ident
+          ? (
+              await c.query(
+                `SELECT received_at, kind, sender, body FROM (
+                   SELECT m.received_at,
+                          CASE WHEN m.role = 'USER' THEN 'lead' ELSE 'ia' END AS kind,
+                          m.sender, m.body
+                     FROM messages m
+                     JOIN conversations cv ON cv.id = m.conversation_id
+                    WHERE cv.tenant_id = $1
+                      AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                   UNION ALL
+                   SELECT s.received_at, 'recepcao' AS kind, s.sender, s.body
+                     FROM staff_outbound_samples s
+                    WHERE s.tenant_id = $1
+                      AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
+                 ) t
+                 ORDER BY received_at ASC`,
+                [req.tenantId, ident]
+              )
+            ).rows
+          : [];
+
         const pending = (
           await c.query(
             `SELECT id, suggested_response, status, conversation_id, created_at
@@ -145,7 +176,7 @@ router.get(
           )
         ).rows[0].n;
 
-        return { lead, messages, pending, pendingTotal };
+        return { lead, messages, timeline, pending, pendingTotal };
       });
 
       if (!data.lead) return res.status(404).json({ error: 'lead not found' });
@@ -175,6 +206,7 @@ router.get(
           },
         },
         messages: data.messages,
+        timeline: data.timeline,
         pending_approval: data.pending,
       });
     } catch (err) {
