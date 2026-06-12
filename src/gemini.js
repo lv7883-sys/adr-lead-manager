@@ -136,6 +136,39 @@ async function improveReply({ systemPrompt, history = [], draft }) {
   });
 }
 
+// E1 — Assistente operacional da RECEPÇÃO: ajuda a recepcionista a atender (o que dizer,
+// como conduzir, agendar, lidar com objeções). NÃO fala com o cliente — orienta a pessoa.
+// Usa as informações da escola como base; não inventa dados.
+async function assistantReply({ schoolContext, leadName, leadConversation, history = [], message }) {
+  const sys =
+    'Você é um assistente interno que AJUDA A RECEPCIONISTA de uma escola de música a ' +
+    'atender bem ESTE lead específico. Responda dúvidas operacionais (o que dizer, como ' +
+    'conduzir, como agendar a aula experimental, como contornar objeções, como melhorar um ' +
+    'rascunho) de forma clara e direta, em português do Brasil. Você NÃO fala com o cliente ' +
+    '— você orienta a recepcionista. Use a CONVERSA COM ESTE LEAD para dar respostas ' +
+    'específicas (ex.: a objeção que ele fez). Baseie-se nas INFORMAÇÕES DA ESCOLA. Se não ' +
+    'tiver um dado, diga que não tem (não invente endereço, preço, nomes ou horários).' +
+    (leadName ? `\n\nLEAD: ${leadName}` : '') +
+    (leadConversation ? `\n\nCONVERSA COM ESTE LEAD (mais antigo -> mais novo):\n${leadConversation}` : '') +
+    (schoolContext ? `\n\nINFORMAÇÕES DA ESCOLA (referência):\n${schoolContext}` : '');
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({
+      model: modelName,
+      systemInstruction: sys,
+      generationConfig: { temperature: 0.3 },
+    });
+    const contents = [
+      ...history.map((m) => ({
+        role: String(m.role).toLowerCase() === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content ?? m.text ?? '' }],
+      })),
+      { role: 'user', parts: [{ text: message ?? '' }] },
+    ];
+    const res = await model.generateContent({ contents });
+    return res.response.text().trim();
+  });
+}
+
 // E1-02 — classifica a intenção do lead em uma das 4 categorias.
 const INTENTS = ['SCHEDULE_INTEREST', 'PRICE_INQUIRY', 'GENERAL_INFO', 'OUT_OF_SCOPE'];
 const INTENT_PROMPT = `Classifique a intenção principal da mensagem do lead de uma escola de música em UMA categoria:
@@ -191,6 +224,7 @@ module.exports = {
   classify,
   generateReply,
   improveReply,
+  assistantReply,
   classifyIntent,
   extractQualification,
   INTENTS,

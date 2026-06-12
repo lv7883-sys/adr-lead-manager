@@ -388,6 +388,73 @@ router.post(
   }
 );
 
+// POST /tenant/:tid/leads/:id/assistant — E1: assistente operacional da recepção DENTRO
+// do lead. READ-ONLY (não muda nada, não envia). body { message, history? }. Carrega a
+// CONVERSA REAL do lead (timeline mesclada) como contexto pra respostas específicas.
+router.post(
+  '/:tenantId/leads/:id/assistant',
+  authenticate,
+  requireTenantAccess(WRITE_ROLES),
+  async (req, res) => {
+    const { id } = req.params;
+    if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    if (!message) return res.status(400).json({ error: 'empty message' });
+    const history = Array.isArray(req.body?.history) ? req.body.history.slice(-12) : [];
+    try {
+      const ctx = await withTenant(req.tenantId, async (c) => {
+        const cfg = (
+          await c.query(
+            `SELECT school_name, system_prompt_override, available_instruments,
+                    business_hours, notification_whatsapp
+               FROM tenant_lead_config WHERE tenant_id = $1`,
+            [req.tenantId]
+          )
+        ).rows[0];
+        const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.name;
+        const lead = (await c.query('SELECT name, phone, meta_psid FROM leads WHERE id = $1', [id])).rows[0];
+        let convo = [];
+        if (lead) {
+          const ident = String(lead.phone || lead.meta_psid || '').replace(/\D/g, '');
+          if (ident) {
+            convo = (
+              await c.query(
+                `SELECT kind, body FROM (
+                   SELECT m.received_at,
+                          CASE WHEN m.role = 'USER' THEN 'Lead' ELSE 'IA' END AS kind, m.body
+                     FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                   UNION ALL
+                   SELECT s.received_at, 'Recepção' AS kind, s.body
+                     FROM staff_outbound_samples s
+                    WHERE s.tenant_id = $1 AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
+                 ) t
+                 ORDER BY received_at DESC LIMIT 20`,
+                [req.tenantId, ident]
+              )
+            ).rows.reverse();
+          }
+        }
+        return { config: cfg, tname, leadName: lead?.name, convo };
+      });
+      const schoolContext = resolveSystemPrompt(
+        ctx.config || { school_name: ctx.tname || 'Escola', system_prompt_override: null }
+      );
+      const leadConversation = ctx.convo.length
+        ? ctx.convo.map((m) => `${m.kind}: ${m.body}`).join('\n')
+        : null;
+      const reply = await gemini.assistantReply({
+        schoolContext, leadName: ctx.leadName, leadConversation, history, message,
+      });
+      logger.info('tenant.assistant.reply', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
+      res.json({ ok: true, reply });
+    } catch (err) {
+      logger.error('tenant.assistant.error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+      res.status(500).json({ error: 'internal error' });
+    }
+  }
+);
+
 // POST /tenant/:tid/leads/:id/optout — LGPD: marca OPTED_OUT (lead não recebe
 // mais nenhuma mensagem). Chamado pelo Scheduler após validar o token do link.
 router.post(
