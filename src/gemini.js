@@ -112,6 +112,30 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
   });
 }
 
+// D — "Melhorar com IA": revisa um rascunho escrito/editado pela recepcionista,
+// mantendo a INTENÇÃO e as informações dela. Não inventa dados. Retorna só o texto.
+async function improveReply({ systemPrompt, history = [], draft }) {
+  const ctx = history.length
+    ? '\n\nContexto recente da conversa (mais antigo -> mais novo):\n' +
+      history.slice(-6).map((m) => `${m.role === 'ASSISTANT' ? 'Escola' : 'Lead'}: ${m.content ?? m.body ?? ''}`).join('\n')
+    : '';
+  const prompt =
+    `${systemPrompt}\n\n` +
+    'TAREFA: revise e melhore o RASCUNHO de resposta abaixo, escrito pela recepcionista. ' +
+    'Corrija o português, ajuste ao tom da escola (sem emojis, "você", cordial e claro) e deixe natural — ' +
+    'MAS mantenha a intenção e as informações que ela colocou. NÃO invente dados (endereço, preço, nomes, ' +
+    'horários) que não estejam no contexto/prompt. Responda SOMENTE com a mensagem final melhorada, ' +
+    `sem comentários nem aspas.${ctx}\n\nRASCUNHO:\n${draft ?? ''}`;
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({
+      model: modelName,
+      generationConfig: { temperature: 0.3 },
+    });
+    const res = await model.generateContent(prompt);
+    return res.response.text().trim();
+  });
+}
+
 // E1-02 — classifica a intenção do lead em uma das 4 categorias.
 const INTENTS = ['SCHEDULE_INTEREST', 'PRICE_INQUIRY', 'GENERAL_INFO', 'OUT_OF_SCOPE'];
 const INTENT_PROMPT = `Classifique a intenção principal da mensagem do lead de uma escola de música em UMA categoria:
@@ -166,6 +190,7 @@ async function extractQualification({ history = [], message }) {
 module.exports = {
   classify,
   generateReply,
+  improveReply,
   classifyIntent,
   extractQualification,
   INTENTS,

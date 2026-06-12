@@ -13,6 +13,8 @@ const { isUuid } = require('../validation');
 const logger = require('../logger');
 const evolution = require('../evolution');   // E4: envio direto via Evolution
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
+const gemini = require('../gemini');          // D: melhorar resposta com IA
+const { resolveSystemPrompt } = require('../templates');
 
 const router = express.Router();
 
@@ -306,6 +308,59 @@ router.post(
       res.json({ ok: true, approval: r.approval, sent: envio.sent, send_reason: envio.reason });
     } catch (err) {
       logger.error('tenant.lead.approve_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+      res.status(500).json({ error: 'internal error' });
+    }
+  }
+);
+
+// POST /tenant/:tid/leads/:id/improve — melhora um rascunho de resposta com a IA.
+// READ-ONLY: não muda status, não envia, não cria nada. Devolve { improved }. Usa o
+// system prompt da unidade + o contexto recente da conversa do lead.
+router.post(
+  '/:tenantId/leads/:id/improve',
+  authenticate,
+  requireTenantAccess(WRITE_ROLES),
+  async (req, res) => {
+    const { id } = req.params;
+    if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+    if (!text) return res.status(400).json({ error: 'empty text' });
+    try {
+      const ctx = await withTenant(req.tenantId, async (c) => {
+        const cfg = (
+          await c.query(
+            `SELECT school_name, system_prompt_override, available_instruments,
+                    business_hours, notification_whatsapp
+               FROM tenant_lead_config WHERE tenant_id = $1`,
+            [req.tenantId]
+          )
+        ).rows[0];
+        const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.name;
+        const lead = (await c.query('SELECT phone, meta_psid FROM leads WHERE id = $1', [id])).rows[0];
+        let history = [];
+        if (lead) {
+          const ext = lead.phone || lead.meta_psid;
+          history = (
+            await c.query(
+              `SELECT m.role, m.body AS content
+                 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                WHERE cv.tenant_id = $1 AND cv.external_id = $2 AND m.role IS NOT NULL
+                ORDER BY m.received_at DESC LIMIT 8`,
+              [req.tenantId, ext]
+            )
+          ).rows.reverse();
+        }
+        return { config: cfg, tname, history };
+      });
+
+      const systemPrompt = resolveSystemPrompt(
+        ctx.config || { school_name: ctx.tname || 'Escola', system_prompt_override: null }
+      );
+      const improved = await gemini.improveReply({ systemPrompt, history: ctx.history, draft: text });
+      logger.info('tenant.lead.improved', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
+      res.json({ ok: true, improved });
+    } catch (err) {
+      logger.error('tenant.lead.improve_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
       res.status(500).json({ error: 'internal error' });
     }
   }
