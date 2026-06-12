@@ -61,7 +61,7 @@ const failingDeps = () => ({
   redis: redisClient,
 });
 
-test('Portão 0: número em known_contacts é ignorado (não classifica)', async () => {
+test('Portão 0: contato conhecido passa pela IA com contexto; NOT_LEAD não vira lead', async () => {
   const phone = '+5511900000001';
   await q(
     `INSERT INTO known_contacts (tenant_id, phone, type, source)
@@ -69,15 +69,48 @@ test('Portão 0: número em known_contacts é ignorado (não classifica)', async
     [TENANT_ID, phone]
   );
 
+  let recebido = null;
+  const deps = failingDeps();
+  deps.classify = async (args) => {
+    recebido = args;
+    return { label: 'NOT_LEAD', confidence: 0.9, reason: 'assunto interno' };
+  };
+
   await engine.processInbound(
     tenant,
     { externalId: '5511900000001', externalMessageId: 'g0-1', sender: 'Gestor', body: 'oi equipe' },
     {},
-    failingDeps()
+    deps
+  );
+
+  assert.equal(recebido && recebido.knownContactType, 'STAFF', 'classify recebe o tipo do contato conhecido');
+  const leads = await q('SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2', [TENANT_ID, phone]);
+  assert.equal(leads.length, 0, 'NOT_LEAD de contato conhecido não cria lead');
+});
+
+test('Portão 0: contato conhecido com interesse em novo curso é classificado LEAD', async () => {
+  const phone = '+5511900000009';
+  await q(
+    `INSERT INTO known_contacts (tenant_id, phone, type, source)
+     VALUES ($1, $2, 'STAFF', 'MANUAL')`,
+    [TENANT_ID, phone]
+  );
+  const deps = {
+    classify: async () => ({ label: 'LEAD', confidence: 0.9, reason: 'novo curso' }),
+    generate: async () => 'Que bom! Vamos agendar sua aula de violino?',
+    notify: async () => ({ sent: false }),
+    redis: redisClient,
+  };
+
+  await engine.processInbound(
+    tenant,
+    { externalId: '5511900000009', externalMessageId: 'g0-2', sender: 'Aluna', body: 'quero fazer violino também' },
+    {},
+    deps
   );
 
   const leads = await q('SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2', [TENANT_ID, phone]);
-  assert.equal(leads.length, 0, 'não deve criar lead para contato conhecido');
+  assert.equal(leads.length, 1, 'contato conhecido com novo interesse deve virar lead');
 });
 
 test('Portão 1: mensagem NOT_LEAD é ignorada (não gera resposta)', async () => {
@@ -91,7 +124,12 @@ test('Portão 1: mensagem NOT_LEAD é ignorada (não gera resposta)', async () =
     deps
   );
 
-  const pa = await q('SELECT 1 FROM pending_approvals WHERE tenant_id = $1', [TENANT_ID]);
+  const pa = await q(
+    `SELECT 1 FROM pending_approvals pa
+       JOIN leads l ON l.id = pa.lead_id
+      WHERE l.tenant_id = $1 AND l.phone = $2`,
+    [TENANT_ID, '+5511900000002']
+  );
   assert.equal(pa.length, 0, 'NOT_LEAD não deve gerar aprovação pendente');
 });
 
