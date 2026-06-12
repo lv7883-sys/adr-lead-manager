@@ -92,7 +92,14 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
     ? `${systemPrompt}\n\nNESTA RESPOSTA, peça educadamente que o lead esclareça: ${clarification}.`
     : systemPrompt;
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({ model: modelName, systemInstruction: sys });
+    // temperature baixa (0.3) = respostas mais consistentes e ancoradas no prompt,
+    // menos "criativas"/inventadas. Os classificadores já rodam em 0; aqui mantemos um
+    // mínimo de naturalidade pra conversa sem abrir espaço pra alucinação.
+    const model = client().getGenerativeModel({
+      model: modelName,
+      systemInstruction: sys,
+      generationConfig: { temperature: 0.3 },
+    });
     const contents = [
       ...history.map((m) => ({
         role: m.role === 'ASSISTANT' ? 'model' : 'user',
