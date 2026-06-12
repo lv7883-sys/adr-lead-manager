@@ -24,41 +24,6 @@ async function ensureConnected() {
   await connecting;
 }
 
-const HISTORY_TTL_SECONDS = 72 * 60 * 60; // 72h
-const historyKey = (conversationId) => `lm:conv:${conversationId}:messages`;
-
-// Lê do Redis; em qualquer falha, retorna null para o chamador cair no PG.
-async function getCachedHistory(conversationId) {
-  try {
-    await ensureConnected();
-    const raw = await redis.get(historyKey(conversationId));
-    return raw ? JSON.parse(raw) : null;
-  } catch (err) {
-    logger.warn('redis.get_failed', { conversation_id: conversationId, error: err.message });
-    return null;
-  }
-}
-
-// Popula o cache (best-effort) após reconstruir o histórico do PG.
-async function setCachedHistory(conversationId, messages) {
-  try {
-    await ensureConnected();
-    await redis.set(historyKey(conversationId), JSON.stringify(messages), 'EX', HISTORY_TTL_SECONDS);
-  } catch (err) {
-    logger.warn('redis.set_failed', { conversation_id: conversationId, error: err.message });
-  }
-}
-
-// Invalida o cache. Chamado SEMPRE depois de persistir no PostgreSQL.
-async function invalidateHistory(conversationId) {
-  try {
-    await ensureConnected();
-    await redis.del(historyKey(conversationId));
-  } catch (err) {
-    logger.warn('redis.del_failed', { conversation_id: conversationId, error: err.message });
-  }
-}
-
 // ---- Cache de gating de assinatura (E9-05; TTL 5min — padrão ADR-002) ----
 const SUB_TTL_SECONDS = 5 * 60;
 const subStatusKey = (tenantId, feature = 'lead_manager') => `sub:${tenantId}:${feature}`;
@@ -93,11 +58,6 @@ async function invalidateSubStatus(tenantId, feature = 'lead_manager') {
 
 module.exports = {
   redis,
-  historyKey,
-  HISTORY_TTL_SECONDS,
-  getCachedHistory,
-  setCachedHistory,
-  invalidateHistory,
   SUB_TTL_SECONDS,
   subStatusKey,
   getCachedSubStatus,

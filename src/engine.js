@@ -64,25 +64,6 @@ function mergeQualification(stored, extraction) {
   return { values, reasked: [...reasked], clarify, complete };
 }
 
-// Histórico: tenta o cache Redis; em miss/erro, reconstrói do PostgreSQL e
-// repovoa o cache. Retorna também a origem (para observabilidade).
-async function loadHistory(tenantId, conversationId, redis) {
-  const cached = await redis.getCachedHistory(conversationId);
-  if (cached) return { messages: cached, source: 'redis' };
-
-  const { rows } = await withTenant(tenantId, (c) =>
-    c.query(
-      `SELECT role, body FROM messages
-        WHERE conversation_id = $1 AND role IS NOT NULL
-        ORDER BY received_at ASC`,
-      [conversationId]
-    )
-  );
-  const messages = rows.map((r) => ({ role: r.role, content: r.body }));
-  await redis.setCachedHistory(conversationId, messages);
-  return { messages, source: 'pg' };
-}
-
 // Conversa REAL mesclada pra a IA gerar com contexto verdadeiro (não só o que passou
 // pelo funil): entrada do LEAD (messages USER) + respostas REAIS da recepção
 // (staff_outbound_samples fromMe, exclui grupos @g.us) + respostas da IA já
@@ -467,9 +448,6 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     return { approvalId: pa.rows[0].id };
   });
 
-  // SEMPRE invalida o cache DEPOIS de persistir no PostgreSQL (nunca antes).
-  await redis.invalidateHistory(ctx.conversationId);
-
   log2.info('gate2.pending_approval_created', {
     gate: 2,
     approval_id: result.approvalId,
@@ -480,4 +458,4 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   await notify({ tenantId, to: ctx.config.notification_whatsapp });
 }
 
-module.exports = { processInbound, mergeQualification, CONFIDENCE_THRESHOLD, loadHistory };
+module.exports = { processInbound, mergeQualification, CONFIDENCE_THRESHOLD };
