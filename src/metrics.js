@@ -301,4 +301,81 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
   });
 }
 
-module.exports = { computeMetrics, percentile, temperatura, spHourDow, PERIODS };
+// --- funil de conversão mensal ---------------------------------------------
+function ym(y, m) { return `${y}-${String(m + 1).padStart(2, '0')}`; } // m: 0-based
+// Resolve o período do funil: '6m' | '12m' | 'year:YYYY'. Devolve a lista de meses
+// (YYYY-MM) + a janela [start, end) pra query.
+function resolveFunilRange(fp) {
+  const now = new Date();
+  const y = now.getFullYear(), mo = now.getMonth();
+  let months = [];
+  const mYear = /^year:(\d{4})$/.exec(fp);
+  if (mYear) {
+    const yr = Number(mYear[1]);
+    const ultimo = (yr === y) ? mo : 11; // ano corrente vai até o mês atual
+    for (let m = 0; m <= ultimo; m++) months.push(ym(yr, m));
+  } else if (fp === '12m') {
+    for (let i = 11; i >= 0; i--) { const d = new Date(y, mo - i, 1); months.push(ym(d.getFullYear(), d.getMonth())); }
+  } else { // 6m (padrão)
+    fp = '6m';
+    for (let i = 5; i >= 0; i--) { const d = new Date(y, mo - i, 1); months.push(ym(d.getFullYear(), d.getMonth())); }
+  }
+  const start = months[0] + '-01';
+  const [ly, lm] = months[months.length - 1].split('-').map(Number); // lm: 1-based
+  const end = `${lm === 12 ? ly + 1 : ly}-${String(lm === 12 ? 1 : lm + 1).padStart(2, '0')}-01`;
+  return { period: fp, start, end, months };
+}
+
+function taxa(num, den) { return den ? round((num / den) * 100) : null; }
+
+async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
+  const { period, start, end, months } = resolveFunilRange(funilPeriod);
+  return withTenant(tenantId, async (c) => {
+    const rows = (
+      await c.query(
+        `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS mes,
+                count(*) AS leads,
+                count(*) FILTER (
+                  WHERE intent = 'SCHEDULE_INTEREST' OR status = 'QUALIFIED' OR desfecho = 'nao_compareceu_aula'
+                ) AS agendadas,
+                count(*) FILTER (
+                  WHERE (intent = 'SCHEDULE_INTEREST' OR status = 'QUALIFIED' OR desfecho = 'nao_compareceu_aula')
+                    AND desfecho IS NOT NULL AND desfecho <> 'nao_compareceu_aula'
+                ) AS realizadas,
+                count(*) FILTER (WHERE desfecho = 'matriculado') AS matriculas
+           FROM leads
+          WHERE created_at >= $2::date AND created_at < $3::date
+          GROUP BY 1`,
+        [tenantId, start, end]
+      )
+    ).rows;
+    const porMes = new Map(rows.map((r) => [r.mes, r]));
+    // Preenche todos os meses do range (zera os ausentes — degrada elegante).
+    const funil_mensal = months.map((mes) => {
+      const r = porMes.get(mes) || {};
+      return {
+        mes,
+        leads: Number(r.leads) || 0,
+        agendadas: Number(r.agendadas) || 0,
+        realizadas: Number(r.realizadas) || 0,
+        matriculas: Number(r.matriculas) || 0,
+      };
+    });
+    const tot = funil_mensal.reduce((a, m) => ({
+      leads: a.leads + m.leads, agendadas: a.agendadas + m.agendadas,
+      realizadas: a.realizadas + m.realizadas, matriculas: a.matriculas + m.matriculas,
+    }), { leads: 0, agendadas: 0, realizadas: 0, matriculas: 0 });
+    return {
+      funil_period: period,
+      funil_mensal,
+      funil_taxas: {
+        leads_agendada: taxa(tot.agendadas, tot.leads),
+        agendada_realizada: taxa(tot.realizadas, tot.agendadas),
+        realizada_matricula: taxa(tot.matriculas, tot.realizadas),
+        total_leads_matricula: taxa(tot.matriculas, tot.leads),
+      },
+    };
+  });
+}
+
+module.exports = { computeMetrics, computeFunil, resolveFunilRange, percentile, temperatura, spHourDow, PERIODS };

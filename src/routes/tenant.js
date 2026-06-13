@@ -15,7 +15,13 @@ const evolution = require('../evolution');   // E4: envio direto via Evolution
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
-const { computeMetrics, PERIODS } = require('../metrics');   // G: dashboard de gestão
+const { computeMetrics, computeFunil, PERIODS } = require('../metrics');   // G: dashboard de gestão
+
+// Valida funil_period: '6m' | '12m' | 'year:YYYY' (senão cai no padrão 6m).
+function parseFunilPeriod(v) {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return (s === '6m' || s === '12m' || /^year:\d{4}$/.test(s)) ? s : '6m';
+}
 
 const router = express.Router();
 
@@ -44,11 +50,30 @@ router.get(
     const period = PERIODS[req.query.period] ? req.query.period : '30d';
     const channel = typeof req.query.channel === 'string' && req.query.channel.trim()
       ? req.query.channel.trim() : null;
+    const funilPeriod = parseFunilPeriod(req.query.funil_period);
     try {
       const data = await computeMetrics(req.tenantId, { period, channel });
-      res.json(data);
+      const funil = await computeFunil(req.tenantId, { funilPeriod });
+      res.json({ ...data, ...funil });
     } catch (err) {
       logger.error('tenant.metrics.error', { tenant_id: req.tenantId, error: err.message });
+      res.status(500).json({ error: 'internal error' });
+    }
+  }
+);
+
+// GET /tenant/:tid/funil?funil_period=6m|12m|year:YYYY — só o funil de conversão
+// mensal (rota leve pro recarregamento do gráfico sem refazer todas as métricas).
+router.get(
+  '/:tenantId/funil',
+  authenticate,
+  requireTenantAccess(READ_ROLES),
+  async (req, res) => {
+    const funilPeriod = parseFunilPeriod(req.query.funil_period);
+    try {
+      res.json(await computeFunil(req.tenantId, { funilPeriod }));
+    } catch (err) {
+      logger.error('tenant.funil.error', { tenant_id: req.tenantId, error: err.message });
       res.status(500).json({ error: 'internal error' });
     }
   }
