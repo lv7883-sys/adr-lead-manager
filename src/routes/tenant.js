@@ -105,6 +105,7 @@ router.get(
           await c.query(
             `SELECT l.id, l.name, l.phone, l.status, l.intent, l.meta_psid,
                     l.created_at, l.updated_at,
+                    l.desfecho, l.desfecho_notas, l.desfecho_em,
                     q.name AS qual_name, q.instrument, q.availability,
                     COALESCE(q.qualification_complete, false) AS qualification_complete,
                     q.reasked,
@@ -402,6 +403,54 @@ router.post(
       res.json({ ok: true, approval: r.approval });
     } catch (err) {
       logger.error('tenant.lead.reject_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+      res.status(500).json({ error: 'internal error' });
+    }
+  }
+);
+
+// ADR-011 Fase 1 — desfechos válidos (mesmo conjunto do CHECK da migration 016).
+const DESFECHOS_VALIDOS = [
+  'matriculado',
+  'nao_matriculado_preco',
+  'nao_matriculado_horario',
+  'nao_matriculado_concorrente',
+  'nao_matriculado_desistiu',
+  'nao_compareceu_aula',
+  'outro',
+];
+
+// POST /tenant/:tid/leads/:id/desfecho — registra o resultado final do lead.
+// body { desfecho, notas? }. Auth igual a approve/reject (WRITE_ROLES).
+router.post(
+  '/:tenantId/leads/:id/desfecho',
+  authenticate,
+  requireTenantAccess(WRITE_ROLES),
+  async (req, res) => {
+    const { id } = req.params;
+    if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+    const desfecho = typeof req.body?.desfecho === 'string' ? req.body.desfecho.trim() : '';
+    if (!DESFECHOS_VALIDOS.includes(desfecho)) {
+      return res.status(400).json({ error: 'invalid desfecho' });
+    }
+    const notas = typeof req.body?.notas === 'string' ? req.body.notas.trim() || null : null;
+    try {
+      const row = await withTenant(req.tenantId, async (c) => {
+        const r = await c.query(
+          `UPDATE leads
+              SET desfecho = $2, desfecho_notas = $3, desfecho_em = now()
+            WHERE id = $1
+            RETURNING desfecho, desfecho_notas, desfecho_em`,
+          [id, desfecho, notas]
+        );
+        return r.rows[0] || null;
+      });
+      if (!row) return res.status(404).json({ error: 'lead not found' });
+      logger.info('tenant.lead.desfecho', {
+        tenant_id: req.tenantId, lead_id: id, desfecho, by: req.tenantRole,
+      });
+      res.json({ ok: true, ...row });
+    } catch (err) {
+      logger.error('tenant.lead.desfecho_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
       res.status(500).json({ error: 'internal error' });
     }
   }
