@@ -93,4 +93,15 @@ function pickMessageId(d) {
       || null;
 }
 
-module.exports = { status, sendText, pickMessageId, _toggle9BR };
+// ADR-016 — baixa a mídia de uma mensagem recebida, em base64. `message` é o objeto
+// da mensagem da Evolution (com a key). Devolve { base64, mimetype, fileName }.
+async function getBase64FromMediaMessage({ instance, apikey }, message) {
+  const d = await req('POST', `/chat/getBase64FromMediaMessage/${encodeURIComponent(instance)}`, apikey, { message });
+  return {
+    base64: d && (d.base64 || d.media || (d.data && d.data.base64)) || null,
+    mimetype: d && (d.mimetype || d.mimeType || (d.data && d.data.mimetype)) || null,
+    fileName: d && (d.fileName || d.filename || (d.data && d.data.fileName)) || null,
+  };
+}
+
+module.exports = { status, sendText, pickMessageId, getBase64FromMediaMessage, _toggle9BR };

@@ -85,6 +85,9 @@ app.use('/admin', adminLimiter, adminRouter);
 // Self-service da unidade (protegido por JWT + requireTenantRole).
 app.use('/tenant', tenantLimiter, tenantRouter);
 
+// ADR-016 — arquivos de mídia recebidos (autenticado por tenant).
+app.use('/media', require('./routes/media'));
+
 // Só sobe o listener quando executado diretamente (não nos testes que
 // importam o app).
 if (require.main === module) {

@@ -18,10 +18,14 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3002"
+      MEDIA_ROOT: /app/uploads
     expose:
       - "3002"
     ports:
       - "3002:3002"
+    # ADR-016 — mídia recebida persiste no host (sobrevive a rebuild).
+    volumes:
+      - ./uploads:/app/uploads
     networks:
       - coolify
     # Roteamento via Traefik (proxy do Coolify) — domínio leads-api.leovecchi.com.

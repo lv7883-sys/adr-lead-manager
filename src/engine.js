@@ -18,6 +18,12 @@ const CONFIDENCE_THRESHOLD = 0.7;
 const AUTO_THRESHOLD = 0.85;
 const REVIEW_THRESHOLD = 0.40;
 
+// ADR-016 — params de mídia da mensagem (4 colunas), na ordem do INSERT.
+function _mediaCols(msg) {
+  const m = (msg && msg.media) || null;
+  return [m && m.url || null, m && m.type || null, m && m.filename || null, m && m.transcription || null];
+}
+
 // LGPD (item 2) — rodapé discreto de opt-out, SÓ na 1ª mensagem (lead NEW).
 // Sem mencionar IA/assistente/tecnologia; link único por lead (token HMAC).
 const OPTOUT_BASE = process.env.OPTOUT_BASE_URL || 'https://agenda.leovecchi.com';
@@ -80,9 +86,13 @@ async function loadRealHistory(tenantId, { conversationId, ident, leadId }) {
     c
       .query(
         `SELECT role, content FROM (
-           SELECT m.received_at, 'USER' AS role, m.body AS content
+           -- Áudio: usa a transcrição como conteúdo (a IA "ouve" o que foi dito).
+           SELECT m.received_at, 'USER' AS role,
+                  CASE WHEN m.media_type = 'audio' AND m.media_transcription IS NOT NULL
+                       THEN m.media_transcription ELSE m.body END AS content
              FROM messages m
-            WHERE m.conversation_id = $1 AND m.role = 'USER' AND m.body IS NOT NULL
+            WHERE m.conversation_id = $1 AND m.role = 'USER'
+              AND coalesce(m.media_transcription, m.body) IS NOT NULL
            UNION ALL
            SELECT s.received_at, 'ASSISTANT' AS role, s.body AS content
              FROM staff_outbound_samples s
@@ -121,11 +131,12 @@ async function captureInboundOnly(tenantId, channel, externalId, msg, rawBody) {
       ).rows[0];
       await c.query(
         `INSERT INTO messages
-           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw)
-         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6)
+           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw,
+            media_url, media_type, media_filename, media_transcription)
+         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (tenant_id, external_message_id)
            WHERE external_message_id IS NOT NULL DO NOTHING`,
-        [tenantId, conv.id, msg.externalMessageId, msg.sender, msg.body, rawBody]
+        [tenantId, conv.id, msg.externalMessageId, msg.sender, msg.body, rawBody, ..._mediaCols(msg)]
       );
     });
   } catch (e) {
@@ -183,11 +194,12 @@ async function captureForReview(tenantId, channel, externalId, msg, rawBody, cls
       ).rows[0];
       await c.query(
         `INSERT INTO messages
-           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw)
-         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6)
+           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw,
+            media_url, media_type, media_filename, media_transcription)
+         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (tenant_id, external_message_id)
            WHERE external_message_id IS NOT NULL DO NOTHING`,
-        [tenantId, conv.id, msg.externalMessageId, msg.sender, msg.body, rawBody]
+        [tenantId, conv.id, msg.externalMessageId, msg.sender, msg.body, rawBody, ..._mediaCols(msg)]
       );
       return lead.rows[0].id;
     });
@@ -451,11 +463,12 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   const result = await withTenant(tenantId, async (c) => {
     await c.query(
       `INSERT INTO messages
-         (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw)
-       VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6)
+         (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw,
+          media_url, media_type, media_filename, media_transcription)
+       VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (tenant_id, external_message_id)
          WHERE external_message_id IS NOT NULL DO NOTHING`,
-      [tenantId, ctx.conversationId, msg.externalMessageId, msg.sender, msg.body, rawBody]
+      [tenantId, ctx.conversationId, msg.externalMessageId, msg.sender, msg.body, rawBody, ..._mediaCols(msg)]
     );
     await c.query(
       `INSERT INTO messages (tenant_id, conversation_id, direction, role, body)

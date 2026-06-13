@@ -6,6 +6,10 @@ const { withTenant } = require('../db');
 const logger = require('../logger');
 const engine = require('../engine');
 const staffSamples = require('../staffSamples');
+const evolution = require('../evolution');
+const gemini = require('../gemini');
+const media = require('../media');
+const { decrypt } = require('../crypto');
 
 const router = express.Router();
 
@@ -38,6 +42,10 @@ function normalizeMessage(body) {
   const data = body?.data;
   if (data && data.key) {
     const jid = data.key.remoteJid || '';
+    const m = data.message || {};
+    const media = detectarMidia(m);
+    let texto = m.conversation ?? m.extendedTextMessage?.text ?? null;
+    if (!texto && media) texto = media.placeholder;   // body legível p/ histórico
     return {
       externalId: jid.split('@')[0] || jid,
       externalMessageId: data.key.id ? String(data.key.id) : null,
@@ -45,11 +53,33 @@ function normalizeMessage(body) {
       sender: data.pushName || null,
       // device de origem (android/ios/web = recepção digitando; outros = API/automático)
       source: data.source ?? body.source ?? null,
-      body:
-        data.message?.conversation ??
-        data.message?.extendedTextMessage?.text ??
-        null,
+      body: texto,
+      media: media ? { ...media, rawMessage: m, messageKey: data.key } : null,
     };
+  }
+  return null;
+}
+
+// ADR-016 — detecta mídia no objeto `message` da Evolution. Devolve metadados +
+// placeholder pro body, ou null se for texto puro.
+function detectarMidia(m) {
+  if (!m || typeof m !== 'object') return null;
+  if (m.audioMessage) {
+    return { kind: 'audio', mimetype: m.audioMessage.mimetype || 'audio/ogg', filename: null, placeholder: '[áudio]' };
+  }
+  if (m.imageMessage) {
+    return { kind: 'image', mimetype: m.imageMessage.mimetype || 'image/jpeg', filename: null,
+             placeholder: m.imageMessage.caption ? `[imagem] ${m.imageMessage.caption}` : '[imagem]' };
+  }
+  if (m.videoMessage) {
+    return { kind: 'video', mimetype: m.videoMessage.mimetype || 'video/mp4', filename: null,
+             placeholder: m.videoMessage.caption ? `[vídeo] ${m.videoMessage.caption}` : '[vídeo]' };
+  }
+  if (m.documentMessage || m.documentWithCaptionMessage) {
+    const d = m.documentMessage || m.documentWithCaptionMessage.message.documentMessage;
+    const nome = (d && d.fileName) || 'arquivo';
+    return { kind: 'document', mimetype: (d && d.mimetype) || 'application/octet-stream', filename: nome,
+             placeholder: `[documento: ${nome}]` };
   }
   return null;
 }
@@ -134,10 +164,38 @@ async function handleZapiWebhook(req, res) {
     return;
   }
 
+  // ADR-016 — mídia recebida: baixa, grava em disco e (áudio) transcreve ANTES do
+  // funil, pra a mensagem ser persistida já com a mídia. Best-effort, não trava.
+  const processar = async () => {
+    if (msg.media) {
+      try {
+        const cred = await withTenant(tenant.id, async (c) => (
+          await c.query('SELECT evolution_instance, evolution_token_enc FROM tenants WHERE id = $1', [tenant.id])
+        ).rows[0]);
+        const instance = cred && cred.evolution_instance;
+        const apikey = cred && decrypt(cred.evolution_token_enc);
+        if (instance && apikey) {
+          const saved = await media.salvarMidia({ tenantId: tenant.id, instance, apikey, media: msg.media });
+          if (saved) {
+            msg.media.url = saved.media_url;
+            msg.media.type = saved.media_type;
+            msg.media.filename = saved.media_filename;
+            if (saved.media_type === 'audio') {
+              try {
+                msg.media.transcription = await gemini.transcribeAudio({ base64: saved.base64, mimetype: saved.mimetype });
+              } catch (e) { log.warn('media.transcribe_failed', { error: e.message }); }
+            }
+            log.info('media.captured', { kind: saved.media_type, transcrito: !!msg.media.transcription });
+          }
+        } else {
+          log.warn('media.no_evolution_cred', {});
+        }
+      } catch (e) { log.warn('media.capture_error', { error: e.message }); }
+    }
+    await engine.processInbound(tenant, msg, req.body);
+  };
   // Funil de triagem (Portões 0/1/2). Fire-and-forget com captura de erro.
-  engine
-    .processInbound(tenant, msg, req.body)
-    .catch((err) => log.error('engine.unhandled_error', { error: err.message }));
+  processar().catch((err) => log.error('engine.unhandled_error', { error: err.message }));
 }
 
 router.post('/zapi/:tenantId', authenticateTenant, handleZapiWebhook);

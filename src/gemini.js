@@ -251,8 +251,23 @@ async function extractQualification({ history = [], message }) {
   });
 }
 
+// ADR-016 — transcreve um áudio recebido (base64) para texto pt-BR. Best-effort.
+async function transcribeAudio({ base64, mimetype }) {
+  if (!base64) return null;
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({ model: modelName, generationConfig: { temperature: 0 } });
+    const res = await model.generateContent([
+      { inlineData: { data: base64, mimeType: (mimetype || 'audio/ogg').split(';')[0].trim() } },
+      { text: 'Transcreva este áudio em português brasileiro. Retorne só a transcrição, sem explicações.' },
+    ]);
+    const t = res.response.text();
+    return typeof t === 'string' ? t.trim() : null;
+  });
+}
+
 module.exports = {
   classify,
+  transcribeAudio,
   generateReply,
   improveReply,
   assistantReply,
