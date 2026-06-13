@@ -92,9 +92,10 @@ test('contato conhecido NÃO é mais descartado: a IA decide pela mensagem', asy
   assert.equal(leads.length, 1, 'contato conhecido com interesse vira lead (sem atalho de exclusão)');
 });
 
-test('Portão 1: mensagem NOT_LEAD é ignorada (não gera resposta)', async () => {
+test('Portão 1 (Bloco 2): confiança baixa não gera resposta e vai pra fila de revisão (NOT_LEAD)', async () => {
   const deps = failingDeps();
-  deps.classify = async () => ({ label: 'NOT_LEAD', confidence: 0.95, reason: 'spam' });
+  // Nova semântica: confidence = probabilidade de SER lead. 0.05 = quase certeza que não é.
+  deps.classify = async () => ({ is_lead: false, confidence: 0.05, reasoning: 'spam', profile_signals: [] });
 
   await engine.processInbound(
     tenant,
@@ -109,12 +110,19 @@ test('Portão 1: mensagem NOT_LEAD é ignorada (não gera resposta)', async () =
       WHERE l.tenant_id = $1 AND l.phone = $2`,
     [TENANT_ID, '+5511900000002']
   );
-  assert.equal(pa.length, 0, 'NOT_LEAD não deve gerar aprovação pendente');
+  assert.equal(pa.length, 0, 'baixa confiança não deve gerar aprovação pendente');
+  const lead = await q(
+    'SELECT status, review_queue FROM leads WHERE tenant_id = $1 AND phone = $2',
+    [TENANT_ID, '+5511900000002']
+  );
+  assert.equal(lead.length, 1, 'cria lead visível (zero lead perdido)');
+  assert.equal(lead[0].status, 'NOT_LEAD');
+  assert.equal(lead[0].review_queue, true, 'fica na fila de revisão');
 });
 
-test('Portão 1: confidence < 0.7 é tratado como NOT_LEAD (conservador)', async () => {
+test('Portão 1 (Bloco 2): confiança média (0.40–0.84) vira REVIEW_QUEUE sem rascunho', async () => {
   const deps = failingDeps();
-  deps.classify = async () => ({ label: 'LEAD', confidence: 0.5, reason: 'incerto' });
+  deps.classify = async () => ({ is_lead: true, confidence: 0.5, reasoning: 'incerto', profile_signals: [] });
 
   await engine.processInbound(
     tenant,
@@ -123,17 +131,25 @@ test('Portão 1: confidence < 0.7 é tratado como NOT_LEAD (conservador)', async
     deps
   );
 
-  const leads = await q('SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2', [
-    TENANT_ID,
-    '+5511900000003',
-  ]);
-  assert.equal(leads.length, 0, 'baixa confiança não deve criar lead');
+  const leads = await q(
+    'SELECT status, review_queue FROM leads WHERE tenant_id = $1 AND phone = $2',
+    [TENANT_ID, '+5511900000003']
+  );
+  assert.equal(leads.length, 1, 'confiança média cria lead na fila de revisão');
+  assert.equal(leads[0].status, 'REVIEW_QUEUE');
+  assert.equal(leads[0].review_queue, true);
+  const pa = await q(
+    `SELECT 1 FROM pending_approvals pa JOIN leads l ON l.id = pa.lead_id
+      WHERE l.tenant_id = $1 AND l.phone = $2`,
+    [TENANT_ID, '+5511900000003']
+  );
+  assert.equal(pa.length, 0, 'REVIEW_QUEUE não gera rascunho automático');
 });
 
-test('F: inbound NOT_LEAD é capturado no histórico (sem virar lead)', async () => {
+test('F (Bloco 2): inbound de baixa confiança é capturado E cria lead na fila de revisão', async () => {
   const phone = '+5511900000050';
   const deps = failingDeps();
-  deps.classify = async () => ({ label: 'NOT_LEAD', confidence: 0.95, reason: 'spam' });
+  deps.classify = async () => ({ is_lead: false, confidence: 0.1, reasoning: 'agradecimento', profile_signals: [] });
 
   await engine.processInbound(
     tenant,
@@ -142,15 +158,19 @@ test('F: inbound NOT_LEAD é capturado no histórico (sem virar lead)', async ()
     deps
   );
 
-  const leads = await q('SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2', [TENANT_ID, phone]);
-  assert.equal(leads.length, 0, 'NOT_LEAD não cria lead');
+  const leads = await q(
+    'SELECT status, review_queue FROM leads WHERE tenant_id = $1 AND phone = $2',
+    [TENANT_ID, phone]
+  );
+  assert.equal(leads.length, 1, 'cria lead na fila de revisão (zero lead perdido)');
+  assert.equal(leads[0].status, 'NOT_LEAD');
   const msgs = await q(
     `SELECT m.body FROM messages m
        JOIN conversations cv ON cv.id = m.conversation_id
       WHERE cv.tenant_id = $1 AND cv.external_id = $2 AND m.role = 'USER'`,
     [TENANT_ID, phone]
   );
-  assert.equal(msgs.length, 1, 'a mensagem inbound deve ser capturada mesmo sendo NOT_LEAD');
+  assert.equal(msgs.length, 1, 'a mensagem inbound deve ser capturada');
 });
 
 test('Portão 2: lead novo passa todos os portões e gera pending_approval', async () => {

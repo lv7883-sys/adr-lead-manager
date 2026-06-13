@@ -60,6 +60,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
              FROM leads l
              LEFT JOIN lead_qualifications q ON q.lead_id = l.id
             WHERE l.created_at >= now() - ($2 || ' days')::interval
+              AND l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')   -- só leads reais (Bloco 2)
          ),
          inb AS (
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
@@ -114,6 +115,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       await c.query(
         `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS mes, count(*) AS n
            FROM leads WHERE created_at >= now() - interval '6 months'
+             AND status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
           GROUP BY 1 ORDER BY 1`,
         []
       )
@@ -140,7 +142,8 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
          SELECT l.created_at, c.channel
            FROM leads l
            LEFT JOIN chan c ON c.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
-          WHERE l.created_at >= now() - interval '90 days'`,
+          WHERE l.created_at >= now() - interval '90 days'
+            AND l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')`,
         [tenantId]
       )
     ).rows;
@@ -348,6 +351,7 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
                 count(*) FILTER (WHERE desfecho = 'matriculado') AS matriculas
            FROM leads
           WHERE created_at >= $1::date AND created_at < $2::date
+            AND status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
           GROUP BY 1`,
         [start, end]
       )
@@ -412,6 +416,7 @@ async function computePainel(tenantId) {
              FROM pending_approvals WHERE tenant_id = $1 AND status = 'PENDING' GROUP BY 1
          )
          SELECT l.id, l.name, l.status, l.intent, l.desfecho, l.created_at,
+                l.review_queue, l.review_result, l.classification_confidence,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
                 i.first_in, i.last_in, o.first_out, o.last_out, c.channel,
                 d.draft_at, COALESCE(d.n, 0) AS drafts
@@ -446,6 +451,20 @@ async function computePainel(tenantId) {
     const tempoHoje = [];
     let leadsAtivos = 0, aguardando = 0, comRascunho = 0;
     for (const l of rows) {
+      // Bloco 2 — leads na fila de revisão: bucket próprio ('revisar'), NÃO contam
+      // como leads ativos do funil nem entram nos buckets normais.
+      if (l.review_queue && !l.review_result) {
+        comRascunho += l.drafts > 0 ? 1 : 0;
+        fila.push({
+          id: l.id, name: l.name || 'Lead sem nome',
+          instrument: l.instrument || null, channel: l.channel || null,
+          temperatura: temperatura(l), tipo: 'revisar',
+          detalhe_seg: Math.max(0, Math.round((agora - new Date(l.created_at).getTime()) / 1000)),
+          confidence: l.classification_confidence != null ? Number(l.classification_confidence) : null,
+          tem_rascunho: l.drafts > 0,
+        });
+        continue;
+      }
       const fin = l.first_in ? new Date(l.first_in).getTime() : null;
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
       const lin = l.last_in ? new Date(l.last_in).getTime() : null;
@@ -470,7 +489,7 @@ async function computePainel(tenantId) {
         tem_rascunho: l.drafts > 0,
       });
     }
-    const ordem = { sem_resposta: 0, nova_msg: 1, rascunho: 2 };
+    const ordem = { sem_resposta: 0, revisar: 1, nova_msg: 2, rascunho: 3 };
     fila.sort((a, b) => (ordem[a.tipo] - ordem[b.tipo]) || (b.detalhe_seg - a.detalhe_seg));
 
     return {

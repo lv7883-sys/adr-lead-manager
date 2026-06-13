@@ -11,6 +11,12 @@ const gating = require('./gating');
 const { makeOptoutToken } = require('./optoutToken');
 
 const CONFIDENCE_THRESHOLD = 0.7;
+// Bloco 2 — roteamento por confidence (probabilidade de ser lead):
+//   >= AUTO  : entra no funil automaticamente.
+//   >= REVIEW: fila de revisão (status REVIEW_QUEUE).
+//   <  REVIEW: fila de revisão também, mas status NOT_LEAD (visível, zero lead perdido).
+const AUTO_THRESHOLD = 0.85;
+const REVIEW_THRESHOLD = 0.40;
 
 // LGPD (item 2) — rodapé discreto de opt-out, SÓ na 1ª mensagem (lead NEW).
 // Sem mencionar IA/assistente/tecnologia; link único por lead (token HMAC).
@@ -127,6 +133,69 @@ async function captureInboundOnly(tenantId, channel, externalId, msg, rawBody) {
   }
 }
 
+// Bloco 2 — captura do inbound E cria o lead na FILA DE REVISÃO (não entra no funil).
+// `reviewStatus` = 'REVIEW_QUEUE' (médio) ou 'NOT_LEAD' (baixo). Grava os campos de
+// classificação + review_queue=true. Idempotente. Best-effort: nunca lança.
+async function captureForReview(tenantId, channel, externalId, msg, rawBody, cls, reviewStatus) {
+  if (!externalId || !msg.body) return;
+  const psid = msg.psid || null;
+  const phone = psid ? null : externalId;
+  try {
+    await withTenant(tenantId, async (c) => {
+      // Upsert do lead pela identidade do canal (espelha o PORTÃO 2), com status de revisão.
+      let lead;
+      if (psid) {
+        lead = await c.query(
+          `INSERT INTO leads (tenant_id, name, status, meta_psid, review_queue,
+                              classification_confidence, classification_reasoning, classification_signals)
+           VALUES ($1, $2, $3, $4, true, $5, $6, $7)
+           ON CONFLICT (tenant_id, meta_psid) WHERE meta_psid IS NOT NULL
+           DO UPDATE SET classification_confidence = EXCLUDED.classification_confidence,
+                         classification_reasoning = EXCLUDED.classification_reasoning,
+                         classification_signals = EXCLUDED.classification_signals,
+                         updated_at = now()
+           RETURNING id`,
+          [tenantId, msg.sender || externalId, reviewStatus, externalId,
+           cls.confidence, cls.reasoning, JSON.stringify(cls.profile_signals || [])]
+        );
+      } else {
+        lead = await c.query(
+          `INSERT INTO leads (tenant_id, name, phone, status, review_queue,
+                              classification_confidence, classification_reasoning, classification_signals)
+           VALUES ($1, $2, $3, $4, true, $5, $6, $7)
+           ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
+           DO UPDATE SET classification_confidence = EXCLUDED.classification_confidence,
+                         classification_reasoning = EXCLUDED.classification_reasoning,
+                         classification_signals = EXCLUDED.classification_signals,
+                         updated_at = now()
+           RETURNING id`,
+          [tenantId, msg.sender || phone, phone, reviewStatus,
+           cls.confidence, cls.reasoning, JSON.stringify(cls.profile_signals || [])]
+        );
+      }
+      const conv = (
+        await c.query(
+          `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
+           ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
+           RETURNING id`,
+          [tenantId, channel, externalId]
+        )
+      ).rows[0];
+      await c.query(
+        `INSERT INTO messages
+           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw)
+         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6)
+         ON CONFLICT (tenant_id, external_message_id)
+           WHERE external_message_id IS NOT NULL DO NOTHING`,
+        [tenantId, conv.id, msg.externalMessageId, msg.sender, msg.body, rawBody]
+      );
+      return lead.rows[0].id;
+    });
+  } catch (e) {
+    logger.warn('gate1.capture_for_review_failed', { tenant_id: tenantId, error: e.message });
+  }
+}
+
 /**
  * Processa uma mensagem recebida pelo funil de triagem do ADR-003.
  * Idempotente, assíncrono e tolerante a falhas: qualquer erro é logado e
@@ -181,8 +250,8 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   // ---------------- PORTÃO 1: classificador leve -------------------
   // skipTriage: um lead vindo de Lead Ads (leadgen) já É um lead por definição —
   // pula o classificador (não há mensagem conversacional pra triar).
+  let cls = null;
   if (!msg.skipTriage) {
-    let cls;
     try {
       cls = await classify({ message: msg.body, tenantId });
     } catch (err) {
@@ -190,10 +259,12 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       await captureInboundOnly(tenantId, channel, phone || psid, msg, rawBody); // F: thread completo
       return; // não trava: webhook já retornou 200
     }
-    log.info('gate1.classified', { gate: 1, label: cls.label, confidence: cls.confidence });
-    if (cls.label !== 'LEAD' || cls.confidence < CONFIDENCE_THRESHOLD) {
-      log.info('gate1.ignored', { gate: 1, label: cls.label, confidence: cls.confidence });
-      await captureInboundOnly(tenantId, channel, phone || psid, msg, rawBody); // F: thread completo
+    log.info('gate1.classified', { gate: 1, is_lead: cls.is_lead, confidence: cls.confidence });
+    // Bloco 2 — abaixo do limite automático: NÃO entra no funil; vai pra fila de revisão.
+    if (cls.confidence < AUTO_THRESHOLD) {
+      const reviewStatus = cls.confidence >= REVIEW_THRESHOLD ? 'REVIEW_QUEUE' : 'NOT_LEAD';
+      log.info('gate1.review_queue', { gate: 1, status: reviewStatus, confidence: cls.confidence });
+      await captureForReview(tenantId, channel, phone || psid, msg, rawBody, cls, reviewStatus);
       return;
     }
   }
@@ -242,6 +313,16 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
          DO UPDATE SET updated_at = now()
          RETURNING id, status, (xmax = 0) AS inserted`,
         [tenantId, msg.sender || phone, phone]
+      );
+    }
+
+    // Bloco 2 — grava o score/diagnóstico da classificação no lead do funil.
+    if (cls) {
+      await c.query(
+        `UPDATE leads SET classification_confidence = $2, classification_reasoning = $3,
+                          classification_signals = $4
+          WHERE id = $1`,
+        [lead.rows[0].id, cls.confidence, cls.reasoning, JSON.stringify(cls.profile_signals || [])]
       );
     }
 
@@ -458,4 +539,74 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   await notify({ tenantId, to: ctx.config.notification_whatsapp });
 }
 
-module.exports = { processInbound, mergeQualification, CONFIDENCE_THRESHOLD };
+// Bloco 2 — gera um rascunho (pending_approval) para um lead JÁ existente, sem passar
+// pelo triador. Usado quando a recepção confirma um lead da fila de revisão: replica a
+// geração do PORTÃO 2 (histórico real + generate) de forma isolada. Best-effort.
+async function generateDraftForLead(tenantId, leadId, deps = {}) {
+  const generate = deps.generate || gemini.generateReply;
+  const log = logger.child({ tenant_id: tenantId, lead_id: leadId, fn: 'generateDraftForLead' });
+
+  const info = await withTenant(tenantId, async (c) => {
+    const lead = (await c.query('SELECT id, phone, meta_psid FROM leads WHERE id = $1', [leadId])).rows[0];
+    if (!lead) return null;
+    const ident = String(lead.phone || lead.meta_psid || '').replace(/\D/g, '');
+    const conv = (
+      await c.query(
+        `SELECT id FROM conversations
+          WHERE tenant_id = $1 AND regexp_replace(external_id, '[^0-9]', '', 'g') = $2
+          ORDER BY updated_at DESC LIMIT 1`,
+        [tenantId, ident]
+      )
+    ).rows[0];
+    const last = (
+      await c.query(
+        `SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+          WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+            AND m.role = 'USER'
+          ORDER BY m.received_at DESC LIMIT 1`,
+        [tenantId, ident]
+      )
+    ).rows[0];
+    const cfg = (
+      await c.query(
+        `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
+           FROM tenant_lead_config WHERE tenant_id = $1`,
+        [tenantId]
+      )
+    ).rows[0];
+    const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
+    return {
+      ident, conversationId: conv?.id || null, lastBody: last?.body || '',
+      config: cfg || { school_name: tname || 'Escola', system_prompt_override: null, available_instruments: [], business_hours: {}, notification_whatsapp: null },
+    };
+  });
+  if (!info || !info.conversationId) { log.warn('draft.no_conversation'); return { ok: false, reason: 'no_conversation' }; }
+
+  const history = await loadRealHistory(tenantId, { conversationId: info.conversationId, ident: info.ident, leadId });
+  const systemPrompt = resolveSystemPrompt(info.config);
+  let reply;
+  try {
+    reply = await generate({ systemPrompt, history, message: info.lastBody, retomada: history.length > 0 });
+  } catch (err) {
+    log.error('draft.generate_error', { error: err.message });
+    return { ok: false, reason: 'generate_error' };
+  }
+
+  const out = await withTenant(tenantId, async (c) => {
+    const exist = await c.query(
+      "SELECT id FROM pending_approvals WHERE tenant_id = $1 AND lead_id = $2 AND status = 'PENDING' LIMIT 1",
+      [tenantId, leadId]
+    );
+    if (exist.rowCount) return { id: exist.rows[0].id, dup: true };
+    const r = await c.query(
+      `INSERT INTO pending_approvals (tenant_id, lead_id, conversation_id, suggested_response, status)
+       VALUES ($1, $2, $3, $4, 'PENDING') RETURNING id`,
+      [tenantId, leadId, info.conversationId, reply]
+    );
+    return { id: r.rows[0].id };
+  });
+  log.info('draft.generated', { approval_id: out.id, dup: !!out.dup });
+  return { ok: true, approvalId: out.id };
+}
+
+module.exports = { processInbound, generateDraftForLead, mergeQualification, CONFIDENCE_THRESHOLD };

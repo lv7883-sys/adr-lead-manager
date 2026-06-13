@@ -16,6 +16,7 @@ const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
 const { computeMetrics, computeFunil, computePainel, PERIODS } = require('../metrics');   // G: dashboard de gestão
+const { generateDraftForLead } = require('../engine');   // Bloco 2: rascunho ao confirmar lead
 
 // Valida funil_period: '6m' | '12m' | 'year:YYYY' (senão cai no padrão 6m).
 function parseFunilPeriod(v) {
@@ -95,6 +96,94 @@ router.get(
   }
 );
 
+// GET /tenant/:tid/review-queue — Bloco 2: mensagens aguardando revisão humana
+// (review_queue=true, ainda não decididas). READ-ONLY.
+router.get(
+  '/:tenantId/review-queue',
+  authenticate,
+  requireTenantAccess(READ_ROLES),
+  async (req, res) => {
+    try {
+      const leads = await withTenant(req.tenantId, async (c) => (
+        await c.query(
+          `SELECT l.id, l.name, l.phone, l.meta_psid, l.status,
+                  l.classification_confidence AS confidence,
+                  l.classification_reasoning  AS reasoning,
+                  l.classification_signals    AS signals,
+                  l.created_at,
+                  (SELECT cv.channel FROM conversations cv
+                    WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
+                        = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+                      AND cv.tenant_id = $1
+                    ORDER BY cv.updated_at DESC LIMIT 1) AS channel,
+                  (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                    WHERE cv.tenant_id = $1
+                      AND regexp_replace(cv.external_id, '[^0-9]', '', 'g')
+                        = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+                      AND m.role = 'USER'
+                    ORDER BY m.received_at ASC LIMIT 1) AS first_message
+             FROM leads l
+            WHERE l.review_queue = true AND l.review_result IS NULL
+            ORDER BY l.classification_confidence DESC NULLS LAST, l.created_at DESC
+            LIMIT 200`,
+          [req.tenantId]
+        )
+      ).rows);
+      res.json({ tenant_id: req.tenantId, count: leads.length, leads });
+    } catch (err) {
+      logger.error('tenant.review_queue.error', { tenant_id: req.tenantId, error: err.message });
+      res.status(500).json({ error: 'internal error' });
+    }
+  }
+);
+
+// POST /tenant/:tid/leads/:id/review — Bloco 2: decide um lead da fila de revisão.
+// body { result: 'confirmed_lead' | 'confirmed_not_lead' }. Auth igual a approve.
+router.post(
+  '/:tenantId/leads/:id/review',
+  authenticate,
+  requireTenantAccess(WRITE_ROLES),
+  async (req, res) => {
+    const { id } = req.params;
+    if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+    const result = req.body?.result;
+    if (result !== 'confirmed_lead' && result !== 'confirmed_not_lead') {
+      return res.status(400).json({ error: 'invalid result' });
+    }
+    try {
+      const updated = await withTenant(req.tenantId, async (c) => {
+        const isLead = result === 'confirmed_lead';
+        const r = await c.query(
+          `UPDATE leads
+              SET review_result = $2, review_em = now(), review_by = $3,
+                  review_queue = false,
+                  status = CASE WHEN $4 THEN 'QUALIFYING' ELSE 'NOT_LEAD' END,
+                  updated_at = now()
+            WHERE id = $1 AND review_queue = true AND review_result IS NULL
+            RETURNING id, status`,
+          [id, result, req.tenantRole, isLead]
+        );
+        return r.rows[0] || null;
+      });
+      if (!updated) return res.status(404).json({ error: 'not in review queue' });
+
+      if (result === 'confirmed_lead') {
+        // Processa no funil: gera o rascunho (best-effort; não derruba a confirmação).
+        let draft = { ok: false };
+        try { draft = await generateDraftForLead(req.tenantId, id); }
+        catch (e) { logger.error('tenant.lead.review_draft_error', { tenant_id: req.tenantId, lead_id: id, error: e.message }); }
+        logger.info('tenant.lead.review_confirmed', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole, draft: draft.ok });
+        return res.json({ ok: true, result, status: updated.status, draft: draft.ok, approval_id: draft.approvalId || null });
+      }
+      logger.info('tenant.lead.review_rejected', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
+      res.json({ ok: true, result, status: updated.status });
+    } catch (err) {
+      logger.error('tenant.lead.review_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+      res.status(500).json({ error: 'internal error' });
+    }
+  }
+);
+
 // ---------------------------------------------------------------------------
 // E3 — leads consumidos pela recepção (Scheduler) e pelo painel da unidade.
 // ---------------------------------------------------------------------------
@@ -127,6 +216,7 @@ router.get(
                              WHERE pa.lead_id = l.id AND pa.status = 'PENDING') AS pending_approval
                FROM leads l
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
+              WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
               ORDER BY l.created_at DESC
               LIMIT 100`
           )
@@ -136,13 +226,20 @@ router.get(
             `SELECT count(*)::int AS n FROM pending_approvals WHERE status = 'PENDING'`
           )
         ).rows[0].n;
-        return { leads, pendingTotal };
+        // Bloco 2 — contagem da fila de revisão (badge "Para revisar").
+        const reviewTotal = (
+          await c.query(
+            `SELECT count(*)::int AS n FROM leads WHERE review_queue = true AND review_result IS NULL`
+          )
+        ).rows[0].n;
+        return { leads, pendingTotal, reviewTotal };
       });
       res.json({
         tenant_id: req.tenantId,
         role: req.tenantRole,
         impersonation: req.impersonation,
         pending_approvals_count: result.pendingTotal,
+        review_queue_count: result.reviewTotal,
         leads: result.leads,
       });
     } catch (err) {

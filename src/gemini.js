@@ -66,9 +66,17 @@ Decida se a mensagem vem de um LEAD (pessoa potencialmente interessada em contra
 ou NOT_LEAD (qualquer outra coisa: equipe interna, aluno já matriculado tratando de assuntos
 administrativos, fornecedor, parceiro, spam, mensagem irrelevante ou ambígua).
 
-Na dúvida, classifique como NOT_LEAD. Responda SOMENTE com JSON no formato:
-{"label":"LEAD"|"NOT_LEAD","confidence":<0.0-1.0>,"reason":"<curto>"}`;
+Responda SOMENTE com JSON no formato:
+{"is_lead":<true|false>,"confidence":<0.0-1.0>,"reasoning":"<explicação em português, 1 frase>","suggested_temperature":"quente"|"morno"|"frio","profile_signals":["<sinais curtos>"]}
 
+REGRAS:
+- "confidence" é a PROBABILIDADE de a mensagem vir de um LEAD (0.0 = certeza que NÃO é lead; 1.0 = certeza que É lead). Use a escala toda; na dúvida real, fique perto de 0.5.
+- "is_lead" = true quando confidence >= 0.5.
+- "reasoning": uma frase curta explicando a decisão (ex: "perguntou sobre horários mas não mencionou instrumento").
+- "suggested_temperature": quão quente parece o interesse (quente|morno|frio).
+- "profile_signals": lista curta de sinais úteis pra recepção (ex: "adulto", "iniciante", "urgência baixa"); pode ser vazia.`;
+
+const TEMPS_VALIDAS = ['quente', 'morno', 'frio'];
 async function classify({ message }) {
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
@@ -77,10 +85,20 @@ async function classify({ message }) {
     });
     const res = await model.generateContent(`${TRIAGE_PROMPT}\n\nMensagem: """${message ?? ''}"""`);
     const parsed = JSON.parse(res.response.text());
+    const confidence = Math.min(1, Math.max(0, Number(parsed.confidence) || 0));
+    const isLead = typeof parsed.is_lead === 'boolean' ? parsed.is_lead : confidence >= 0.5;
+    const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning
+      : (typeof parsed.reason === 'string' ? parsed.reason : null);
     return {
-      label: parsed.label === 'LEAD' ? 'LEAD' : 'NOT_LEAD',
-      confidence: Number(parsed.confidence) || 0,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : null,
+      is_lead: isLead,
+      confidence,
+      reasoning,
+      suggested_temperature: TEMPS_VALIDAS.includes(parsed.suggested_temperature) ? parsed.suggested_temperature : null,
+      profile_signals: Array.isArray(parsed.profile_signals)
+        ? parsed.profile_signals.filter((s) => typeof s === 'string').slice(0, 8) : [],
+      // compat com chamadas antigas:
+      label: isLead ? 'LEAD' : 'NOT_LEAD',
+      reason: reasoning,
     };
   });
 }
