@@ -129,6 +129,22 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       )
     ).rows;
 
+    // HEATMAP: SEMPRE 90 dias, independente do filtro de período (mantém o de canal).
+    const heatLeadsRaw = (
+      await c.query(
+        `WITH chan AS (
+           SELECT regexp_replace(external_id, '[^0-9]', '', 'g') AS ident,
+                  (array_agg(channel ORDER BY updated_at DESC))[1] AS channel
+             FROM conversations WHERE tenant_id = $1 GROUP BY 1
+         )
+         SELECT l.created_at, c.channel
+           FROM leads l
+           LEFT JOIN chan c ON c.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+          WHERE l.created_at >= now() - interval '90 days'`,
+        [tenantId]
+      )
+    ).rows;
+
     // ---- agregação em JS ---------------------------------------------------
     const rows = channel ? leads.filter((l) => l.channel === channel) : leads;
     const totalLeads = rows.length;
@@ -181,21 +197,25 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     // BLOCO 2 — funil / temperatura / heatmap / instrumento
     const funil = { NEW: 0, QUALIFYING: 0, QUALIFIED: 0, CONVERTED: 0, OUTRO: 0 };
     const temps = { quente: 0, morno: 0, frio: 0 };
-    const heat = Array.from({ length: 7 }, () => new Array(24).fill(0));
     const instrProcura = new Map();
     const instrConvert = new Map();
     const porCanal = new Map();
     for (const l of rows) {
       funil[l.status in funil ? l.status : 'OUTRO']++;
       temps[temperatura(l)]++;
-      const { hour, dow } = spHourDow(l.created_at);
-      heat[dow][hour]++;
       if (l.instrument) {
         instrProcura.set(l.instrument, (instrProcura.get(l.instrument) || 0) + 1);
         if (l.desfecho === 'matriculado') instrConvert.set(l.instrument, (instrConvert.get(l.instrument) || 0) + 1);
       }
       const ch = l.channel || '(sem canal)';
       porCanal.set(ch, (porCanal.get(ch) || 0) + 1);
+    }
+    // Heatmap (90d fixos): aplica só o filtro de canal.
+    const heat = Array.from({ length: 7 }, () => new Array(24).fill(0));
+    for (const l of heatLeadsRaw) {
+      if (channel && l.channel !== channel) continue;
+      const { hour, dow } = spHourDow(l.created_at);
+      heat[dow][hour]++;
     }
 
     // BLOCO 3 — desfechos (denominador = leads COM desfecho registrado)
