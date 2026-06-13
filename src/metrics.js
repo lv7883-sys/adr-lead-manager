@@ -54,7 +54,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const leads = (
       await c.query(
         `WITH base AS (
-           SELECT l.id, l.status, l.intent, l.created_at, l.desfecho, l.desfecho_em,
+           SELECT l.id, l.name, l.status, l.intent, l.created_at, l.desfecho, l.desfecho_em,
                   regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g') AS ident,
                   q.instrument, COALESCE(q.qualification_complete, false) AS qualif
              FROM leads l
@@ -82,7 +82,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
                   (array_agg(channel ORDER BY updated_at DESC))[1] AS channel
              FROM conversations WHERE tenant_id = $1 GROUP BY 1
          )
-         SELECT b.id, b.status, b.intent, b.created_at, b.desfecho, b.desfecho_em,
+         SELECT b.id, b.name, b.status, b.intent, b.created_at, b.desfecho, b.desfecho_em,
                 b.instrument, b.qualif,
                 i.first_in, i.last_in, o.first_out, o.last_out, o.first_sender,
                 c.channel
@@ -137,6 +137,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const respTimes = []; // segundos até 1ª resposta
     let semResposta = 0, leadParou = 0, comInbound = 0;
     let em15 = 0, em1h = 0;
+    const semRespostaLeads = []; // { id, name } — pro alerta com link direto
     const porRecep = new Map(); // sender -> { n, somaSeg, comTempo }
     for (const l of rows) {
       const fin = l.first_in ? new Date(l.first_in).getTime() : null;
@@ -145,7 +146,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       const lout = l.last_out ? new Date(l.last_out).getTime() : null;
       if (fin) comInbound++;
       const respondido = fout != null && (fin == null || fout >= fin);
-      if (fin && !respondido) semResposta++;
+      if (fin && !respondido) { semResposta++; semRespostaLeads.push({ id: l.id, name: l.name || 'Lead sem nome' }); }
       if (respondido && fin) {
         const seg = Math.max(0, (fout - fin) / 1000);
         respTimes.push(seg);
@@ -234,6 +235,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         pct_em_1h: respTimes.length ? round((em1h / respTimes.length) * 100) : null,
         pct_sem_resposta: comInbound ? round((semResposta / comInbound) * 100) : null,
         sem_resposta_n: semResposta,
+        sem_resposta_leads: semRespostaLeads,
         pct_lead_parou: comInbound ? round((leadParou / comInbound) * 100) : null,
         ranking_recepcao: ranking,
         seg_rascunho_ate_decisao: appr.seg_ate_decisao != null ? round(Number(appr.seg_ate_decisao), 0) : null,
