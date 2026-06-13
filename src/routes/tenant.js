@@ -126,7 +126,7 @@ router.get(
                       AND m.role = 'USER'
                     ORDER BY m.received_at ASC LIMIT 1) AS first_message
              FROM leads l
-            WHERE l.review_queue = true AND l.review_result IS NULL
+            WHERE l.review_queue = true AND l.review_result IS NULL AND l.status = 'REVIEW_QUEUE'
             ORDER BY l.classification_confidence DESC NULLS LAST, l.created_at DESC
             LIMIT 200`,
           [req.tenantId]
@@ -139,6 +139,151 @@ router.get(
     }
   }
 );
+
+// GET /tenant/:tid/unclassified — ADR-019: rede de resgate. NOT_LEAD auto-descartados
+// (<0.40, ainda não resolvidos) + mensagens de contatos internos descartadas.
+const _IDENT = "regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')";
+router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const items = await withTenant(req.tenantId, async (c) => (
+      await c.query(
+        `(SELECT 'lead' AS kind, l.id::text AS id, coalesce(l.phone, l.meta_psid) AS phone, l.name,
+                 l.classification_confidence AS confidence, 'low_confidence' AS reason,
+                 (SELECT min(m.received_at) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                   WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT} AND m.role = 'USER') AS received_at,
+                 (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                   WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT} AND m.role = 'USER'
+                   ORDER BY m.received_at ASC LIMIT 1) AS first_message,
+                 (SELECT cv.channel FROM conversations cv
+                   WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT}
+                   ORDER BY cv.updated_at DESC LIMIT 1) AS channel
+            FROM leads l
+           WHERE l.status = 'NOT_LEAD' AND l.review_queue = true AND l.review_result IS NULL)
+         UNION ALL
+         (SELECT 'message' AS kind, m.id::text AS id, cv.external_id AS phone,
+                 (SELECT ic.name FROM internal_contacts ic WHERE ic.tenant_id = $1
+                   AND regexp_replace(ic.phone, '[^0-9]', '', 'g') = regexp_replace(cv.external_id, '[^0-9]', '', 'g') LIMIT 1) AS name,
+                 NULL::decimal AS confidence, 'internal_contact' AS reason,
+                 m.received_at, m.body AS first_message, cv.channel
+            FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+           WHERE cv.tenant_id = $1 AND m.discarded = true AND m.discard_reason = 'internal_contact')
+         ORDER BY received_at DESC NULLS LAST
+         LIMIT 100`,
+        [req.tenantId]
+      )
+    ).rows);
+    res.json({ tenant_id: req.tenantId, count: items.length, items });
+  } catch (err) {
+    logger.error('tenant.unclassified.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// Helpers de resolução de item não classificado (lead | message).
+async function _msgInfo(c, msgId) {
+  return (await c.query(
+    `SELECT m.id, m.body, m.sender, cv.external_id, cv.channel
+       FROM messages m JOIN conversations cv ON cv.id = m.conversation_id WHERE m.id = $1`, [msgId]
+  )).rows[0] || null;
+}
+
+// POST /tenant/:tid/unclassified/:id/promote — vira lead + processa + feedback 'lead'.
+router.post('/:tenantId/unclassified/:id/promote', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  const kind = req.body?.kind;
+  if (!isUuid(id) || (kind !== 'lead' && kind !== 'message')) return res.status(400).json({ error: 'invalid' });
+  try {
+    const leadId = await withTenant(req.tenantId, async (c) => {
+      if (kind === 'lead') {
+        const r = await c.query(
+          "UPDATE leads SET status = 'QUALIFYING', review_queue = false, updated_at = now() WHERE id = $1 RETURNING id", [id]
+        );
+        if (!r.rows[0]) return null;
+        await _registrarFeedback(c, req.tenantId, id, 'lead', req.tenantRole);
+        return id;
+      }
+      const m = await _msgInfo(c, id);
+      if (!m) return null;
+      const lead = await c.query(
+        `INSERT INTO leads (tenant_id, name, phone, status) VALUES ($1, $2, $3, 'QUALIFYING')
+         ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL DO UPDATE SET status = 'QUALIFYING', updated_at = now()
+         RETURNING id`,
+        [req.tenantId, m.sender || m.external_id, m.external_id]
+      );
+      await c.query("UPDATE messages SET discarded = false, discard_reason = 'promoted' WHERE id = $1", [id]);
+      await _registrarFeedback(c, req.tenantId, lead.rows[0].id, 'lead', req.tenantRole);
+      return lead.rows[0].id;
+    });
+    if (!leadId) return res.status(404).json({ error: 'not found' });
+    let draft = { ok: false };
+    try { draft = await generateDraftForLead(req.tenantId, leadId); }
+    catch (e) { logger.error('tenant.unclassified.promote_draft_error', { tenant_id: req.tenantId, error: e.message }); }
+    logger.info('tenant.unclassified.promoted', { tenant_id: req.tenantId, kind, id, lead_id: leadId, draft: draft.ok });
+    res.json({ ok: true, lead_id: leadId, draft: draft.ok });
+  } catch (err) {
+    logger.error('tenant.unclassified.promote_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tid/unclassified/:id/ignore — marca resolvido (some da lista).
+router.post('/:tenantId/unclassified/:id/ignore', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  const kind = req.body?.kind;
+  if (!isUuid(id) || (kind !== 'lead' && kind !== 'message')) return res.status(400).json({ error: 'invalid' });
+  try {
+    const ok = await withTenant(req.tenantId, async (c) => {
+      const r = kind === 'lead'
+        ? await c.query("UPDATE leads SET review_result = 'confirmed_not_lead', review_em = now(), review_by = $2 WHERE id = $1 RETURNING id", [id, req.tenantRole])
+        : await c.query("UPDATE messages SET discard_reason = 'ignored' WHERE id = $1 AND discarded = true RETURNING id", [id]);
+      return !!r.rows[0];
+    });
+    if (!ok) return res.status(404).json({ error: 'not found' });
+    logger.info('tenant.unclassified.ignored', { tenant_id: req.tenantId, kind, id, by: req.tenantRole });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error('tenant.unclassified.ignore_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tid/unclassified/:id/marcar-interno — adiciona a internal_contacts + resolve.
+router.post('/:tenantId/unclassified/:id/marcar-interno', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  const kind = req.body?.kind;
+  if (!isUuid(id) || (kind !== 'lead' && kind !== 'message')) return res.status(400).json({ error: 'invalid' });
+  const TIPOS = ['gestor', 'recepcionista', 'professor', 'funcionario', 'parceiro', 'outro'];
+  const type = TIPOS.includes(req.body?.type) ? req.body.type : 'outro';
+  const nome = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : null;
+  try {
+    const ok = await withTenant(req.tenantId, async (c) => {
+      let phone = null, defName = nome;
+      if (kind === 'lead') {
+        const l = (await c.query('SELECT phone, name FROM leads WHERE id = $1', [id])).rows[0];
+        if (!l || !l.phone) return false;
+        phone = l.phone; defName = defName || l.name;
+        await c.query("UPDATE leads SET status = 'NOT_LEAD', review_result = 'confirmed_not_lead', review_em = now(), review_by = $2 WHERE id = $1", [id, req.tenantRole]);
+      } else {
+        const m = await _msgInfo(c, id);
+        if (!m || !m.external_id) return false;
+        phone = m.external_id; defName = defName || m.sender;
+        await c.query("UPDATE messages SET discard_reason = 'internal_resolved' WHERE id = $1", [id]);
+      }
+      await c.query(
+        `INSERT INTO internal_contacts (tenant_id, phone, name, type) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (tenant_id, phone) DO NOTHING`,
+        [req.tenantId, phone, defName || 'Contato interno', type]
+      );
+      return true;
+    });
+    if (!ok) return res.status(404).json({ error: 'not found' });
+    logger.info('tenant.unclassified.marcado_interno', { tenant_id: req.tenantId, kind, id, type, by: req.tenantRole });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error('tenant.unclassified.marcar_interno_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
 
 // POST /tenant/:tid/leads/:id/review — Bloco 2: decide um lead da fila de revisão.
 // body { result: 'confirmed_lead' | 'confirmed_not_lead' }. Auth igual a approve.
@@ -241,7 +386,7 @@ router.get(
         // Bloco 2 — contagem da fila de revisão (badge "Para revisar").
         const reviewTotal = (
           await c.query(
-            `SELECT count(*)::int AS n FROM leads WHERE review_queue = true AND review_result IS NULL`
+            `SELECT count(*)::int AS n FROM leads WHERE review_queue = true AND review_result IS NULL AND status = 'REVIEW_QUEUE'`
           )
         ).rows[0].n;
         return { leads, pendingTotal, reviewTotal };

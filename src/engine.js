@@ -160,6 +160,34 @@ async function captureInboundOnly(tenantId, channel, externalId, msg, rawBody) {
   }
 }
 
+// ADR-019 — captura uma mensagem DESCARTADA (gate0) sem criar lead. Upsert da
+// conversa + message com discarded=true. Best-effort. Alimenta "Não classificadas".
+async function captureDiscarded(tenantId, channel, externalId, msg, rawBody, reason) {
+  if (!externalId || !msg.body) return;
+  try {
+    await withTenant(tenantId, async (c) => {
+      const conv = (
+        await c.query(
+          `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
+           ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
+           RETURNING id`,
+          [tenantId, channel, externalId]
+        )
+      ).rows[0];
+      await c.query(
+        `INSERT INTO messages
+           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw, discarded, discard_reason)
+         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6, true, $7)
+         ON CONFLICT (tenant_id, external_message_id)
+           WHERE external_message_id IS NOT NULL DO NOTHING`,
+        [tenantId, conv.id, msg.externalMessageId, msg.sender, msg.body, rawBody, reason]
+      );
+    });
+  } catch (e) {
+    logger.warn('gate0.capture_discarded_failed', { tenant_id: tenantId, error: e.message });
+  }
+}
+
 // Bloco 2 — captura do inbound E cria o lead na FILA DE REVISÃO (não entra no funil).
 // `reviewStatus` = 'REVIEW_QUEUE' (médio) ou 'NOT_LEAD' (baixo). Grava os campos de
 // classificação + review_queue=true. Idempotente. Best-effort: nunca lança.
@@ -288,6 +316,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     );
     if (interno.rowCount > 0) {
       log.info('gate0.internal_contact', { gate: 0 });
+      await captureDiscarded(tenantId, channel, phone, msg, rawBody, 'internal_contact');
       return;
     }
   }
