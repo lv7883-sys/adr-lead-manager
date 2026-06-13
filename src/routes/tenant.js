@@ -15,6 +15,7 @@ const evolution = require('../evolution');   // E4: envio direto via Evolution
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
+const { computeMetrics, PERIODS } = require('../metrics');   // G: dashboard de gestão
 
 const router = express.Router();
 
@@ -31,6 +32,26 @@ router.patch(
   authenticate,
   requireTenantRole(['TENANT_ADMIN']),
   patchLeadConfig
+);
+
+// GET /tenant/:tid/metrics?period=7d|30d|90d&channel= — agregações do dashboard
+// de gestão (G). READ-ONLY. Acesso restrito a gerente/admin é aplicado no Scheduler.
+router.get(
+  '/:tenantId/metrics',
+  authenticate,
+  requireTenantAccess(READ_ROLES),
+  async (req, res) => {
+    const period = PERIODS[req.query.period] ? req.query.period : '30d';
+    const channel = typeof req.query.channel === 'string' && req.query.channel.trim()
+      ? req.query.channel.trim() : null;
+    try {
+      const data = await computeMetrics(req.tenantId, { period, channel });
+      res.json(data);
+    } catch (err) {
+      logger.error('tenant.metrics.error', { tenant_id: req.tenantId, error: err.message });
+      res.status(500).json({ error: 'internal error' });
+    }
+  }
 );
 
 // ---------------------------------------------------------------------------
@@ -244,7 +265,7 @@ router.get(
 // Resolve a aprovação pendente mais recente do lead para um status terminal.
 // approve: APPROVED (ou EDITED se vier um texto editado != sugerido).
 // reject : REJECTED.
-async function decidePending(tenantId, leadId, { status, response }) {
+async function decidePending(tenantId, leadId, { status, response, decidedBy }) {
   return withTenant(tenantId, async (c) => {
     const pending = (
       await c.query(
@@ -266,10 +287,10 @@ async function decidePending(tenantId, leadId, { status, response }) {
     const row = (
       await c.query(
         `UPDATE pending_approvals
-            SET status = $2, suggested_response = $3
+            SET status = $2, suggested_response = $3, decided_at = now(), decided_by = $4
           WHERE id = $1
-        RETURNING id, status, suggested_response, lead_id, conversation_id, created_at`,
-        [pending.id, finalStatus, finalText]
+        RETURNING id, status, suggested_response, lead_id, conversation_id, created_at, decided_at`,
+        [pending.id, finalStatus, finalText, decidedBy || null]
       )
     ).rows[0];
     return { approval: row };
@@ -312,7 +333,7 @@ router.post(
     if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
     const response = typeof req.body?.response === 'string' ? req.body.response.trim() : null;
     try {
-      const r = await decidePending(req.tenantId, id, { status: 'APPROVED', response });
+      const r = await decidePending(req.tenantId, id, { status: 'APPROVED', response, decidedBy: req.tenantRole });
       if (r.notFound) return res.status(404).json({ error: 'no pending approval' });
       // E4 — após gravar o status, envia a resposta aprovada ao lead. Best-effort:
       // falha de envio NÃO derruba o approve (a aprovação já está persistida).
@@ -398,7 +419,7 @@ router.post(
     const { id } = req.params;
     if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
     try {
-      const r = await decidePending(req.tenantId, id, { status: 'REJECTED' });
+      const r = await decidePending(req.tenantId, id, { status: 'REJECTED', decidedBy: req.tenantRole });
       if (r.notFound) return res.status(404).json({ error: 'no pending approval' });
       logger.info('tenant.lead.rejected', {
         tenant_id: req.tenantId, lead_id: id, approval_id: r.approval.id, by: req.tenantRole,
