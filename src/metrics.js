@@ -152,7 +152,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     // BLOCO 1 — SLA / responsividade
     const respTimes = []; // segundos até 1ª resposta
     let semResposta = 0, leadParou = 0, comInbound = 0;
-    let em15 = 0, em1h = 0;
+    let em30 = 0, em2h = 0; // faixas de SLA: <=30min (verde), <=2h (verde+amarelo)
     const semRespostaLeads = []; // { id, name } — pro alerta com link direto
     const porRecep = new Map(); // sender -> { n, somaSeg, comTempo }
     const leadsTabela = []; // linha por lead pra seção "Lista de leads"
@@ -168,8 +168,8 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       if (fin && !respondido) { semResposta++; semRespostaLeads.push({ id: l.id, name: l.name || 'Lead sem nome' }); }
       if (respSeg != null) {
         respTimes.push(respSeg);
-        if (respSeg <= 15 * 60) em15++;
-        if (respSeg <= 60 * 60) em1h++;
+        if (respSeg <= 30 * 60) em30++;
+        if (respSeg <= 120 * 60) em2h++;
         const key = l.first_sender || '(desconhecido)';
         const r = porRecep.get(key) || { n: 0, somaSeg: 0, comTempo: 0 };
         r.n++; r.somaSeg += respSeg; r.comTempo++;
@@ -264,8 +264,10 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
           p90: round(percentile(respTimes, 0.9), 0),
         },
         respondidos: respTimes.length,
-        pct_em_15min: respTimes.length ? round((em15 / respTimes.length) * 100) : null,
-        pct_em_1h: respTimes.length ? round((em1h / respTimes.length) * 100) : null,
+        sla_meta_min: 30,
+        pct_em_30min: respTimes.length ? round((em30 / respTimes.length) * 100) : null,         // verde
+        pct_30min_2h: respTimes.length ? round(((em2h - em30) / respTimes.length) * 100) : null, // amarelo
+        pct_acima_2h: respTimes.length ? round(((respTimes.length - em2h) / respTimes.length) * 100) : null, // vermelho
         pct_sem_resposta: comInbound ? round((semResposta / comInbound) * 100) : null,
         sem_resposta_n: semResposta,
         sem_resposta_leads: semRespostaLeads,
