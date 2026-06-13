@@ -221,6 +221,9 @@ router.get(
           qualification_complete: l.qualification_complete,
           created_at: l.created_at,
           updated_at: l.updated_at,
+          desfecho: l.desfecho,
+          desfecho_notas: l.desfecho_notas,
+          desfecho_em: l.desfecho_em,
           extracted: {
             name: l.qual_name,
             instrument: l.instrument,
