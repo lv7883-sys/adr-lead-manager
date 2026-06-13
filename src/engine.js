@@ -259,6 +259,23 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     return;
   }
 
+  // ---- ADR-018: contato interno (equipe/parceiro) nunca vira lead ----
+  if (phone) {
+    const interno = await withTenant(tenantId, (c) =>
+      c.query(
+        `SELECT 1 FROM internal_contacts
+          WHERE tenant_id = $1
+            AND regexp_replace(phone, '[^0-9]', '', 'g') = regexp_replace($2, '[^0-9]', '', 'g')
+          LIMIT 1`,
+        [tenantId, phone]
+      )
+    );
+    if (interno.rowCount > 0) {
+      log.info('gate0.internal_contact', { gate: 0 });
+      return;
+    }
+  }
+
   // ---------------- PORTÃO 1: classificador leve -------------------
   // skipTriage: um lead vindo de Lead Ads (leadgen) já É um lead por definição —
   // pula o classificador (não há mensagem conversacional pra triar).

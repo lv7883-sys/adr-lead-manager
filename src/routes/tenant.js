@@ -166,6 +166,10 @@ router.post(
             RETURNING id, status`,
           [id, result, req.tenantRole, isLead]
         );
+        // Feedback de aprendizado (ADR-011 Fase 2): a decisão real da recepção.
+        if (r.rows[0]) {
+          await _registrarFeedback(c, req.tenantId, id, isLead ? 'lead' : 'not_lead', req.tenantRole);
+        }
         return r.rows[0] || null;
       });
       if (!updated) return res.status(404).json({ error: 'not in review queue' });
@@ -495,6 +499,20 @@ async function _registrarSaida(tenantId, { phone, externalMessageId, sender, bod
   ));
 }
 
+// Registra feedback de classificação (aprendizado — ADR-011 Fase 2) com o
+// confidence/reasoning ORIGINAIS do classificador. Roda dentro de um client `c`.
+async function _registrarFeedback(c, tenantId, leadId, correctLabel, by) {
+  const lead = (await c.query(
+    'SELECT classification_confidence, classification_reasoning FROM leads WHERE id = $1', [leadId]
+  )).rows[0] || {};
+  await c.query(
+    `INSERT INTO classification_feedback
+       (tenant_id, lead_id, correct_label, original_confidence, original_reasoning, feedback_by)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [tenantId, leadId, correctLabel, lead.classification_confidence ?? null, lead.classification_reasoning ?? null, by || null]
+  );
+}
+
 // POST /tenant/:tid/leads/:id/mensagem — item C: envia texto livre ao lead.
 router.post('/:tenantId/leads/:id/mensagem', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   const { id } = req.params;
@@ -697,11 +715,7 @@ router.post(
         );
         // Feedback de aprendizado: "não é lead" marcado pela recepção (ADR-011 Fase 2).
         if (r.rows[0] && desfecho === 'nao_e_lead') {
-          await c.query(
-            `INSERT INTO classification_feedback (tenant_id, lead_id, correct_label, feedback_by)
-             VALUES ($1, $2, 'not_lead', $3)`,
-            [req.tenantId, id, req.tenantRole]
-          );
+          await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole);
         }
         return r.rows[0] || null;
       });

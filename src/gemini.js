@@ -70,8 +70,9 @@ Analise o CONTEXTO COMPLETO da mensagem, não apenas palavras isoladas. NÃO é 
 - A conversa trata de operação interna da escola (horários, professores, eventos, materiais, reuniões).
 - O conteúdo não tem nenhuma relação com interesse em fazer aulas ou conhecer a escola.
 - É claramente uma troca entre funcionários/equipe.
-- Fala sobre assuntos do dia a dia da escola (bolo, camisetas, salas, alunos já matriculados).
-Nesses casos, retorne confidence < 0.10.
+- Fala sobre assuntos do dia a dia da escola (bolo, camisetas, salas, alunos já matriculados, bandas internas, eventos da escola).
+- Menciona nomes de pessoas da equipe em contexto interno.
+Nesses casos, retorne confidence < 0.10 com reasoning explicando que é comunicação interna.
 
 Responda SOMENTE com JSON no formato:
 {"is_lead":<true|false>,"confidence":<0.0-1.0>,"reasoning":"<explicação em português, 1 frase>","suggested_temperature":"quente"|"morno"|"frio","profile_signals":["<sinais curtos>"]}
