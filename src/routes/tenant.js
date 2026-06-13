@@ -15,7 +15,7 @@ const evolution = require('../evolution');   // E4: envio direto via Evolution
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
-const { computeMetrics, computeFunil, PERIODS } = require('../metrics');   // G: dashboard de gestão
+const { computeMetrics, computeFunil, computePainel, PERIODS } = require('../metrics');   // G: dashboard de gestão
 
 // Valida funil_period: '6m' | '12m' | 'year:YYYY' (senão cai no padrão 6m).
 function parseFunilPeriod(v) {
@@ -74,6 +74,22 @@ router.get(
       res.json(await computeFunil(req.tenantId, { funilPeriod }));
     } catch (err) {
       logger.error('tenant.funil.error', { tenant_id: req.tenantId, error: err.message });
+      res.status(500).json({ error: 'internal error' });
+    }
+  }
+);
+
+// GET /tenant/:tid/painel — fila de ação do turno da recepção (Item 4): leads que
+// precisam de atenção + indicadores de hoje + resumo. READ-ONLY.
+router.get(
+  '/:tenantId/painel',
+  authenticate,
+  requireTenantAccess(READ_ROLES),
+  async (req, res) => {
+    try {
+      res.json(await computePainel(req.tenantId));
+    } catch (err) {
+      logger.error('tenant.painel.error', { tenant_id: req.tenantId, error: err.message });
       res.status(500).json({ error: 'internal error' });
     }
   }

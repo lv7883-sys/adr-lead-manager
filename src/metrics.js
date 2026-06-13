@@ -381,4 +381,109 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
   });
 }
 
-module.exports = { computeMetrics, computeFunil, resolveFunilRange, percentile, temperatura, spHourDow, PERIODS };
+// --- painel da recepção (fila de ação do turno) ----------------------------
+// Início do dia de hoje em America/Sao_Paulo (expressão SQL, sem input externo).
+const SP_HOJE = `date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo'`;
+
+async function computePainel(tenantId) {
+  return withTenant(tenantId, async (c) => {
+    const rows = (
+      await c.query(
+        `WITH inb AS (
+           SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
+                  min(m.received_at) AS first_in, max(m.received_at) AS last_in
+             FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+            WHERE cv.tenant_id = $1 AND m.role = 'USER' GROUP BY 1
+         ),
+         outb AS (
+           SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident,
+                  min(s.received_at) AS first_out, max(s.received_at) AS last_out
+             FROM staff_outbound_samples s
+            WHERE s.tenant_id = $1 AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+            GROUP BY 1
+         ),
+         chan AS (
+           SELECT regexp_replace(external_id, '[^0-9]', '', 'g') AS ident,
+                  (array_agg(channel ORDER BY updated_at DESC))[1] AS channel
+             FROM conversations WHERE tenant_id = $1 GROUP BY 1
+         ),
+         draft AS (
+           SELECT lead_id, max(created_at) AS draft_at, count(*) AS n
+             FROM pending_approvals WHERE tenant_id = $1 AND status = 'PENDING' GROUP BY 1
+         )
+         SELECT l.id, l.name, l.status, l.intent, l.desfecho, l.created_at,
+                q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
+                i.first_in, i.last_in, o.first_out, o.last_out, c.channel,
+                d.draft_at, COALESCE(d.n, 0) AS drafts
+           FROM leads l
+           LEFT JOIN lead_qualifications q ON q.lead_id = l.id
+           LEFT JOIN inb  i ON i.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+           LEFT JOIN outb o ON o.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+           LEFT JOIN chan c ON c.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+           LEFT JOIN draft d ON d.lead_id = l.id`,
+        [tenantId]
+      )
+    ).rows;
+
+    const hojeRow = (
+      await c.query(
+        `SELECT
+           (SELECT count(DISTINCT regexp_replace(external_id, '[^0-9]', '', 'g'))
+              FROM staff_outbound_samples
+             WHERE tenant_id = $1 AND coalesce(raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+               AND received_at >= ${SP_HOJE}) AS leads_respondidos,
+           (SELECT count(*) FROM pending_approvals WHERE tenant_id = $1 AND status = 'APPROVED' AND decided_at >= ${SP_HOJE}) AS aprovados,
+           (SELECT count(*) FROM pending_approvals WHERE tenant_id = $1 AND status = 'EDITED'   AND decided_at >= ${SP_HOJE}) AS editados`,
+        [tenantId]
+      )
+    ).rows[0];
+
+    const agora = Date.now();
+    const dsp = new Date(agora - 3 * 3600 * 1000);
+    const spTodayMs = Date.UTC(dsp.getUTCFullYear(), dsp.getUTCMonth(), dsp.getUTCDate()) + 3 * 3600 * 1000;
+
+    const fila = [];
+    const tempoHoje = [];
+    let leadsAtivos = 0, aguardando = 0, comRascunho = 0;
+    for (const l of rows) {
+      const fin = l.first_in ? new Date(l.first_in).getTime() : null;
+      const fout = l.first_out ? new Date(l.first_out).getTime() : null;
+      const lin = l.last_in ? new Date(l.last_in).getTime() : null;
+      const lout = l.last_out ? new Date(l.last_out).getTime() : null;
+      const respondido = fout != null && (fin == null || fout >= fin);
+      const ativo = !l.desfecho && l.status !== 'CONVERTED';
+      if (ativo) leadsAtivos++;
+      if (fin && !respondido) aguardando++;
+      if (l.drafts > 0) comRascunho++;
+      if (fout != null && fout >= spTodayMs && fin != null) tempoHoje.push((fout - fin) / 1000);
+
+      // Bucket de ação (prioridade: sem_resposta > nova_msg > rascunho).
+      let tipo = null, detalheSeg = null;
+      if (fin && !respondido) { tipo = 'sem_resposta'; detalheSeg = (agora - fin) / 1000; }
+      else if (respondido && lin != null && (lout == null || lin > lout)) { tipo = 'nova_msg'; detalheSeg = (agora - lin) / 1000; }
+      else if (l.drafts > 0 && l.draft_at) { tipo = 'rascunho'; detalheSeg = (agora - new Date(l.draft_at).getTime()) / 1000; }
+      if (!tipo || !ativo) continue;
+      fila.push({
+        id: l.id, name: l.name || 'Lead sem nome',
+        instrument: l.instrument || null, channel: l.channel || null,
+        temperatura: temperatura(l), tipo, detalhe_seg: Math.max(0, Math.round(detalheSeg)),
+        tem_rascunho: l.drafts > 0,
+      });
+    }
+    const ordem = { sem_resposta: 0, nova_msg: 1, rascunho: 2 };
+    fila.sort((a, b) => (ordem[a.tipo] - ordem[b.tipo]) || (b.detalhe_seg - a.detalhe_seg));
+
+    return {
+      fila,
+      hoje: {
+        leads_respondidos: Number(hojeRow.leads_respondidos) || 0,
+        tempo_medio_seg: tempoHoje.length ? Math.round(tempoHoje.reduce((a, b) => a + b, 0) / tempoHoje.length) : null,
+        aprovados: Number(hojeRow.aprovados) || 0,
+        editados: Number(hojeRow.editados) || 0,
+      },
+      resumo: { leads_ativos: leadsAtivos, aguardando_resposta: aguardando, com_rascunho_pendente: comRascunho },
+    };
+  });
+}
+
+module.exports = { computeMetrics, computeFunil, computePainel, resolveFunilRange, percentile, temperatura, spHourDow, PERIODS };
