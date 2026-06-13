@@ -104,4 +104,27 @@ async function getBase64FromMediaMessage({ instance, apikey }, message) {
   };
 }
 
-module.exports = { status, sendText, pickMessageId, getBase64FromMediaMessage, _toggle9BR };
+// ADR-016 P1 — envia mídia (base64) ao lead. `opts` = { mediatype, mimetype, media
+// (base64), fileName, caption? }. Mesmo retry 9-dígitos do sendText.
+async function sendMedia({ instance, apikey }, number, opts) {
+  const n = String(number || '').replace(/\D+/g, '');
+  const corpo = (num) => ({
+    number: num,
+    mediatype: opts.mediatype,
+    mimetype: opts.mimetype,
+    media: opts.media,
+    fileName: opts.fileName,
+    ...(opts.caption ? { caption: opts.caption } : {}),
+  });
+  try {
+    return await req('POST', `/message/sendMedia/${encodeURIComponent(instance)}`, apikey, corpo(n));
+  } catch (e) {
+    if (e && e.status === 400) {
+      const alt = _toggle9BR(n);
+      if (alt && alt !== n) return req('POST', `/message/sendMedia/${encodeURIComponent(instance)}`, apikey, corpo(alt));
+    }
+    throw e;
+  }
+}
+
+module.exports = { status, sendText, sendMedia, pickMessageId, getBase64FromMediaMessage, _toggle9BR };

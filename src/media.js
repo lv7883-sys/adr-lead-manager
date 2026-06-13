@@ -81,4 +81,30 @@ function contentType(filename) {
   return (m && CONTENT_TYPE[m[1].toLowerCase()]) || 'application/octet-stream';
 }
 
-module.exports = { salvarMidia, resolverArquivo, contentType, MEDIA_ROOT };
+// ADR-016 P1 — tipo de mídia a partir do mimetype.
+function tipoDeMime(mimetype) {
+  const b = String(mimetype || '').split(';')[0].trim().toLowerCase();
+  if (b.startsWith('audio/')) return 'audio';
+  if (b.startsWith('image/')) return 'image';
+  if (b.startsWith('video/')) return 'video';
+  return 'document';
+}
+
+// ADR-016 P1 — grava um Buffer (upload da recepção) no volume. Retorna
+// { media_url, media_type, diskPath, base64 }.
+function salvarBuffer({ tenantId, buffer, mimetype, filename }) {
+  const ext = extDe(mimetype, filename);
+  const uuid = crypto.randomUUID();
+  const dir = path.join(MEDIA_ROOT, tenantId);
+  fs.mkdirSync(dir, { recursive: true });
+  const diskPath = path.join(dir, `${uuid}.${ext}`);
+  fs.writeFileSync(diskPath, buffer);
+  return {
+    media_url: `/media/${tenantId}/${uuid}.${ext}`,
+    media_type: tipoDeMime(mimetype),
+    diskPath,
+    base64: buffer.toString('base64'),
+  };
+}
+
+module.exports = { salvarMidia, salvarBuffer, tipoDeMime, resolverArquivo, contentType, MEDIA_ROOT };

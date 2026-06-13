@@ -17,6 +17,9 @@ const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
 const { computeMetrics, computeFunil, computePainel, PERIODS } = require('../metrics');   // G: dashboard de gestão
 const { generateDraftForLead } = require('../engine');   // Bloco 2: rascunho ao confirmar lead
+const multer = require('multer');                        // ADR-016 P1: upload de mídia
+const mediaLib = require('../media');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 // Valida funil_period: '6m' | '12m' | 'year:YYYY' (senão cai no padrão 6m).
 function parseFunilPeriod(v) {
@@ -209,6 +212,11 @@ router.get(
                        FROM messages m
                        JOIN conversations cv ON cv.id = m.conversation_id
                       WHERE cv.external_id = l.phone) AS last_contact_at,
+                    -- item B: última mensagem recebida DO lead (role USER).
+                    (SELECT max(m.received_at)
+                       FROM messages m
+                       JOIN conversations cv ON cv.id = m.conversation_id
+                      WHERE cv.external_id = l.phone AND m.role = 'USER') AS ultimo_contato_lead,
                     (SELECT cv.channel FROM conversations cv
                       WHERE cv.external_id = l.phone
                       ORDER BY cv.updated_at DESC LIMIT 1) AS channel,
@@ -316,7 +324,7 @@ router.get(
                    -- são conversa com o lead) e os textos que a IA já enviou (mostrados
                    -- abaixo como 'ia', pra não duplicar).
                    SELECT s.received_at, 'recepcao' AS kind, s.sender, s.body,
-                          NULL AS media_url, NULL AS media_type, NULL AS media_filename, NULL AS media_transcription
+                          s.media_url, s.media_type, s.media_filename, NULL AS media_transcription
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
                       AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
@@ -463,6 +471,84 @@ async function enviarRespostaAprovada(tenantId, leadId, texto) {
   const res = await evolution.sendText({ instance, apikey }, dados.phone, texto);
   return { sent: true, messageId: evolution.pickMessageId(res) };
 }
+
+// ADR-016 P1 / item C — telefone do lead + creds Evolution (mesma tx, RLS).
+async function _credsLead(tenantId, leadId) {
+  return withTenant(tenantId, async (c) => {
+    const lead = (await c.query('SELECT phone FROM leads WHERE id = $1', [leadId])).rows[0];
+    const tnt = (await c.query('SELECT evolution_instance, evolution_token_enc FROM tenants WHERE id = $1', [tenantId])).rows[0] || {};
+    return { phone: lead && lead.phone, instance: tnt.evolution_instance, apikey: decrypt(tnt.evolution_token_enc) };
+  });
+}
+
+// Registra a saída da recepção em staff_outbound_samples (timeline 'recepcao').
+// O eco fromMe do webhook deduplica pela unique (tenant_id, external_message_id).
+async function _registrarSaida(tenantId, { phone, externalMessageId, sender, body, media }) {
+  await withTenant(tenantId, (c) => c.query(
+    `INSERT INTO staff_outbound_samples
+       (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
+        media_url, media_type, media_filename)
+     VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, NULL, $6, $7, $8)
+     ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
+    [tenantId, phone, externalMessageId || null, sender || 'Recepção', body || null,
+     (media && media.url) || null, (media && media.type) || null, (media && media.filename) || null]
+  ));
+}
+
+// POST /tenant/:tid/leads/:id/mensagem — item C: envia texto livre ao lead.
+router.post('/:tenantId/leads/:id/mensagem', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  if (!text) return res.status(400).json({ error: 'empty text' });
+  try {
+    const d = await _credsLead(req.tenantId, id);
+    if (!d.phone) return res.status(400).json({ error: 'no_phone' });
+    if (!d.instance || !d.apikey) return res.status(400).json({ error: 'tenant_sem_evolution' });
+    const st = await evolution.status({ instance: d.instance, apikey: d.apikey });
+    if (st.state !== 'open') return res.status(409).json({ error: 'instancia=' + st.state });
+    const r = await evolution.sendText({ instance: d.instance, apikey: d.apikey }, d.phone, text);
+    const msgId = evolution.pickMessageId(r);
+    await _registrarSaida(req.tenantId, { phone: d.phone, externalMessageId: msgId, sender: req.tenantRole, body: text });
+    logger.info('tenant.lead.mensagem_enviada', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
+    res.json({ ok: true, message_id: msgId });
+  } catch (err) {
+    logger.error('tenant.lead.mensagem_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
+
+// POST /tenant/:tid/leads/:id/midia — ADR-016 P1: envia mídia (multipart file + caption?).
+router.post('/:tenantId/leads/:id/midia', authenticate, requireTenantAccess(WRITE_ROLES), upload.single('file'), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'no_file' });
+  const caption = typeof req.body?.caption === 'string' ? req.body.caption.trim() : '';
+  const mimetype = req.file.mimetype || 'application/octet-stream';
+  const filename = req.file.originalname || 'arquivo';
+  try {
+    const d = await _credsLead(req.tenantId, id);
+    if (!d.phone) return res.status(400).json({ error: 'no_phone' });
+    if (!d.instance || !d.apikey) return res.status(400).json({ error: 'tenant_sem_evolution' });
+    const st = await evolution.status({ instance: d.instance, apikey: d.apikey });
+    if (st.state !== 'open') return res.status(409).json({ error: 'instancia=' + st.state });
+    const saved = mediaLib.salvarBuffer({ tenantId: req.tenantId, buffer: req.file.buffer, mimetype, filename });
+    const r = await evolution.sendMedia({ instance: d.instance, apikey: d.apikey }, d.phone, {
+      mediatype: saved.media_type, mimetype, media: saved.base64, fileName: filename, caption: caption || undefined,
+    });
+    const msgId = evolution.pickMessageId(r);
+    const ph = caption || ({ audio: '[áudio]', image: '[imagem]', video: '[vídeo]', document: `[documento: ${filename}]` }[saved.media_type] || '[mídia]');
+    await _registrarSaida(req.tenantId, {
+      phone: d.phone, externalMessageId: msgId, sender: req.tenantRole, body: ph,
+      media: { url: saved.media_url, type: saved.media_type, filename: saved.media_type === 'document' ? filename : null },
+    });
+    logger.info('tenant.lead.midia_enviada', { tenant_id: req.tenantId, lead_id: id, kind: saved.media_type, by: req.tenantRole });
+    res.json({ ok: true, message_id: msgId, media_url: saved.media_url, media_type: saved.media_type });
+  } catch (err) {
+    logger.error('tenant.lead.midia_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
 
 // POST /tenant/:tid/leads/:id/approve  — body opcional { response }
 router.post(
