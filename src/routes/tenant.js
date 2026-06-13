@@ -207,7 +207,7 @@ router.get(
       const result = await withTenant(req.tenantId, async (c) => {
         const leads = (
           await c.query(
-            `SELECT l.id, l.name, l.phone, l.status, l.intent,
+            `SELECT l.id, l.name, l.phone, l.status, l.intent, l.temperatura_manual,
                     l.created_at, l.updated_at,
                     q.instrument,
                     q.availability,
@@ -274,7 +274,7 @@ router.get(
       const data = await withTenant(req.tenantId, async (c) => {
         const lead = (
           await c.query(
-            `SELECT l.id, l.name, l.phone, l.status, l.intent, l.meta_psid,
+            `SELECT l.id, l.name, l.phone, l.status, l.intent, l.meta_psid, l.temperatura_manual,
                     l.created_at, l.updated_at,
                     l.desfecho, l.desfecho_notas, l.desfecho_em,
                     q.name AS qual_name, q.instrument, q.availability,
@@ -393,6 +393,7 @@ router.get(
           instrument: l.instrument,
           availability: l.availability,
           qualification_complete: l.qualification_complete,
+          temperatura_manual: l.temperatura_manual,
           created_at: l.created_at,
           updated_at: l.updated_at,
           desfecho: l.desfecho,
@@ -501,17 +502,65 @@ async function _registrarSaida(tenantId, { phone, externalMessageId, sender, bod
 
 // Registra feedback de classificação (aprendizado — ADR-011 Fase 2) com o
 // confidence/reasoning ORIGINAIS do classificador. Roda dentro de um client `c`.
-async function _registrarFeedback(c, tenantId, leadId, correctLabel, by) {
+async function _registrarFeedback(c, tenantId, leadId, correctLabel, by, extra = {}) {
   const lead = (await c.query(
     'SELECT classification_confidence, classification_reasoning FROM leads WHERE id = $1', [leadId]
   )).rows[0] || {};
   await c.query(
     `INSERT INTO classification_feedback
-       (tenant_id, lead_id, correct_label, original_confidence, original_reasoning, feedback_by)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [tenantId, leadId, correctLabel, lead.classification_confidence ?? null, lead.classification_reasoning ?? null, by || null]
+       (tenant_id, lead_id, correct_label, original_confidence, original_reasoning,
+        correction_context, corrected_temperature, feedback_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [tenantId, leadId, correctLabel, lead.classification_confidence ?? null, lead.classification_reasoning ?? null,
+     extra.context ?? null, extra.temperature ?? null, by || null]
   );
 }
+
+// POST /tenant/:tid/leads/:id/requalificar — recepção corrige a classificação.
+// body { classification:'not_lead'|'quente'|'morno'|'frio', instrument?, intent?, observation? }
+router.post('/:tenantId/leads/:id/requalificar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  const cls = req.body?.classification;
+  if (!['not_lead', 'quente', 'morno', 'frio'].includes(cls)) return res.status(400).json({ error: 'invalid classification' });
+  const instrument = typeof req.body?.instrument === 'string' ? req.body.instrument.trim() || null : null;
+  const intent = typeof req.body?.intent === 'string' ? req.body.intent.trim() || null : null;
+  const observation = typeof req.body?.observation === 'string' ? req.body.observation.trim() || null : null;
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      const exists = (await c.query('SELECT 1 FROM leads WHERE id = $1', [id])).rowCount > 0;
+      if (!exists) return null;
+      if (cls === 'not_lead') {
+        await c.query("UPDATE leads SET status = 'NOT_LEAD', updated_at = now() WHERE id = $1", [id]);
+        await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole, { context: observation });
+        return { status: 'NOT_LEAD' };
+      }
+      // quente/morno/frio: override de temperatura + instrumento/intenção opcionais.
+      await c.query(
+        `UPDATE leads SET temperatura_manual = $2,
+                          intent = COALESCE($3, intent), updated_at = now()
+          WHERE id = $1`,
+        [id, cls, intent]
+      );
+      if (instrument) {
+        await c.query(
+          `INSERT INTO lead_qualifications (tenant_id, lead_id, instrument, extracted_at)
+           VALUES ($1, $2, $3, now())
+           ON CONFLICT (tenant_id, lead_id) DO UPDATE SET instrument = EXCLUDED.instrument, extracted_at = now()`,
+          [req.tenantId, id, instrument]
+        );
+      }
+      await _registrarFeedback(c, req.tenantId, id, 'lead', req.tenantRole, { context: observation, temperature: cls });
+      return { status: 'requalificado', temperatura: cls };
+    });
+    if (!out) return res.status(404).json({ error: 'lead not found' });
+    logger.info('tenant.lead.requalificado', { tenant_id: req.tenantId, lead_id: id, classification: cls, by: req.tenantRole });
+    res.json({ ok: true, ...out });
+  } catch (err) {
+    logger.error('tenant.lead.requalificar_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
 
 // POST /tenant/:tid/leads/:id/mensagem — item C: envia texto livre ao lead.
 router.post('/:tenantId/leads/:id/mensagem', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {

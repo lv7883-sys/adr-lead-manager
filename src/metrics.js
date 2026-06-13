@@ -28,6 +28,7 @@ function spHourDow(ts) {
   return { hour: x.getUTCHours(), dow: x.getUTCDay() };
 }
 function temperatura(l) {
+  if (l.temperatura_manual === 'quente' || l.temperatura_manual === 'morno' || l.temperatura_manual === 'frio') return l.temperatura_manual;
   const intent = String(l.intent || '').toUpperCase();
   const status = String(l.status || '').toUpperCase();
   if (l.qualif === true || intent === 'SCHEDULE_INTEREST') return 'quente';
@@ -54,7 +55,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const leads = (
       await c.query(
         `WITH base AS (
-           SELECT l.id, l.name, l.status, l.intent, l.created_at, l.desfecho, l.desfecho_em,
+           SELECT l.id, l.name, l.status, l.intent, l.created_at, l.desfecho, l.desfecho_em, l.temperatura_manual,
                   regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g') AS ident,
                   q.instrument, COALESCE(q.qualification_complete, false) AS qualif
              FROM leads l
@@ -83,7 +84,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
                   (array_agg(channel ORDER BY updated_at DESC))[1] AS channel
              FROM conversations WHERE tenant_id = $1 GROUP BY 1
          )
-         SELECT b.id, b.name, b.status, b.intent, b.created_at, b.desfecho, b.desfecho_em,
+         SELECT b.id, b.name, b.status, b.intent, b.created_at, b.desfecho, b.desfecho_em, b.temperatura_manual,
                 b.instrument, b.qualif,
                 i.first_in, i.last_in, o.first_out, o.last_out, o.first_sender,
                 c.channel
@@ -415,7 +416,7 @@ async function computePainel(tenantId) {
            SELECT lead_id, max(created_at) AS draft_at, count(*) AS n
              FROM pending_approvals WHERE tenant_id = $1 AND status = 'PENDING' GROUP BY 1
          )
-         SELECT l.id, l.name, l.status, l.intent, l.desfecho, l.created_at,
+         SELECT l.id, l.name, l.status, l.intent, l.desfecho, l.created_at, l.temperatura_manual,
                 l.review_queue, l.review_result, l.classification_confidence,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
                 i.first_in, i.last_in, o.first_out, o.last_out, c.channel,

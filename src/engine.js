@@ -18,6 +18,22 @@ const CONFIDENCE_THRESHOLD = 0.7;
 const AUTO_THRESHOLD = 0.85;
 const REVIEW_THRESHOLD = 0.40;
 
+// Few-shot dinâmico: últimas correções da recepção pra calibrar o classificador.
+async function _fewShotExamples(tenantId) {
+  try {
+    const res = await withTenant(tenantId, (c) => c.query(
+      `SELECT correct_label, original_reasoning, correction_context, corrected_temperature
+         FROM classification_feedback WHERE tenant_id = $1
+        ORDER BY feedback_at DESC LIMIT 10`,
+      [tenantId]
+    ));
+    return res.rows.map((r) => ({
+      label: r.correct_label, reasoning: r.original_reasoning,
+      context: r.correction_context, temperature: r.corrected_temperature,
+    }));
+  } catch { return []; }
+}
+
 // ADR-016 — params de mídia da mensagem (4 colunas), na ordem do INSERT.
 function _mediaCols(msg) {
   const m = (msg && msg.media) || null;
@@ -281,8 +297,9 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   // pula o classificador (não há mensagem conversacional pra triar).
   let cls = null;
   if (!msg.skipTriage) {
+    const examples = await _fewShotExamples(tenantId);   // few-shot dinâmico (PARTE 3)
     try {
-      cls = await classify({ message: msg.body, tenantId });
+      cls = await classify({ message: msg.body, examples });
     } catch (err) {
       log.error('gate1.error', { gate: 1, error: err.message });
       await captureInboundOnly(tenantId, channel, phone || psid, msg, rawBody); // F: thread completo

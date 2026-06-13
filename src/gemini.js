@@ -85,13 +85,27 @@ REGRAS:
 - "profile_signals": lista curta de sinais úteis pra recepção (ex: "adulto", "iniciante", "urgência baixa"); pode ser vazia.`;
 
 const TEMPS_VALIDAS = ['quente', 'morno', 'frio'];
-async function classify({ message }) {
+// Few-shot dinâmico: correções reais da recepção (classification_feedback).
+// `examples` = [{ label:'lead'|'not_lead', reasoning, context, temperature }].
+function _fewShot(examples) {
+  if (!Array.isArray(examples) || !examples.length) return '';
+  const trecho = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const neg = examples.filter((e) => e.label === 'not_lead' && e.reasoning).slice(0, 5);
+  const pos = examples.filter((e) => e.label === 'lead' && e.reasoning).slice(0, 5);
+  if (!neg.length && !pos.length) return '';
+  let s = '\n\nExemplos de classificações corrigidas nesta escola:';
+  for (const e of neg) s += `\nEXEMPLO NEGATIVO: "${trecho(e.reasoning)}" → CORRETO: Não é lead.${e.context ? ' Motivo: ' + trecho(e.context) : ''}`;
+  for (const e of pos) s += `\nEXEMPLO POSITIVO: "${trecho(e.reasoning)}" → CORRETO: É lead${e.temperature ? ' com temperatura ' + e.temperature : ''}.`;
+  return s;
+}
+
+async function classify({ message, examples }) {
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0 },
     });
-    const res = await model.generateContent(`${TRIAGE_PROMPT}\n\nMensagem: """${message ?? ''}"""`);
+    const res = await model.generateContent(`${TRIAGE_PROMPT}${_fewShot(examples)}\n\nMensagem: """${message ?? ''}"""`);
     const parsed = JSON.parse(res.response.text());
     const confidence = Math.min(1, Math.max(0, Number(parsed.confidence) || 0));
     const isLead = typeof parsed.is_lead === 'boolean' ? parsed.is_lead : confidence >= 0.5;
