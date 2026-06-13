@@ -667,6 +667,7 @@ const DESFECHOS_VALIDOS = [
   'nao_matriculado_concorrente',
   'nao_matriculado_desistiu',
   'nao_compareceu_aula',
+  'nao_e_lead',
   'outro',
 ];
 
@@ -688,9 +689,10 @@ router.post(
       const row = await withTenant(req.tenantId, async (c) => {
         const r = await c.query(
           `UPDATE leads
-              SET desfecho = $2, desfecho_notas = $3, desfecho_em = now()
+              SET desfecho = $2, desfecho_notas = $3, desfecho_em = now(),
+                  status = CASE WHEN $2 = 'nao_e_lead' THEN 'NOT_LEAD' ELSE status END
             WHERE id = $1
-            RETURNING desfecho, desfecho_notas, desfecho_em`,
+            RETURNING desfecho, desfecho_notas, desfecho_em, status`,
           [id, desfecho, notas]
         );
         return r.rows[0] || null;
