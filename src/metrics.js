@@ -344,9 +344,9 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
                 ) AS realizadas,
                 count(*) FILTER (WHERE desfecho = 'matriculado') AS matriculas
            FROM leads
-          WHERE created_at >= $2::date AND created_at < $3::date
+          WHERE created_at >= $1::date AND created_at < $2::date
           GROUP BY 1`,
-        [tenantId, start, end]
+        [start, end]
       )
     ).rows;
     const porMes = new Map(rows.map((r) => [r.mes, r]));
