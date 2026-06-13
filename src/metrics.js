@@ -139,6 +139,8 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     let em15 = 0, em1h = 0;
     const semRespostaLeads = []; // { id, name } — pro alerta com link direto
     const porRecep = new Map(); // sender -> { n, somaSeg, comTempo }
+    const leadsTabela = []; // linha por lead pra seção "Lista de leads"
+    const agora = Date.now();
     for (const l of rows) {
       const fin = l.first_in ? new Date(l.first_in).getTime() : null;
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
@@ -146,19 +148,30 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       const lout = l.last_out ? new Date(l.last_out).getTime() : null;
       if (fin) comInbound++;
       const respondido = fout != null && (fin == null || fout >= fin);
+      const respSeg = (respondido && fin) ? Math.max(0, (fout - fin) / 1000) : null;
       if (fin && !respondido) { semResposta++; semRespostaLeads.push({ id: l.id, name: l.name || 'Lead sem nome' }); }
-      if (respondido && fin) {
-        const seg = Math.max(0, (fout - fin) / 1000);
-        respTimes.push(seg);
-        if (seg <= 15 * 60) em15++;
-        if (seg <= 60 * 60) em1h++;
+      if (respSeg != null) {
+        respTimes.push(respSeg);
+        if (respSeg <= 15 * 60) em15++;
+        if (respSeg <= 60 * 60) em1h++;
         const key = l.first_sender || '(desconhecido)';
         const r = porRecep.get(key) || { n: 0, somaSeg: 0, comTempo: 0 };
-        r.n++; r.somaSeg += seg; r.comTempo++;
+        r.n++; r.somaSeg += respSeg; r.comTempo++;
         porRecep.set(key, r);
       }
       // "respondemos mas o lead parou": última palavra foi nossa.
       if (respondido && lout != null && (lin == null || lout > lin)) leadParou++;
+      // Tempo em aberto: respondido = tempo até a 1ª resposta; sem resposta = desde
+      // a chegada (1º inbound, ou created_at se não houver) até agora.
+      const chegada = fin || new Date(l.created_at).getTime();
+      const abertoSeg = respondido ? respSeg : Math.max(0, (agora - chegada) / 1000);
+      leadsTabela.push({
+        id: l.id, name: l.name || 'Lead sem nome',
+        channel: l.channel || null, instrument: l.instrument || null,
+        status: l.status, temperatura: temperatura(l),
+        respondido, resposta_seg: respSeg == null ? null : round(respSeg, 0),
+        aberto_seg: round(abertoSeg, 0),
+      });
     }
     respTimes.sort((a, b) => a - b);
     const ranking = [...porRecep.entries()]
@@ -203,12 +216,11 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       if (l.desfecho === 'matriculado') matPorCanal[ch].matriculados++;
     }
     // leads parados (sem desfecho) por faixa de inatividade
-    const now = Date.now();
     const parados = { d7: 0, d15: 0, d30: 0 };
     for (const l of rows) {
       if (l.desfecho) continue;
       const ult = l.last_out || l.last_in || l.created_at;
-      const dias = (now - new Date(ult).getTime()) / 864e5;
+      const dias = (agora - new Date(ult).getTime()) / 864e5;
       if (dias > 30) parados.d30++;
       else if (dias > 15) parados.d15++;
       else if (dias > 7) parados.d7++;
@@ -224,6 +236,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
 
     return {
       period, channel: channel || null, total_leads: totalLeads,
+      leads_tabela: leadsTabela,
       bloco1_sla: {
         primeira_resposta_seg: {
           mediana: round(percentile(respTimes, 0.5), 0),
