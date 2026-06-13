@@ -32,7 +32,9 @@ function extDe(mimetype, filename) {
 // Retorna { media_url, media_type, media_filename, diskPath, mimetype, base64 } ou null.
 async function salvarMidia({ tenantId, instance, apikey, media }) {
   try {
-    const dl = await evolution.getBase64FromMediaMessage({ instance, apikey }, media.rawMessage);
+    // A Evolution precisa do envelope com a key (só o conteúdo data.message dá HTTP 400).
+    const envelope = { key: media.messageKey, message: media.rawMessage };
+    const dl = await evolution.getBase64FromMediaMessage({ instance, apikey }, envelope);
     if (!dl || !dl.base64) {
       logger.warn('media.no_base64', { tenant_id: tenantId, kind: media.kind });
       return null;
