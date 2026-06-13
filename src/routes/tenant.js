@@ -695,6 +695,14 @@ router.post(
             RETURNING desfecho, desfecho_notas, desfecho_em, status`,
           [id, desfecho, notas]
         );
+        // Feedback de aprendizado: "não é lead" marcado pela recepção (ADR-011 Fase 2).
+        if (r.rows[0] && desfecho === 'nao_e_lead') {
+          await c.query(
+            `INSERT INTO classification_feedback (tenant_id, lead_id, correct_label, feedback_by)
+             VALUES ($1, $2, 'not_lead', $3)`,
+            [req.tenantId, id, req.tenantRole]
+          );
+        }
         return r.rows[0] || null;
       });
       if (!row) return res.status(404).json({ error: 'lead not found' });

@@ -66,6 +66,13 @@ Decida se a mensagem vem de um LEAD (pessoa potencialmente interessada em contra
 ou NOT_LEAD (qualquer outra coisa: equipe interna, aluno já matriculado tratando de assuntos
 administrativos, fornecedor, parceiro, spam, mensagem irrelevante ou ambígua).
 
+Analise o CONTEXTO COMPLETO da mensagem, não apenas palavras isoladas. NÃO é lead quando:
+- A conversa trata de operação interna da escola (horários, professores, eventos, materiais, reuniões).
+- O conteúdo não tem nenhuma relação com interesse em fazer aulas ou conhecer a escola.
+- É claramente uma troca entre funcionários/equipe.
+- Fala sobre assuntos do dia a dia da escola (bolo, camisetas, salas, alunos já matriculados).
+Nesses casos, retorne confidence < 0.10.
+
 Responda SOMENTE com JSON no formato:
 {"is_lead":<true|false>,"confidence":<0.0-1.0>,"reasoning":"<explicação em português, 1 frase>","suggested_temperature":"quente"|"morno"|"frio","profile_signals":["<sinais curtos>"]}
 
