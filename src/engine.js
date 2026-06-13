@@ -6,6 +6,7 @@ const { toE164 } = require('./validation');
 const { resolveSystemPrompt } = require('./templates');
 const gemini = require('./gemini');
 const notifyModule = require('./notify');
+const notificacao = require('./notificacao');   // Bloco 4: push WhatsApp pra recepção
 const redisClient = require('./redisClient');
 const gating = require('./gating');
 const { makeOptoutToken } = require('./optoutToken');
@@ -192,11 +193,11 @@ async function captureDiscarded(tenantId, channel, externalId, msg, rawBody, rea
 // `reviewStatus` = 'REVIEW_QUEUE' (médio) ou 'NOT_LEAD' (baixo). Grava os campos de
 // classificação + review_queue=true. Idempotente. Best-effort: nunca lança.
 async function captureForReview(tenantId, channel, externalId, msg, rawBody, cls, reviewStatus) {
-  if (!externalId || !msg.body) return;
+  if (!externalId || !msg.body) return null;
   const psid = msg.psid || null;
   const phone = psid ? null : externalId;
   try {
-    await withTenant(tenantId, async (c) => {
+    return await withTenant(tenantId, async (c) => {
       // Upsert do lead pela identidade do canal (espelha o PORTÃO 2), com status de revisão.
       let lead;
       if (psid) {
@@ -249,6 +250,7 @@ async function captureForReview(tenantId, channel, externalId, msg, rawBody, cls
     });
   } catch (e) {
     logger.warn('gate1.capture_for_review_failed', { tenant_id: tenantId, error: e.message });
+    return null;
   }
 }
 
@@ -265,6 +267,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   const classifyIntent = deps.classifyIntent || gemini.classifyIntent;
   const extract = deps.extract || gemini.extractQualification;
   const notify = deps.notify || notifyModule.notifyReceptionist;
+  const notificar = deps.notificar || notificacao.notificarRecepcao;   // Bloco 4
   const redis = deps.redis || redisClient;
 
   const tenantId = tenant.id;
@@ -339,7 +342,11 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     if (cls.confidence < AUTO_THRESHOLD) {
       const reviewStatus = cls.confidence >= REVIEW_THRESHOLD ? 'REVIEW_QUEUE' : 'NOT_LEAD';
       log.info('gate1.review_queue', { gate: 1, status: reviewStatus, confidence: cls.confidence });
-      await captureForReview(tenantId, channel, phone || psid, msg, rawBody, cls, reviewStatus);
+      const reviewLeadId = await captureForReview(tenantId, channel, phone || psid, msg, rawBody, cls, reviewStatus);
+      // Gatilho 3 — só REVIEW_QUEUE (médio) notifica; NOT_LEAD<0.40 segue silencioso.
+      if (reviewStatus === 'REVIEW_QUEUE' && reviewLeadId) {
+        await notificar(tenantId, 'revisao', { leadId: reviewLeadId });
+      }
       return;
     }
   }
@@ -611,8 +618,15 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     lead_promoted: ctx.leadStatus === 'NEW',
   });
 
-  // Notifica a recepcionista (best-effort).
-  await notify({ tenantId, to: ctx.config.notification_whatsapp });
+  // Bloco 4 — notifica a recepção (best-effort). Gatilho 1 (lead novo) ou 2 (lead
+  // existente respondeu). nome/instrumento do que foi extraído nesta passagem.
+  const _nome = (qual && qual.values && qual.values.name) || null;
+  const _instrumento = (qual && qual.values && qual.values.instrument) || null;
+  if (primeiraMensagem) {
+    await notificar(tenantId, 'novo_lead', { leadId: ctx.leadId, name: _nome, instrument: _instrumento, confidence: cls ? cls.confidence : 1 });
+  } else {
+    await notificar(tenantId, 'nova_msg', { leadId: ctx.leadId, name: _nome });
+  }
 }
 
 // Bloco 2 — gera um rascunho (pending_approval) para um lead JÁ existente, sem passar
