@@ -187,6 +187,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         status: l.status, temperatura: temperatura(l),
         respondido, resposta_seg: respSeg == null ? null : round(respSeg, 0),
         aberto_seg: round(abertoSeg, 0),
+        ultimo_contato_lead: l.last_in || null, // última msg DO lead (role USER)
       });
     }
     respTimes.sort((a, b) => a - b);
