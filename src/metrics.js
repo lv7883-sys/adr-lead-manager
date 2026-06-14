@@ -613,7 +613,9 @@ async function computePainel(tenantId) {
     for (const l of rows) {
       // Leads na fila de revisão ficam SÓ na aba "Revisar" (não na fila de ação).
       if (l.review_queue && !l.review_result) { comRascunho += l.drafts > 0 ? 1 : 0; continue; }
-      const ativo = !l.desfecho && l.status !== 'CONVERTED';
+      // Leads não-reais ficam fora da fila de ação (igual ao funil): NOT_LEAD/REVIEW_QUEUE.
+      const ativo = !l.desfecho && l.status !== 'CONVERTED'
+        && l.status !== 'NOT_LEAD' && l.status !== 'REVIEW_QUEUE';
       if (!ativo) continue;
       const fin = l.first_in ? new Date(l.first_in).getTime() : null;
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
