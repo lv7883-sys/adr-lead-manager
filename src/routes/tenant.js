@@ -938,6 +938,73 @@ router.put('/:tenantId/horario-comercial', authenticate, requireTenantAccess(WRI
   }
 });
 
+// ADR-018 — contatos internos (equipe/parceiros que nunca viram lead).
+const _TIPOS_INTERNO = ['gestor', 'recepcionista', 'professor', 'funcionario', 'parceiro', 'outro'];
+
+// Normaliza para dígitos com DDI 55 (formato dos dados existentes; o engine casa
+// internal_contacts por dígitos). Aceita +55..., 55..., ou número BR sem DDI.
+function _normalizaTelefoneBR(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (!d) return null;
+  if (!d.startsWith('55') && (d.length === 10 || d.length === 11)) d = '55' + d;
+  return d.length >= 12 && d.length <= 13 ? d : null;
+}
+
+// GET /tenant/:tid/internal-contacts — lista os contatos internos do tenant.
+router.get('/:tenantId/internal-contacts', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const rows = await withTenant(req.tenantId, (c) => c.query(
+      `SELECT id, name, phone, type, created_at
+         FROM internal_contacts WHERE tenant_id = $1
+        ORDER BY created_at DESC`, [req.tenantId]
+    ).then((r) => r.rows));
+    res.json({ tenant_id: req.tenantId, count: rows.length, contacts: rows });
+  } catch (err) {
+    logger.error('tenant.internal_contacts.list_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tid/internal-contacts — body { name, phone, type }.
+router.post('/:tenantId/internal-contacts', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  const phone = _normalizaTelefoneBR(req.body?.phone);
+  const type = _TIPOS_INTERNO.includes(req.body?.type) ? req.body.type : null;
+  if (!name) return res.status(400).json({ error: 'informe o nome' });
+  if (!phone) return res.status(400).json({ error: 'telefone inválido (use +55 e DDD)' });
+  if (!type) return res.status(400).json({ error: 'tipo inválido' });
+  try {
+    const row = await withTenant(req.tenantId, (c) => c.query(
+      `INSERT INTO internal_contacts (tenant_id, phone, name, type) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (tenant_id, phone) DO UPDATE SET name = EXCLUDED.name, type = EXCLUDED.type
+       RETURNING id, name, phone, type, created_at`,
+      [req.tenantId, phone, name, type]
+    ).then((r) => r.rows[0]));
+    logger.info('tenant.internal_contacts.created', { tenant_id: req.tenantId, type, by: req.tenantRole });
+    res.json({ ok: true, contact: row });
+  } catch (err) {
+    logger.error('tenant.internal_contacts.create_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// DELETE /tenant/:tid/internal-contacts/:id — remove um contato interno.
+router.delete('/:tenantId/internal-contacts/:id', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const n = await withTenant(req.tenantId, (c) => c.query(
+      'DELETE FROM internal_contacts WHERE id = $1 AND tenant_id = $2', [id, req.tenantId]
+    ).then((r) => r.rowCount));
+    if (!n) return res.status(404).json({ error: 'not found' });
+    logger.info('tenant.internal_contacts.deleted', { tenant_id: req.tenantId, id, by: req.tenantRole });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error('tenant.internal_contacts.delete_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // POST /tenant/:tid/leads/:id/approve  — body opcional { response }
 router.post(
   '/:tenantId/leads/:id/approve',
