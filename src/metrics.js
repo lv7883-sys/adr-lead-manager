@@ -27,6 +27,16 @@ function spHourDow(ts) {
   const x = new Date(t);
   return { hour: x.getUTCHours(), dow: x.getUTCDay() };
 }
+// Dia-calendário (YYYY-MM-DD) em America/Sao_Paulo — pra séries diárias.
+function spDay(ts) {
+  return new Date(new Date(ts).getTime() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+}
+// Faixa de silêncio (PARTE 3): 3-7 / 7-15 / +15 dias.
+function faixaSilencio(dias) {
+  if (dias > 15) return 'd15_mais';
+  if (dias > 7) return 'd7_15';
+  return 'd3_7';
+}
 function temperatura(l) {
   if (l.temperatura_manual === 'quente' || l.temperatura_manual === 'morno' || l.temperatura_manual === 'frio') return l.temperatura_manual;
   const intent = String(l.intent || '').toUpperCase();
@@ -149,6 +159,26 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       )
     ).rows;
 
+    // REABORDAGENS (BLOCO C): tentativas no período + quantas o lead respondeu
+    // DEPOIS (calculado na leitura — sem job de fundo; `respondeu` fica null no envio).
+    const reab = (
+      await c.query(
+        `SELECT count(*)::int AS total,
+                count(*) FILTER (WHERE EXISTS (
+                  SELECT 1 FROM messages m
+                    JOIN conversations cv ON cv.id = m.conversation_id
+                   WHERE cv.tenant_id = $1 AND m.role = 'USER'
+                     AND regexp_replace(cv.external_id, '[^0-9]', '', 'g')
+                         = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+                     AND m.received_at > rt.enviado_em
+                ))::int AS responderam
+           FROM reabordagem_tentativas rt
+           JOIN leads l ON l.id = rt.lead_id
+          WHERE rt.tenant_id = $1 AND rt.enviado_em >= now() - ($2 || ' days')::interval`,
+        [tenantId, days]
+      )
+    ).rows[0];
+
     // ---- agregação em JS ---------------------------------------------------
     const rows = channel ? leads.filter((l) => l.channel === channel) : leads;
     const totalLeads = rows.length;
@@ -161,6 +191,8 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const TRES_DIAS = 3 * 86400;
     const aguardandoLista = []; // { id, name, esperando_seg }
     let silenciosos3d = 0;
+    const silenciososLista = []; // PARTE 3 — { id, name, instrument, ultimo_contato_em, silencio_seg, faixa }
+    const respPorDia = new Map(); // PARTE 4 — dia(YYYY-MM-DD) -> { soma, n } (tempo de 1ª resposta)
     const semRespostaLeads = []; // { id, name } — pro alerta com link direto
     const porRecep = new Map(); // sender -> { n, somaSeg, comTempo }
     const leadsTabela = []; // linha por lead pra seção "Lista de leads"
@@ -182,6 +214,11 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         const r = porRecep.get(key) || { n: 0, somaSeg: 0, comTempo: 0 };
         r.n++; r.somaSeg += respSeg; r.comTempo++;
         porRecep.set(key, r);
+        // PARTE 4 — tendência diária do tempo de 1ª resposta (dia da nossa resposta).
+        const dia = spDay(l.first_out);
+        const rd = respPorDia.get(dia) || { soma: 0, n: 0 };
+        rd.soma += respSeg; rd.n++;
+        respPorDia.set(dia, rd);
       }
       // "respondemos mas o lead parou": última palavra foi nossa.
       if (respondido && lout != null && (lin == null || lout > lin)) leadParou++;
@@ -191,6 +228,14 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         aguardandoLista.push({ id: l.id, name: l.name || 'Lead sem nome', esperando_seg: Math.max(0, Math.round((agora - lin) / 1000)) });
       } else if (ativo021 && lout != null && (agora - lout) / 1000 > TRES_DIAS) {
         silenciosos3d++;
+        const silSeg = Math.round((agora - lout) / 1000);
+        silenciososLista.push({
+          id: l.id, name: l.name || 'Lead sem nome',
+          instrument: l.instrument || null,
+          ultimo_contato_em: l.last_out,
+          silencio_seg: silSeg,
+          faixa: faixaSilencio(silSeg / 86400),
+        });
       }
       // Tempo em aberto: respondido = tempo até a 1ª resposta; sem resposta = desde
       // a chegada (1º inbound, ou created_at se não houver) até agora.
@@ -295,8 +340,31 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         aguardando_mais_antigo_seg: aguardandoLista.length ? Math.max(...aguardandoLista.map((a) => a.esperando_seg)) : null,
         aguardando_lista: aguardandoLista.sort((a, b) => b.esperando_seg - a.esperando_seg).slice(0, 50),
         silenciosos_3d: silenciosos3d,
-        reabordados_no_prazo: null,   // sem dados (futuro)
-        taxa_retomada: null,          // sem dados (futuro)
+        reabordados_no_prazo: Number(reab.total) || 0,
+        taxa_retomada: Number(reab.total) ? round((Number(reab.responderam) / Number(reab.total)) * 100) : null,
+      },
+      // PARTE 3 — leads silenciosos (cliente parou; aguardam retomada).
+      bloco_silenciosos: {
+        total: silenciososLista.length,
+        silencio_medio_seg: silenciososLista.length
+          ? Math.round(silenciososLista.reduce((a, s) => a + s.silencio_seg, 0) / silenciososLista.length) : null,
+        distribuicao: {
+          d3_7: silenciososLista.filter((s) => s.faixa === 'd3_7').length,
+          d7_15: silenciososLista.filter((s) => s.faixa === 'd7_15').length,
+          d15_mais: silenciososLista.filter((s) => s.faixa === 'd15_mais').length,
+        },
+        lista: silenciososLista.sort((a, b) => b.silencio_seg - a.silencio_seg).slice(0, 100),
+      },
+      // PARTE 4 — desempenho da recepção quando RESPONDE o cliente.
+      bloco_respostas: {
+        total_respostas: respTimes.length,
+        tempo_medio_seg: respTimes.length ? round(respTimes.reduce((a, b) => a + b, 0) / respTimes.length, 0) : null,
+        pct_em_30min: respTimes.length ? round((em30 / respTimes.length) * 100) : null,
+        pct_em_2h: respTimes.length ? round((em2h / respTimes.length) * 100) : null,
+        pct_acima_2h: respTimes.length ? round(((respTimes.length - em2h) / respTimes.length) * 100) : null,
+        tendencia_diaria: [...respPorDia.entries()]
+          .sort((a, b) => a[0].localeCompare(b[0]))
+          .map(([dia, r]) => ({ dia, media_seg: round(r.soma / r.n, 0), n: r.n })),
       },
       bloco2_funil: {
         por_canal: Object.fromEntries(porCanal),

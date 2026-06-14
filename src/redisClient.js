@@ -56,6 +56,26 @@ async function invalidateSubStatus(tenantId, feature = 'lead_manager') {
   }
 }
 
+// ---- Cache genérico JSON (best-effort; ex.: sugestão de retomada, TTL 24h) ----
+async function getCache(key) {
+  try {
+    await ensureConnected();
+    const v = await redis.get(key);
+    return v ? JSON.parse(v) : null;
+  } catch (err) {
+    logger.warn('redis.cache_get_failed', { key, error: err.message });
+    return null;
+  }
+}
+async function setCache(key, value, ttlSeconds) {
+  try {
+    await ensureConnected();
+    await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);
+  } catch (err) {
+    logger.warn('redis.cache_set_failed', { key, error: err.message });
+  }
+}
+
 module.exports = {
   redis,
   SUB_TTL_SECONDS,
@@ -63,4 +83,6 @@ module.exports = {
   getCachedSubStatus,
   setCachedSubStatus,
   invalidateSubStatus,
+  getCache,
+  setCache,
 };

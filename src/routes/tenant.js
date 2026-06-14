@@ -17,6 +17,7 @@ const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
 const { computeMetrics, computeFunil, computePainel, PERIODS } = require('../metrics');   // G: dashboard de gestão
 const { generateDraftForLead } = require('../engine');   // Bloco 2: rascunho ao confirmar lead
+const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
 const multer = require('multer');                        // ADR-016 P1: upload de mídia
 const mediaLib = require('../media');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
@@ -758,6 +759,91 @@ router.post('/:tenantId/leads/:id/midia', authenticate, requireTenantAccess(WRIT
     res.json({ ok: true, message_id: msgId, media_url: saved.media_url, media_type: saved.media_type });
   } catch (err) {
     logger.error('tenant.lead.midia_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
+
+// PARTE 3 — retomada de leads silenciosos.
+const RETOMADA_CACHE_TTL = 24 * 3600;
+
+// GET /tenant/:tid/leads/:id/sugestao-retomada — sugestão de reabordagem (estrategia +
+// rascunho) via IA, READ-ONLY. Cacheada 24h no Redis (?refresh=1 força regenerar).
+router.get('/:tenantId/leads/:id/sugestao-retomada', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  const cacheKey = `retomada:${req.tenantId}:${id}`;
+  try {
+    if (req.query.refresh !== '1') {
+      const cached = await redisClient.getCache(cacheKey);
+      if (cached) return res.json({ ok: true, cached: true, ...cached });
+    }
+    const ctx = await withTenant(req.tenantId, async (c) => {
+      const cfg = (await c.query(
+        `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
+           FROM tenant_lead_config WHERE tenant_id = $1`, [req.tenantId]
+      )).rows[0];
+      const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.name;
+      const lead = (await c.query('SELECT name, phone, meta_psid FROM leads WHERE id = $1', [id])).rows[0];
+      if (!lead) return null;
+      const ident = String(lead.phone || lead.meta_psid || '').replace(/\D/g, '');
+      let convo = [];
+      if (ident) {
+        convo = (await c.query(
+          `SELECT role, content FROM (
+             SELECT m.received_at, 'USER' AS role, coalesce(m.media_transcription, m.body) AS content
+               FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+              WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                AND coalesce(m.media_transcription, m.body) IS NOT NULL
+             UNION ALL
+             SELECT s.received_at, 'ASSISTANT' AS role, s.body AS content
+               FROM staff_outbound_samples s
+              WHERE s.tenant_id = $1 AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
+                AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us' AND s.body IS NOT NULL
+           ) t ORDER BY received_at ASC LIMIT 40`,
+          [req.tenantId, ident]
+        )).rows;
+      }
+      return { config: cfg, tname, leadName: lead.name, convo };
+    });
+    if (!ctx) return res.status(404).json({ error: 'lead not found' });
+    const schoolContext = resolveSystemPrompt(ctx.config || { school_name: ctx.tname || 'Escola', system_prompt_override: null });
+    const out = await gemini.sugestaoRetomada({ history: ctx.convo, leadName: ctx.leadName, schoolContext });
+    await redisClient.setCache(cacheKey, out, RETOMADA_CACHE_TTL);
+    logger.info('tenant.retomada.sugestao', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
+    res.json({ ok: true, cached: false, ...out });
+  } catch (err) {
+    logger.error('tenant.retomada.sugestao_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tid/leads/:id/enviar-retomada — body { texto, estrategia?, rascunho? }.
+// Envia via Evolution, grava na timeline e registra a tentativa em reabordagem_tentativas.
+router.post('/:tenantId/leads/:id/enviar-retomada', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  const text = typeof req.body?.texto === 'string' ? req.body.texto.trim() : '';
+  if (!text) return res.status(400).json({ error: 'empty text' });
+  const estrategia = typeof req.body?.estrategia === 'string' ? req.body.estrategia.trim() || null : null;
+  const rascunho = typeof req.body?.rascunho === 'string' ? req.body.rascunho.trim() || null : null;
+  try {
+    const d = await _credsLead(req.tenantId, id);
+    if (!d.phone) return res.status(400).json({ error: 'no_phone' });
+    if (!d.instance || !d.apikey) return res.status(400).json({ error: 'tenant_sem_evolution' });
+    const st = await evolution.status({ instance: d.instance, apikey: d.apikey });
+    if (st.state !== 'open') return res.status(409).json({ error: 'instancia=' + st.state });
+    const r = await evolution.sendText({ instance: d.instance, apikey: d.apikey }, d.phone, text);
+    const msgId = evolution.pickMessageId(r);
+    await _registrarSaida(req.tenantId, { phone: d.phone, externalMessageId: msgId, sender: req.tenantRole, body: text });
+    await withTenant(req.tenantId, (c) => c.query(
+      `INSERT INTO reabordagem_tentativas (tenant_id, lead_id, texto, sugestao_estrategia, sugestao_rascunho)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [req.tenantId, id, text, estrategia, rascunho]
+    ));
+    logger.info('tenant.retomada.enviada', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
+    res.json({ ok: true, message_id: msgId });
+  } catch (err) {
+    logger.error('tenant.retomada.enviar_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
     res.status(502).json({ error: 'send_failed', detail: err.message });
   }
 });

@@ -222,6 +222,37 @@ async function assistantReply({ schoolContext, leadName, leadConversation, histo
   });
 }
 
+// PARTE 3 — sugestão de retomada de lead silencioso. Analisa a conversa e propõe
+// uma abordagem natural e não invasiva. Retorna JSON {estrategia, rascunho}.
+async function sugestaoRetomada({ history = [], leadName, schoolContext }) {
+  const convo = history
+    .map((m) => `${String(m.role).toLowerCase() === 'assistant' ? 'Escola' : 'Lead'}: ${m.content ?? m.body ?? m.text ?? ''}`)
+    .join('\n');
+  const sys =
+    'Você ajuda a recepção de uma escola de música a RETOMAR o contato com um lead que ' +
+    'parou de responder. Analise a conversa abaixo e proponha uma reabordagem NATURAL, ' +
+    'calorosa e SEM pressão — referenciando onde a conversa parou (o assunto/dúvida real), ' +
+    'sem cobrar nem soar comercial. NÃO invente dados (preço, endereço, horários, nomes) que ' +
+    'não estejam na conversa ou nas informações da escola.' +
+    (leadName ? `\n\nLEAD: ${leadName}` : '') +
+    (schoolContext ? `\n\nINFORMAÇÕES DA ESCOLA (referência):\n${schoolContext}` : '') +
+    `\n\nCONVERSA (mais antigo -> mais novo):\n${convo || '(sem histórico)'}` +
+    '\n\nResponda SOMENTE com JSON: {"estrategia":"<por que e como reabordar, 1-2 frases para a ' +
+    'recepcionista>","rascunho":"<mensagem pronta para enviar ao lead, tom da escola, sem emojis>"}';
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({
+      model: modelName,
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.4 },
+    });
+    const res = await model.generateContent(sys);
+    const p = JSON.parse(res.response.text());
+    return {
+      estrategia: typeof p.estrategia === 'string' ? p.estrategia.trim() : '',
+      rascunho: typeof p.rascunho === 'string' ? p.rascunho.trim() : '',
+    };
+  });
+}
+
 // E1-02 — classifica a intenção do lead em uma das 4 categorias.
 const INTENTS = ['SCHEDULE_INTEREST', 'PRICE_INQUIRY', 'GENERAL_INFO', 'OUT_OF_SCOPE'];
 const INTENT_PROMPT = `Classifique a intenção principal da mensagem do lead de uma escola de música em UMA categoria:
@@ -293,6 +324,7 @@ module.exports = {
   generateReply,
   improveReply,
   assistantReply,
+  sugestaoRetomada,
   classifyIntent,
   extractQualification,
   INTENTS,

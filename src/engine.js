@@ -699,4 +699,4 @@ async function generateDraftForLead(tenantId, leadId, deps = {}) {
   return { ok: true, approvalId: out.id };
 }
 
-module.exports = { processInbound, generateDraftForLead, mergeQualification, CONFIDENCE_THRESHOLD };
+module.exports = { processInbound, generateDraftForLead, mergeQualification, loadRealHistory, CONFIDENCE_THRESHOLD };
