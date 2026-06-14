@@ -37,6 +37,27 @@ function faixaSilencio(dias) {
   if (dias > 7) return 'd7_15';
   return 'd3_7';
 }
+// Horário comercial — minuto-do-dia + dia-da-semana ISO (1=Seg..7=Dom) em SP.
+function spMinDow(ts) {
+  const x = new Date(new Date(ts).getTime() - 3 * 3600 * 1000);
+  return { mins: x.getUTCHours() * 60 + x.getUTCMinutes(), isoDow: x.getUTCDay() === 0 ? 7 : x.getUTCDay() };
+}
+function parseHM(t, def) {
+  if (!t) return def;
+  const [h, m] = String(t).split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+function fmtHM(mins) {
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+// true = ts caiu dentro do expediente; false = fora; null = sem ts.
+function dentroHorario(ts, horario) {
+  if (!ts || !horario) return null;
+  const { mins, isoDow } = spMinDow(ts);
+  if (!horario.dias.includes(isoDow)) return false;
+  return mins >= horario.inicio && mins < horario.fim;
+}
 function temperatura(l) {
   if (l.temperatura_manual === 'quente' || l.temperatura_manual === 'morno' || l.temperatura_manual === 'frio') return l.temperatura_manual;
   const intent = String(l.intent || '').toUpperCase();
@@ -121,6 +142,20 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       )
     ).rows[0];
 
+    // 2b) HORÁRIO COMERCIAL do tenant (separa SLA dentro/fora do expediente).
+    const cfgH = (
+      await c.query(
+        `SELECT horario_comercial_inicio AS inicio, horario_comercial_fim AS fim, horario_comercial_dias AS dias
+           FROM tenants WHERE id = $1`,
+        [tenantId]
+      )
+    ).rows[0] || {};
+    const horario = {
+      inicio: parseHM(cfgH.inicio, 8 * 60),
+      fim: parseHM(cfgH.fim, 18 * 60),
+      dias: (Array.isArray(cfgH.dias) && cfgH.dias.length ? cfgH.dias : [1, 2, 3, 4, 5]).map(Number),
+    };
+
     // 3) MÊS A MÊS (últimos 6 meses): volume de leads + taxa de aceitação da IA.
     const porMes = (
       await c.query(
@@ -185,6 +220,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
 
     // BLOCO 1 — SLA / responsividade
     const respTimes = []; // segundos até 1ª resposta
+    const respComercial = [], respFora = []; // split por horário comercial (1ª msg do lead)
     let semResposta = 0, leadParou = 0, comInbound = 0;
     let em30 = 0, em2h = 0; // faixas de SLA: <=30min (verde), <=2h (verde+amarelo)
     // ADR-021 — estado AGORA: clientes esperando nossa resposta + leads silenciosos 3d+.
@@ -219,6 +255,9 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         const rd = respPorDia.get(dia) || { soma: 0, n: 0 };
         rd.soma += respSeg; rd.n++;
         respPorDia.set(dia, rd);
+        // Split por horário comercial: classifica pela chegada da 1ª msg do lead.
+        if (dentroHorario(l.first_in, horario)) respComercial.push(respSeg);
+        else respFora.push(respSeg);
       }
       // "respondemos mas o lead parou": última palavra foi nossa.
       if (respondido && lout != null && (lin == null || lout > lin)) leadParou++;
@@ -251,6 +290,19 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       });
     }
     respTimes.sort((a, b) => a - b);
+    // SLA de um grupo de tempos de resposta (dentro/fora do expediente).
+    const grupoSla = (arr) => {
+      const s = [...arr].sort((a, b) => a - b);
+      const em30 = s.filter((v) => v <= 30 * 60).length;
+      return {
+        n: s.length,
+        pct_em_30min: s.length ? round((em30 / s.length) * 100) : null,
+        tempo_medio_seg: s.length ? round(s.reduce((a, b) => a + b, 0) / s.length, 0) : null,
+        p90_seg: round(percentile(s, 0.9), 0),
+      };
+    };
+    const porHorario = { comercial: grupoSla(respComercial), fora: grupoSla(respFora) };
+    const horarioInfo = { inicio: fmtHM(horario.inicio), fim: fmtHM(horario.fim), dias: horario.dias };
     const ranking = [...porRecep.entries()]
       .map(([sender, r]) => ({ sender, volume: r.n, tempo_medio_seg: round(r.somaSeg / r.comTempo, 0) }))
       .sort((a, b) => b.volume - a.volume);
@@ -342,6 +394,9 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         silenciosos_3d: silenciosos3d,
         reabordados_no_prazo: Number(reab.total) || 0,
         taxa_retomada: Number(reab.total) ? round((Number(reab.responderam) / Number(reab.total)) * 100) : null,
+        // Separação por horário comercial (dentro = real da equipe; fora = impacto sem automação).
+        por_horario: porHorario,
+        horario_comercial: horarioInfo,
       },
       // PARTE 3 — leads silenciosos (cliente parou; aguardam retomada).
       bloco_silenciosos: {
@@ -365,6 +420,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         tendencia_diaria: [...respPorDia.entries()]
           .sort((a, b) => a[0].localeCompare(b[0]))
           .map(([dia, r]) => ({ dia, media_seg: round(r.soma / r.n, 0), n: r.n })),
+        por_horario: porHorario,
       },
       bloco2_funil: {
         por_canal: Object.fromEntries(porCanal),
