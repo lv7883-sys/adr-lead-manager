@@ -157,6 +157,10 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const respTimes = []; // segundos até 1ª resposta
     let semResposta = 0, leadParou = 0, comInbound = 0;
     let em30 = 0, em2h = 0; // faixas de SLA: <=30min (verde), <=2h (verde+amarelo)
+    // ADR-021 — estado AGORA: clientes esperando nossa resposta + leads silenciosos 3d+.
+    const TRES_DIAS = 3 * 86400;
+    const aguardandoLista = []; // { id, name, esperando_seg }
+    let silenciosos3d = 0;
     const semRespostaLeads = []; // { id, name } — pro alerta com link direto
     const porRecep = new Map(); // sender -> { n, somaSeg, comTempo }
     const leadsTabela = []; // linha por lead pra seção "Lista de leads"
@@ -181,6 +185,13 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       }
       // "respondemos mas o lead parou": última palavra foi nossa.
       if (respondido && lout != null && (lin == null || lout > lin)) leadParou++;
+      // ADR-021 — estado atual (só leads ativos): aguardando nós / silencioso 3d+.
+      const ativo021 = !l.desfecho && l.status !== 'CONVERTED';
+      if (ativo021 && lin != null && (lout == null || lin > lout)) {
+        aguardandoLista.push({ id: l.id, name: l.name || 'Lead sem nome', esperando_seg: Math.max(0, Math.round((agora - lin) / 1000)) });
+      } else if (ativo021 && lout != null && (agora - lout) / 1000 > TRES_DIAS) {
+        silenciosos3d++;
+      }
       // Tempo em aberto: respondido = tempo até a 1ª resposta; sem resposta = desde
       // a chegada (1º inbound, ou created_at se não houver) até agora.
       const chegada = fin || new Date(l.created_at).getTime();
@@ -277,9 +288,15 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         sem_resposta_n: semResposta,
         sem_resposta_leads: semRespostaLeads,
         pct_lead_parou: comInbound ? round((leadParou / comInbound) * 100) : null,
-        ranking_recepcao: ranking,
         seg_rascunho_ate_decisao: appr.seg_ate_decisao != null ? round(Number(appr.seg_ate_decisao), 0) : null,
         taxa_edicao_global: decididos ? round((editados / decididos) * 100) : null,
+        // ADR-021 — BLOCO A (estado AGORA) + BLOCO C (silenciosos).
+        aguardando_agora: aguardandoLista.length,
+        aguardando_mais_antigo_seg: aguardandoLista.length ? Math.max(...aguardandoLista.map((a) => a.esperando_seg)) : null,
+        aguardando_lista: aguardandoLista.sort((a, b) => b.esperando_seg - a.esperando_seg).slice(0, 50),
+        silenciosos_3d: silenciosos3d,
+        reabordados_no_prazo: null,   // sem dados (futuro)
+        taxa_retomada: null,          // sem dados (futuro)
       },
       bloco2_funil: {
         por_canal: Object.fromEntries(porCanal),
@@ -450,39 +467,35 @@ async function computePainel(tenantId) {
 
     const fila = [];
     const tempoHoje = [];
+    const TRES_DIAS = 3 * 86400 * 1000;
     let leadsAtivos = 0, aguardando = 0, comRascunho = 0;
     for (const l of rows) {
-      // Bloco 2 — leads na fila de revisão: bucket próprio ('revisar'), NÃO contam
-      // como leads ativos do funil nem entram nos buckets normais.
-      if (l.review_queue && !l.review_result) {
-        comRascunho += l.drafts > 0 ? 1 : 0;
-        fila.push({
-          id: l.id, name: l.name || 'Lead sem nome',
-          instrument: l.instrument || null, channel: l.channel || null,
-          temperatura: temperatura(l), tipo: 'revisar',
-          detalhe_seg: Math.max(0, Math.round((agora - new Date(l.created_at).getTime()) / 1000)),
-          confidence: l.classification_confidence != null ? Number(l.classification_confidence) : null,
-          tem_rascunho: l.drafts > 0,
-        });
-        continue;
-      }
+      // Leads na fila de revisão ficam SÓ na aba "Revisar" (não na fila de ação).
+      if (l.review_queue && !l.review_result) { comRascunho += l.drafts > 0 ? 1 : 0; continue; }
+      const ativo = !l.desfecho && l.status !== 'CONVERTED';
+      if (!ativo) continue;
       const fin = l.first_in ? new Date(l.first_in).getTime() : null;
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
       const lin = l.last_in ? new Date(l.last_in).getTime() : null;
       const lout = l.last_out ? new Date(l.last_out).getTime() : null;
-      const respondido = fout != null && (fin == null || fout >= fin);
-      const ativo = !l.desfecho && l.status !== 'CONVERTED';
-      if (ativo) leadsAtivos++;
-      if (fin && !respondido) aguardando++;
+      leadsAtivos++;
       if (l.drafts > 0) comRascunho++;
       if (fout != null && fout >= spTodayMs && fin != null) tempoHoje.push((fout - fin) / 1000);
 
-      // Bucket de ação (prioridade: sem_resposta > nova_msg > rascunho).
-      let tipo = null, detalheSeg = null;
-      if (fin && !respondido) { tipo = 'sem_resposta'; detalheSeg = (agora - fin) / 1000; }
-      else if (respondido && lin != null && (lout == null || lin > lout)) { tipo = 'nova_msg'; detalheSeg = (agora - lin) / 1000; }
-      else if (l.drafts > 0 && l.draft_at) { tipo = 'rascunho'; detalheSeg = (agora - new Date(l.draft_at).getTime()) / 1000; }
-      if (!tipo || !ativo) continue;
+      // ADR-021 — hierarquia por recência do último contato.
+      const ultLead = lin != null && (lout == null || lin > lout);   // último contato foi DO lead
+      let tipo, detalheSeg;
+      if (ultLead) {
+        tipo = fout == null ? 'sem_resposta' : 'responder_agora';    // nunca respondemos vs respondemos e voltou
+        detalheSeg = (agora - lin) / 1000;
+        aguardando++;                                                // bucket 1 + 2
+      } else if (lout != null) {                                     // último contato foi DA escola
+        detalheSeg = (agora - lout) / 1000;
+        tipo = (agora - lout) > TRES_DIAS ? 'retomada' : 'monitorar';
+      } else {
+        tipo = 'monitorar';
+        detalheSeg = (agora - new Date(l.created_at).getTime()) / 1000;
+      }
       fila.push({
         id: l.id, name: l.name || 'Lead sem nome',
         instrument: l.instrument || null, channel: l.channel || null,
@@ -490,7 +503,7 @@ async function computePainel(tenantId) {
         tem_rascunho: l.drafts > 0,
       });
     }
-    const ordem = { sem_resposta: 0, revisar: 1, nova_msg: 2, rascunho: 3 };
+    const ordem = { responder_agora: 0, sem_resposta: 1, retomada: 2, monitorar: 3 };
     fila.sort((a, b) => (ordem[a.tipo] - ordem[b.tipo]) || (b.detalhe_seg - a.detalhe_seg));
 
     return {
