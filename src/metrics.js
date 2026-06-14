@@ -6,7 +6,7 @@
 //
 const { withTenant } = require('./db');
 
-const PERIODS = { '7d': 7, '30d': 30, '90d': 90 };
+const PERIODS = { '1d': 1, '7d': 7, '30d': 30, '90d': 90 };
 
 // --- helpers ---------------------------------------------------------------
 function percentile(sortedAsc, q) {
@@ -213,6 +213,11 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         [tenantId, days]
       )
     ).rows[0];
+    // Leads que já têm ALGUMA reabordagem registrada (pro % de silenciosos reabordados).
+    const reabIds = new Set(
+      (await c.query('SELECT DISTINCT lead_id FROM reabordagem_tentativas WHERE tenant_id = $1', [tenantId]))
+        .rows.map((r) => r.lead_id)
+    );
 
     // ---- agregação em JS ---------------------------------------------------
     const rows = channel ? leads.filter((l) => l.channel === channel) : leads;
@@ -241,7 +246,14 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       if (fin) comInbound++;
       const respondido = fout != null && (fin == null || fout >= fin);
       const respSeg = (respondido && fin) ? Math.max(0, (fout - fin) / 1000) : null;
-      if (fin && !respondido) { semResposta++; semRespostaLeads.push({ id: l.id, name: l.name || 'Lead sem nome' }); }
+      if (fin && !respondido) {
+        semResposta++;
+        semRespostaLeads.push({
+          id: l.id, name: l.name || 'Lead sem nome',
+          channel: l.channel || null, instrument: l.instrument || null,
+          chegou_em: l.first_in, chegou_seg: Math.max(0, Math.round((agora - fin) / 1000)),
+        });
+      }
       if (respSeg != null) {
         respTimes.push(respSeg);
         if (respSeg <= 30 * 60) em30++;
@@ -250,10 +262,10 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         const r = porRecep.get(key) || { n: 0, somaSeg: 0, comTempo: 0 };
         r.n++; r.somaSeg += respSeg; r.comTempo++;
         porRecep.set(key, r);
-        // PARTE 4 — tendência diária do tempo de 1ª resposta (dia da nossa resposta).
+        // PARTE 4 — tendência diária: tempo médio + % em 30min (dia da nossa resposta).
         const dia = spDay(l.first_out);
-        const rd = respPorDia.get(dia) || { soma: 0, n: 0 };
-        rd.soma += respSeg; rd.n++;
+        const rd = respPorDia.get(dia) || { soma: 0, n: 0, em30: 0 };
+        rd.soma += respSeg; rd.n++; if (respSeg <= 30 * 60) rd.em30++;
         respPorDia.set(dia, rd);
         // Split por horário comercial: classifica pela chegada da 1ª msg do lead.
         if (dentroHorario(l.first_in, horario)) respComercial.push(respSeg);
@@ -264,7 +276,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       // ADR-021 — estado atual (só leads ativos): aguardando nós / silencioso 3d+.
       const ativo021 = !l.desfecho && l.status !== 'CONVERTED';
       if (ativo021 && lin != null && (lout == null || lin > lout)) {
-        aguardandoLista.push({ id: l.id, name: l.name || 'Lead sem nome', esperando_seg: Math.max(0, Math.round((agora - lin) / 1000)) });
+        aguardandoLista.push({ id: l.id, name: l.name || 'Lead sem nome', ultimo_contato_em: l.last_in, esperando_seg: Math.max(0, Math.round((agora - lin) / 1000)) });
       } else if (ativo021 && lout != null && (agora - lout) / 1000 > TRES_DIAS) {
         silenciosos3d++;
         const silSeg = Math.round((agora - lout) / 1000);
@@ -274,6 +286,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
           ultimo_contato_em: l.last_out,
           silencio_seg: silSeg,
           faixa: faixaSilencio(silSeg / 86400),
+          reabordado: reabIds.has(l.id),
         });
       }
       // Tempo em aberto: respondido = tempo até a 1ª resposta; sem resposta = desde
@@ -408,6 +421,10 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
           d7_15: silenciososLista.filter((s) => s.faixa === 'd7_15').length,
           d15_mais: silenciososLista.filter((s) => s.faixa === 'd15_mais').length,
         },
+        // Cobrável (ADR-009 B4): % dos silenciosos que já têm reabordagem registrada.
+        reabordados: silenciososLista.filter((s) => s.reabordado).length,
+        pct_reabordados: silenciososLista.length
+          ? round((silenciososLista.filter((s) => s.reabordado).length / silenciososLista.length) * 100) : null,
         lista: silenciososLista.sort((a, b) => b.silencio_seg - a.silencio_seg).slice(0, 100),
       },
       // PARTE 4 — desempenho da recepção quando RESPONDE o cliente.
@@ -419,7 +436,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         pct_acima_2h: respTimes.length ? round(((respTimes.length - em2h) / respTimes.length) * 100) : null,
         tendencia_diaria: [...respPorDia.entries()]
           .sort((a, b) => a[0].localeCompare(b[0]))
-          .map(([dia, r]) => ({ dia, media_seg: round(r.soma / r.n, 0), n: r.n })),
+          .map(([dia, r]) => ({ dia, media_seg: round(r.soma / r.n, 0), n: r.n, pct_em_30min: r.n ? round((r.em30 / r.n) * 100) : null })),
         por_horario: porHorario,
       },
       bloco2_funil: {
