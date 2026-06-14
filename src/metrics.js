@@ -662,4 +662,107 @@ async function computePainel(tenantId) {
   });
 }
 
-module.exports = { computeMetrics, computeFunil, computePainel, resolveFunilRange, percentile, temperatura, spHourDow, PERIODS };
+// --- ADR-010 — Kanban do ciclo de vida -------------------------------------
+const KANBAN_PERIODS = { '30d': 30, '90d': 90 };
+// Desfechos de "perda" (não-matrícula). 'nao_e_lead' NÃO entra (é spam/interno).
+const PERDIDO_DESFECHOS = [
+  'nao_matriculado_preco', 'nao_matriculado_horario', 'nao_matriculado_concorrente',
+  'nao_matriculado_desistiu', 'nao_compareceu_aula', 'outro',
+];
+// Coluna do kanban a partir de status + desfecho (modelo ADR-011: desfecho dirige
+// o desfecho final; PERDIDO preserva o status — NÃO vira NOT_LEAD).
+function kanbanColuna(status, desfecho) {
+  if (PERDIDO_DESFECHOS.includes(desfecho)) return 'perdido';
+  if (desfecho === 'matriculado' || status === 'CONVERTED') return 'convertido';
+  if (status === 'NEW') return 'novo';
+  if (status === 'QUALIFIED') return 'qualificado';
+  return 'qualificando';
+}
+// Transições permitidas (origem -> destinos). Terminais não saem.
+const KANBAN_TRANSICOES = {
+  novo: ['qualificando', 'qualificado', 'convertido', 'perdido'],
+  qualificando: ['qualificado', 'convertido', 'perdido'],
+  qualificado: ['convertido', 'perdido'],
+  convertido: [],
+  perdido: [],
+};
+
+async function computeKanban(tenantId, { period = '30d' } = {}) {
+  const days = KANBAN_PERIODS[period] || 30;
+  return withTenant(tenantId, async (c) => {
+    const rows = (
+      await c.query(
+        `WITH inb AS (
+           SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
+                  max(m.received_at) AS last_in
+             FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+            WHERE cv.tenant_id = $1 AND m.role = 'USER' GROUP BY 1
+         ),
+         outb AS (
+           SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident,
+                  min(s.received_at) AS first_out, max(s.received_at) AS last_out
+             FROM staff_outbound_samples s
+            WHERE s.tenant_id = $1 AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+            GROUP BY 1
+         ),
+         chan AS (
+           SELECT regexp_replace(external_id, '[^0-9]', '', 'g') AS ident,
+                  (array_agg(channel ORDER BY updated_at DESC))[1] AS channel
+             FROM conversations WHERE tenant_id = $1 GROUP BY 1
+         ),
+         draft AS (
+           SELECT lead_id, count(*) AS n FROM pending_approvals
+            WHERE tenant_id = $1 AND status = 'PENDING' GROUP BY 1
+         )
+         SELECT l.id, l.name, l.phone, l.status, l.intent, l.desfecho, l.desfecho_em, l.created_at, l.temperatura_manual,
+                q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
+                i.last_in, o.first_out, o.last_out, c.channel, COALESCE(d.n, 0) AS drafts
+           FROM leads l
+           LEFT JOIN lead_qualifications q ON q.lead_id = l.id
+           LEFT JOIN inb  i ON i.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+           LEFT JOIN outb o ON o.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+           LEFT JOIN chan c ON c.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+           LEFT JOIN draft d ON d.lead_id = l.id
+          WHERE l.created_at >= now() - ($2 || ' days')::interval
+            AND l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
+            AND coalesce(l.desfecho, '') <> 'nao_e_lead'`,
+        [tenantId, days]
+      )
+    ).rows;
+
+    const agora = Date.now();
+    const cols = { novo: [], qualificando: [], qualificado: [], convertido: [], perdido: [] };
+    for (const l of rows) {
+      const lin = l.last_in ? new Date(l.last_in).getTime() : null;
+      const lout = l.last_out ? new Date(l.last_out).getTime() : null;
+      const fout = l.first_out ? new Date(l.first_out).getTime() : null;
+      // urgência: último contato foi DO lead e estamos devendo resposta.
+      const ultLead = lin != null && (lout == null || lin > lout);
+      let bucket = null, esperandoSeg = null;
+      if (ultLead) { bucket = fout == null ? 'sem_resposta' : 'responder_agora'; esperandoSeg = Math.max(0, Math.round((agora - lin) / 1000)); }
+      const ultimaMsgMs = Math.max(lin || 0, lout || 0) || null;
+      const coluna = kanbanColuna(l.status, l.desfecho);
+      // tempo na coluna (aprox.): terminais desde desfecho_em; ativos desde created_at.
+      const ref = (coluna === 'perdido' || coluna === 'convertido') && l.desfecho_em ? l.desfecho_em : l.created_at;
+      cols[coluna].push({
+        id: l.id, name: l.name || 'Lead sem nome', phone: l.phone || null,
+        instrument: l.instrument || null, channel: l.channel || null,
+        temperature: temperatura(l), status: l.status, desfecho: l.desfecho || null,
+        created_at: l.created_at,
+        ultima_msg_em: ultimaMsgMs ? new Date(ultimaMsgMs).toISOString() : null,
+        tem_rascunho: l.drafts > 0, bucket_urgencia: bucket, esperando_seg: esperandoSeg,
+        tempo_coluna_seg: Math.max(0, Math.round((agora - new Date(ref).getTime()) / 1000)),
+      });
+    }
+    // ordena: urgentes primeiro, depois mais recentes.
+    const ord = (a, b) => ((b.bucket_urgencia ? 1 : 0) - (a.bucket_urgencia ? 1 : 0)) || (new Date(b.created_at) - new Date(a.created_at));
+    for (const k of Object.keys(cols)) cols[k].sort(ord);
+    return { period: KANBAN_PERIODS[period] ? period : '30d', ...cols };
+  });
+}
+
+module.exports = {
+  computeMetrics, computeFunil, computePainel, computeKanban,
+  kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS,
+  resolveFunilRange, percentile, temperatura, spHourDow, PERIODS,
+};

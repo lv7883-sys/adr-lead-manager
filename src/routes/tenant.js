@@ -15,7 +15,7 @@ const evolution = require('../evolution');   // E4: envio direto via Evolution
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
-const { computeMetrics, computeFunil, computePainel, PERIODS } = require('../metrics');   // G: dashboard de gestão
+const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, PERIODS } = require('../metrics');   // G: dashboard de gestão
 const { generateDraftForLead } = require('../engine');   // Bloco 2: rascunho ao confirmar lead
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
 const multer = require('multer');                        // ADR-016 P1: upload de mídia
@@ -99,6 +99,53 @@ router.get(
     }
   }
 );
+
+// GET /tenant/:tid/leads/kanban?period=30d|90d — ADR-010: leads agrupados por coluna
+// do ciclo de vida (novo/qualificando/qualificado/convertido/perdido). READ-ONLY.
+router.get('/:tenantId/leads/kanban', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  const period = ['30d', '90d'].includes(String(req.query.period)) ? String(req.query.period) : '30d';
+  try {
+    res.json(await computeKanban(req.tenantId, { period }));
+  } catch (err) {
+    logger.error('tenant.kanban.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// PUT /tenant/:tid/leads/:id/mover-kanban — body { destino, desfecho? }. Valida a
+// transição e atualiza status/desfecho (PERDIDO preserva o status — só grava desfecho).
+const _KANBAN_DEST_COL = { QUALIFYING: 'qualificando', QUALIFIED: 'qualificado', CONVERTED: 'convertido', PERDIDO: 'perdido' };
+router.put('/:tenantId/leads/:id/mover-kanban', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  const destCol = _KANBAN_DEST_COL[String(req.body?.destino || '').trim()];
+  if (!destCol) return res.status(400).json({ error: 'destino inválido' });
+  const desfecho = typeof req.body?.desfecho === 'string' ? req.body.desfecho.trim() : '';
+  if (destCol === 'perdido' && !PERDIDO_DESFECHOS.includes(desfecho)) {
+    return res.status(400).json({ error: 'desfecho de perda inválido' });
+  }
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      const lead = (await c.query('SELECT status, desfecho FROM leads WHERE id = $1', [id])).rows[0];
+      if (!lead) return { notFound: true };
+      const origem = kanbanColuna(lead.status, lead.desfecho);
+      if (!(KANBAN_TRANSICOES[origem] || []).includes(destCol)) return { invalid: true, origem };
+      let r;
+      if (destCol === 'qualificando') r = await c.query("UPDATE leads SET status='QUALIFYING', updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
+      else if (destCol === 'qualificado') r = await c.query("UPDATE leads SET status='QUALIFIED', updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
+      else if (destCol === 'convertido') r = await c.query("UPDATE leads SET status='CONVERTED', desfecho='matriculado', desfecho_em=now(), updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
+      else r = await c.query('UPDATE leads SET desfecho=$2, desfecho_em=now(), updated_at=now() WHERE id=$1 RETURNING status, desfecho', [id, desfecho]);
+      return { row: r.rows[0], origem };
+    });
+    if (out.notFound) return res.status(404).json({ error: 'lead not found' });
+    if (out.invalid) return res.status(409).json({ error: `transição inválida (${out.origem} → ${destCol})` });
+    logger.info('tenant.lead.kanban_movido', { tenant_id: req.tenantId, lead_id: id, origem: out.origem, destino: destCol, by: req.tenantRole });
+    res.json({ ok: true, coluna: destCol, ...out.row });
+  } catch (err) {
+    logger.error('tenant.lead.kanban_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
 
 // GET /tenant/:tid/review-queue — Bloco 2: mensagens aguardando revisão humana
 // (review_queue=true, ainda não decididas). READ-ONLY.
