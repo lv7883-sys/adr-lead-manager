@@ -31,6 +31,45 @@ async function graphGet(path, params) {
   }
 }
 
+// POST na Graph API (JSON) com timeout. Lança em HTTP !ok (corpo de erro anexado).
+async function graphPost(path, body, params) {
+  const url = new URL(GRAPH + path);
+  for (const [k, v] of Object.entries(params || {})) url.searchParams.set(k, v);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body || {}),
+      signal: ctrl.signal,
+    });
+    const text = await r.text();
+    let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+    if (!r.ok) {
+      const e = new Error(`Graph POST ${path} -> HTTP ${r.status}`);
+      e.status = r.status; e.body = data;
+      throw e;
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// E6 — envia uma mensagem de texto a um usuário de DM (Messenger/IG) pelo PSID.
+// Mesmo endpoint para os dois canais: POST /{page_id}/messages com o Page Token.
+// Retorna o corpo da Graph (inclui message_id). Lança em erro.
+async function sendMessage({ pageId, token }, psid, text) {
+  if (!pageId || !token) { const e = new Error('meta_sem_credenciais'); e.code = 'no_creds'; throw e; }
+  if (!psid) { const e = new Error('lead_sem_psid'); e.code = 'no_psid'; throw e; }
+  return graphPost('/' + encodeURIComponent(pageId) + '/messages', {
+    recipient: { id: String(psid) },
+    messaging_type: 'RESPONSE',
+    message: { text: String(text) },
+  }, { access_token: token });
+}
+
 // Busca os dados reais de um lead de Lead Ad. Retorna { field_data, created_time, ... }.
 // field_data = [{ name: 'full_name', values: ['João'] }, ...].
 async function fetchLead(leadgenId, pageToken) {
@@ -94,6 +133,6 @@ function verifySignature(rawBody, signatureHeader) {
 }
 
 module.exports = {
-  fetchLead, fetchUserName, fieldDataToMap,
+  fetchLead, fetchUserName, fieldDataToMap, sendMessage,
   tenantByPageId, pageCredsForTenant, verifySignature,
 };

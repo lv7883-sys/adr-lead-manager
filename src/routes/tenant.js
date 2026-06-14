@@ -12,6 +12,7 @@ const { patchLeadConfig } = require('../leadConfig');
 const { isUuid } = require('../validation');
 const logger = require('../logger');
 const evolution = require('../evolution');   // E4: envio direto via Evolution
+const meta = require('../meta');              // E6: envio outbound via Messenger/IG
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
@@ -415,7 +416,8 @@ router.get(
                        JOIN conversations cv ON cv.id = m.conversation_id
                       WHERE cv.external_id = l.phone AND m.role = 'USER') AS ultimo_contato_lead,
                     (SELECT cv.channel FROM conversations cv
-                      WHERE cv.external_id = l.phone
+                      WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
+                          = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
                       ORDER BY cv.updated_at DESC LIMIT 1) AS channel,
                     EXISTS (SELECT 1 FROM pending_approvals pa
                              WHERE pa.lead_id = l.id AND pa.status = 'PENDING') AS pending_approval
@@ -474,7 +476,8 @@ router.get(
                     COALESCE(q.qualification_complete, false) AS qualification_complete,
                     q.reasked,
                     (SELECT cv.channel FROM conversations cv
-                      WHERE cv.external_id = l.phone
+                      WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
+                          = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
                       ORDER BY cv.updated_at DESC LIMIT 1) AS channel
                FROM leads l
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
@@ -583,6 +586,9 @@ router.get(
           status: l.status,
           intent: l.intent,
           channel: l.channel,
+          // E6: canal Meta normalizado p/ a UI decidir o endpoint de resposta.
+          meta_channel: l.channel === 'instagram_dm' ? 'instagram'
+            : l.channel === 'facebook_messenger' ? 'messenger' : null,
           instrument: l.instrument,
           availability: l.availability,
           qualification_complete: l.qualification_complete,
@@ -774,6 +780,49 @@ router.post('/:tenantId/leads/:id/mensagem', authenticate, requireTenantAccess(W
     res.json({ ok: true, message_id: msgId });
   } catch (err) {
     logger.error('tenant.lead.mensagem_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
+
+// POST /tenant/:tid/leads/:id/mensagem-meta — E6: responde um lead de DM (Messenger/IG)
+// PELO MESMO CANAL que ele usou, via Graph API (POST /{page_id}/messages). Usa o
+// meta_psid do lead + o Page Token do tenant. Grava em staff_outbound_samples.
+router.post('/:tenantId/leads/:id/mensagem-meta', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  if (!text) return res.status(400).json({ error: 'empty text' });
+  try {
+    const info = await withTenant(req.tenantId, async (c) => {
+      const lead = (await c.query('SELECT meta_psid FROM leads WHERE id = $1', [id])).rows[0];
+      if (!lead) return null;
+      const channel = (await c.query(
+        `SELECT cv.channel FROM conversations cv
+          WHERE cv.tenant_id = $1
+            AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = regexp_replace($2, '[^0-9]', '', 'g')
+          ORDER BY cv.updated_at DESC LIMIT 1`,
+        [req.tenantId, lead.meta_psid || '']
+      )).rows[0]?.channel || null;
+      return { psid: lead.meta_psid, channel };
+    });
+    if (!info) return res.status(404).json({ error: 'lead not found' });
+    if (!info.psid) return res.status(400).json({ error: 'no_psid' });
+    const creds = await meta.pageCredsForTenant(req.tenantId);
+    if (!creds || !creds.pageId || !creds.token) return res.status(400).json({ error: 'tenant_sem_meta' });
+    const r = await meta.sendMessage(creds, info.psid, text);
+    const msgId = (r && (r.message_id || r.mid)) || null;
+    await withTenant(req.tenantId, (c) => c.query(
+      `INSERT INTO staff_outbound_samples
+         (tenant_id, channel, external_id, external_message_id, source, sender, body, raw)
+       VALUES ($1, $2, $3, $4, 'api', $5, $6, NULL)
+       ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
+      [req.tenantId, info.channel || 'facebook_messenger', info.psid, msgId, req.tenantRole || 'Recepção', text]
+    ));
+    logger.info('tenant.lead.mensagem_meta_enviada', { tenant_id: req.tenantId, lead_id: id, channel: info.channel, by: req.tenantRole });
+    res.json({ ok: true, message_id: msgId });
+  } catch (err) {
+    const detail = err && err.body ? JSON.stringify(err.body) : err.message;
+    logger.error('tenant.lead.mensagem_meta_error', { tenant_id: req.tenantId, lead_id: id, error: detail });
     res.status(502).json({ error: 'send_failed', detail: err.message });
   }
 });
