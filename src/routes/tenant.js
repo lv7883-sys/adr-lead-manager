@@ -848,6 +848,49 @@ router.post('/:tenantId/leads/:id/enviar-retomada', authenticate, requireTenantA
   }
 });
 
+// GET /tenant/:tid/horario-comercial — horário de atendimento atual.
+router.get('/:tenantId/horario-comercial', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const row = await withTenant(req.tenantId, (c) => c.query(
+      `SELECT to_char(horario_comercial_inicio, 'HH24:MI') AS inicio,
+              to_char(horario_comercial_fim, 'HH24:MI') AS fim,
+              horario_comercial_dias AS dias
+         FROM tenants WHERE id = $1`, [req.tenantId]
+    ).then((r) => r.rows[0] || {}));
+    res.json({
+      inicio: row.inicio || '08:00',
+      fim: row.fim || '18:00',
+      dias: Array.isArray(row.dias) && row.dias.length ? row.dias.map(Number) : [1, 2, 3, 4, 5],
+    });
+  } catch (err) {
+    logger.error('tenant.horario.get_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// PUT /tenant/:tid/horario-comercial — body { inicio:'HH:MM', fim:'HH:MM', dias:[1..7] }.
+const _HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+router.put('/:tenantId/horario-comercial', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const inicio = String(req.body?.inicio || '').trim();
+  const fim = String(req.body?.fim || '').trim();
+  let dias = Array.isArray(req.body?.dias) ? req.body.dias.map(Number) : [];
+  dias = [...new Set(dias.filter((d) => Number.isInteger(d) && d >= 1 && d <= 7))].sort((a, b) => a - b);
+  if (!_HM_RE.test(inicio) || !_HM_RE.test(fim)) return res.status(400).json({ error: 'horário inválido (use HH:MM)' });
+  if (inicio >= fim) return res.status(400).json({ error: 'o início deve ser antes do fim' });
+  if (!dias.length) return res.status(400).json({ error: 'selecione ao menos um dia' });
+  try {
+    await withTenant(req.tenantId, (c) => c.query(
+      `UPDATE tenants SET horario_comercial_inicio = $2, horario_comercial_fim = $3, horario_comercial_dias = $4 WHERE id = $1`,
+      [req.tenantId, inicio, fim, dias]
+    ));
+    logger.info('tenant.horario.updated', { tenant_id: req.tenantId, inicio, fim, dias, by: req.tenantRole });
+    res.json({ ok: true, inicio, fim, dias });
+  } catch (err) {
+    logger.error('tenant.horario.put_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // POST /tenant/:tid/leads/:id/approve  — body opcional { response }
 router.post(
   '/:tenantId/leads/:id/approve',
