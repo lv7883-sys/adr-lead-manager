@@ -18,6 +18,7 @@ const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
 const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, PERIODS } = require('../metrics');   // G: dashboard de gestão
 const { generateDraftForLead } = require('../engine');   // Bloco 2: rascunho ao confirmar lead
+const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
 const multer = require('multer');                        // ADR-016 P1: upload de mídia
 const mediaLib = require('../media');
@@ -1396,5 +1397,140 @@ router.get(
     }
   }
 );
+
+// ===========================================================================
+// ADR-006 — Automação de atendimento (automacao_config + automacao_log).
+// GET retorna a config atual (com defaults) + as últimas alterações.
+// PUT grava a config (upsert), audita em automacao_log e loga o evento.
+// ===========================================================================
+const MODOS = ['manual', 'semi', 'auto'];
+const AUTOMACAO_DEFAULTS = {
+  modo_comercial: 'manual', modo_fora_horario: 'semi', modo_fds: 'semi',
+  primeira_resposta_auto: true, qualificacao_auto: true,
+  proposta_sempre_manual: true, agendamento_sempre_manual: true,
+};
+
+const MODO_LABEL = { manual: 'Manual', semi: 'Semi-automático', auto: 'Automático' };
+const AUTOMACAO_CAMPOS = {
+  modo_comercial: { label: 'Horário comercial', modo: true },
+  modo_fora_horario: { label: 'Fora do horário', modo: true },
+  modo_fds: { label: 'Fins de semana', modo: true },
+  primeira_resposta_auto: { label: 'Primeira resposta automática', modo: false },
+  qualificacao_auto: { label: 'Qualificação automática', modo: false },
+  proposta_sempre_manual: { label: 'Proposta sempre manual', modo: false },
+  agendamento_sempre_manual: { label: 'Agendamento sempre manual', modo: false },
+};
+function _valorLabel(campo, v) {
+  if (AUTOMACAO_CAMPOS[campo] && AUTOMACAO_CAMPOS[campo].modo) return MODO_LABEL[v] || v;
+  return v ? 'Sim' : 'Não';
+}
+// Lista os campos que mudaram entre `de` e `para`, com rótulos legíveis.
+function _diffAutomacao(de, para) {
+  const out = [];
+  for (const campo of Object.keys(AUTOMACAO_CAMPOS)) {
+    if (de[campo] !== para[campo]) {
+      out.push({
+        campo, label: AUTOMACAO_CAMPOS[campo].label, modo: AUTOMACAO_CAMPOS[campo].modo,
+        de: _valorLabel(campo, de[campo]), para: _valorLabel(campo, para[campo]),
+      });
+    }
+  }
+  return out;
+}
+
+function _snapshotAutomacao(row) {
+  return {
+    modo_comercial: row.modo_comercial, modo_fora_horario: row.modo_fora_horario, modo_fds: row.modo_fds,
+    primeira_resposta_auto: row.primeira_resposta_auto, qualificacao_auto: row.qualificacao_auto,
+    proposta_sempre_manual: row.proposta_sempre_manual, agendamento_sempre_manual: row.agendamento_sempre_manual,
+  };
+}
+
+router.get('/:tenantId/automacao', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      const cfg = (await c.query('SELECT * FROM automacao_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
+      const historico = (await c.query(
+        `SELECT usuario, modo_anterior, modo_novo, motivo, criado_em
+           FROM automacao_log WHERE tenant_id = $1 ORDER BY criado_em DESC LIMIT 10`, [req.tenantId])).rows;
+      return { cfg, historico };
+    });
+    const config = out.cfg
+      ? { ..._snapshotAutomacao(out.cfg), updated_at: out.cfg.updated_at, updated_by: out.cfg.updated_by }
+      : { ...AUTOMACAO_DEFAULTS, updated_at: null, updated_by: null };
+    res.json({ tenant_id: req.tenantId, config, historico: out.historico });
+  } catch (err) {
+    logger.error('tenant.automacao.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const b = req.body || {};
+  const novo = {
+    modo_comercial: String(b.modo_comercial || '').trim(),
+    modo_fora_horario: String(b.modo_fora_horario || '').trim(),
+    modo_fds: String(b.modo_fds || '').trim(),
+    primeira_resposta_auto: b.primeira_resposta_auto !== false,
+    qualificacao_auto: b.qualificacao_auto !== false,
+    proposta_sempre_manual: b.proposta_sempre_manual !== false,
+    agendamento_sempre_manual: b.agendamento_sempre_manual !== false,
+  };
+  for (const k of ['modo_comercial', 'modo_fora_horario', 'modo_fds']) {
+    if (!MODOS.includes(novo[k])) return res.status(400).json({ error: `${k} inválido` });
+  }
+  const motivo = typeof b.motivo === 'string' ? b.motivo.trim().slice(0, 500) : '';
+  // usuario do log: identidade real do operador (vem do dashboard, que autentica
+  // com SERVICE_TOKEN compartilhado); cai no papel do token só como fallback.
+  const usuario = (typeof b.by_name === 'string' && b.by_name.trim())
+    ? b.by_name.trim() : (req.tenantRole || 'desconhecido');
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      const atual = (await c.query('SELECT * FROM automacao_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
+      const anterior = atual ? _snapshotAutomacao(atual) : { ...AUTOMACAO_DEFAULTS };
+      const r = await c.query(
+        `INSERT INTO automacao_config
+           (tenant_id, modo_comercial, modo_fora_horario, modo_fds,
+            primeira_resposta_auto, qualificacao_auto, proposta_sempre_manual, agendamento_sempre_manual,
+            updated_at, updated_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now(), $9)
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           modo_comercial = EXCLUDED.modo_comercial,
+           modo_fora_horario = EXCLUDED.modo_fora_horario,
+           modo_fds = EXCLUDED.modo_fds,
+           primeira_resposta_auto = EXCLUDED.primeira_resposta_auto,
+           qualificacao_auto = EXCLUDED.qualificacao_auto,
+           proposta_sempre_manual = EXCLUDED.proposta_sempre_manual,
+           agendamento_sempre_manual = EXCLUDED.agendamento_sempre_manual,
+           updated_at = now(), updated_by = EXCLUDED.updated_by
+         RETURNING *`,
+        [req.tenantId, novo.modo_comercial, novo.modo_fora_horario, novo.modo_fds,
+         novo.primeira_resposta_auto, novo.qualificacao_auto, novo.proposta_sempre_manual,
+         novo.agendamento_sempre_manual, usuario]
+      );
+      await c.query(
+        `INSERT INTO automacao_log (tenant_id, usuario, modo_anterior, modo_novo, motivo)
+         VALUES ($1,$2,$3::jsonb,$4::jsonb,$5)`,
+        [req.tenantId, usuario, JSON.stringify(anterior), JSON.stringify(novo), motivo || null]
+      );
+      return { row: r.rows[0], anterior };
+    });
+    logger.info('tenant.automacao.alterada', {
+      tenant_id: req.tenantId, by: usuario, anterior: out.anterior, novo, motivo: motivo || null,
+    });
+    // Warning ao gestor (notif_phones): só quando um MODO mudou (ADR-006).
+    const mudancas = _diffAutomacao(out.anterior, novo);
+    const modoMudou = mudancas.some((m) => m.modo);
+    if (modoMudou) {
+      const byName = typeof b.by_name === 'string' && b.by_name.trim() ? b.by_name.trim() : usuario;
+      notificarRecepcao(req.tenantId, 'automacao_alterada', { byName, mudancas, motivo: motivo || null })
+        .catch((e) => logger.warn('tenant.automacao.notif_error', { tenant_id: req.tenantId, error: e.message }));
+    }
+    res.json({ ok: true, config: { ..._snapshotAutomacao(out.row), updated_at: out.row.updated_at, updated_by: out.row.updated_by }, anterior: out.anterior });
+  } catch (err) {
+    logger.error('tenant.automacao.update_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
 
 module.exports = router;

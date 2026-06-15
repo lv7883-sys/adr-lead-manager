@@ -24,6 +24,12 @@ function _mensagem(tipo, dados, base) {
   if (tipo === 'revisao') {
     return `🔎 Mensagem para revisar — pode ser um lead. Acesse: ${b}/leads/revisar`;
   }
+  if (tipo === 'automacao_alterada') {
+    const quem = dados.byName || 'Alguém';
+    const linhas = (dados.mudancas || []).map((m) => `${m.label}: ${m.de} → ${m.para}`).join('\n');
+    const motivo = dados.motivo ? dados.motivo : 'não informado';
+    return `⚙️ ${quem} alterou a automação de atendimento:\n${linhas}\nMotivo: ${motivo}\nAcesse: ${b}/configuracoes/automacao`;
+  }
   return null;
 }
 
