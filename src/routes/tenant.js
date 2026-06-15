@@ -37,6 +37,9 @@ const READ_ROLES = ['TENANT_ADMIN', 'RECEPCAO', 'VISUALIZADOR'];
 // Decidir (aprovar/rejeitar) é ação operacional: TENANT_ADMIN/RECEPCAO + serviços.
 const WRITE_ROLES = ['TENANT_ADMIN', 'RECEPCAO'];
 
+// Início do dia de hoje em America/Sao_Paulo (expressão SQL). Igual ao metrics.js.
+const SP_HOJE = `date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo'`;
+
 // Self-service: o TENANT_ADMIN configura o Lead Manager da própria unidade
 // (E9-06). PLATFORM_ADMIN também acessa via impersonation (requireTenantRole).
 // RECEPCAO/VISUALIZADOR -> 403; outro tenant -> 403.
@@ -421,7 +424,26 @@ router.get(
                           = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
                       ORDER BY cv.updated_at DESC LIMIT 1) AS channel,
                     EXISTS (SELECT 1 FROM pending_approvals pa
-                             WHERE pa.lead_id = l.id AND pa.status = 'PENDING') AS pending_approval
+                             WHERE pa.lead_id = l.id AND pa.status = 'PENDING') AS pending_approval,
+                    -- ADR / Parte 5: flags p/ os filtros dos cards de indicadores.
+                    -- Mesmas fontes do painel (staff_outbound_samples, pending_approvals).
+                    EXISTS (SELECT 1 FROM staff_outbound_samples s
+                             WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
+                                 = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+                               AND s.received_at >= ${SP_HOJE}) AS responded_today,
+                    EXISTS (SELECT 1 FROM pending_approvals pa
+                             WHERE pa.lead_id = l.id AND pa.status = 'APPROVED' AND pa.decided_at >= ${SP_HOJE}) AS approved_today,
+                    EXISTS (SELECT 1 FROM pending_approvals pa
+                             WHERE pa.lead_id = l.id AND pa.status = 'EDITED' AND pa.decided_at >= ${SP_HOJE}) AS edited_today,
+                    -- "aguardando resposta": último contato foi DO lead (USER) e mais
+                    -- recente que o último outbound da escola (igual ao bucket do painel).
+                    ((SELECT max(m.received_at) FROM messages m
+                        JOIN conversations cv ON cv.id = m.conversation_id
+                       WHERE cv.external_id = l.phone AND m.role = 'USER')
+                     > COALESCE((SELECT max(s.received_at) FROM staff_outbound_samples s
+                        WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
+                            = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')), 'epoch'::timestamptz)
+                    ) AS awaiting_reply
                FROM leads l
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
               WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
