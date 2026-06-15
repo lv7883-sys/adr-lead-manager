@@ -902,6 +902,35 @@ router.post('/:tenantId/leads/:id/midia', authenticate, requireTenantAccess(WRIT
 const RETOMADA_CACHE_TTL = 24 * 3600;
 
 // GET /tenant/:tid/leads/:id/sugestao-retomada — sugestão de reabordagem (estrategia +
+// P6 — nota de engajamento p/ contextualizar o prompt da IA + a linha exibida
+// na estratégia. `speed` = classe pela mediana (alto/normal/baixo); `silenciou`
+// = última msg foi nossa e o cliente sumiu. Retorna null se não há padrão claro.
+function _notaEngajamento(speed, silenciou) {
+  if (speed === 'alto' && silenciou) {
+    return {
+      desc: 'estava muito engajado (respondia em menos de 1h) e parou de responder — algo pode ter travado.',
+      prompt: 'Este lead estava muito engajado (respondia em menos de 1h). Algo pode ter travado. '
+        + 'Sugira perguntar diretamente se surgiu alguma dúvida, com tom próximo e natural.',
+    };
+  }
+  if (speed === 'baixo') {
+    return {
+      desc: 'sempre demorou para responder — provavelmente tem rotina ocupada.',
+      prompt: 'Este lead sempre demorou para responder. Provavelmente tem rotina ocupada. '
+        + 'Sugira uma abordagem direta com algo concreto: um horário específico ou proposta objetiva. '
+        + 'Identifique o melhor horário com base nos momentos em que o cliente respondeu.',
+    };
+  }
+  if (speed === 'normal' && silenciou) {
+    return {
+      desc: 'tinha engajamento normal e silenciou — pode ter perdido o interesse ou estar avaliando.',
+      prompt: 'Este lead tinha engajamento normal. Pode ter perdido o interesse ou estar avaliando. '
+        + 'Sugira uma abordagem leve e sem pressão, reativando o contexto da última conversa.',
+    };
+  }
+  return null;
+}
+
 // rascunho) via IA, READ-ONLY. Cacheada 24h no Redis (?refresh=1 força regenerar).
 router.get('/:tenantId/leads/:id/sugestao-retomada', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   const { id } = req.params;
@@ -938,11 +967,37 @@ router.get('/:tenantId/leads/:id/sugestao-retomada', authenticate, requireTenant
           [req.tenantId, ident]
         )).rows;
       }
-      return { config: cfg, tname, leadName: lead.name, convo };
+      // P6 — sequências de msgs p/ classificar o padrão de engajamento do cliente.
+      let eng = { engajamento: null, silenciou: false, tempo_medio_resposta_cliente_seg: null };
+      if (ident) {
+        const tin = (await c.query(
+          `SELECT array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) AS ts
+             FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+            WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2 AND m.role = 'USER'`,
+          [req.tenantId, ident])).rows[0];
+        const tout = (await c.query(
+          `SELECT array_agg(EXTRACT(EPOCH FROM s.received_at) ORDER BY s.received_at) AS ts
+             FROM staff_outbound_samples s
+            WHERE s.tenant_id = $1 AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
+              AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'`,
+          [req.tenantId, ident])).rows[0];
+        eng = classificarEngajamento(tin && tin.ts, tout && tout.ts, Date.now() / 1000);
+      }
+      return { config: cfg, tname, leadName: lead.name, convo, eng };
     });
     if (!ctx) return res.status(404).json({ error: 'lead not found' });
     const schoolContext = resolveSystemPrompt(ctx.config || { school_name: ctx.tname || 'Escola', system_prompt_override: null });
-    const out = await gemini.sugestaoRetomada({ history: ctx.convo, leadName: ctx.leadName, schoolContext });
+    // Classe pela mediana (independe do flag silenciou, que tem prioridade no rótulo).
+    const med = ctx.eng && ctx.eng.tempo_medio_resposta_cliente_seg;
+    const speed = med == null ? null : (med <= 3600 ? 'alto' : (med <= 86400 ? 'normal' : 'baixo'));
+    const nota = _notaEngajamento(speed, !!(ctx.eng && ctx.eng.silenciou));
+    const out = await gemini.sugestaoRetomada({
+      history: ctx.convo, leadName: ctx.leadName, schoolContext,
+      engajamentoNota: nota ? nota.prompt : '',
+    });
+    if (nota && out && typeof out.estrategia === 'string') {
+      out.estrategia = `Padrão do cliente: ${nota.desc}\n\n${out.estrategia}`.trim();
+    }
     await redisClient.setCache(cacheKey, out, RETOMADA_CACHE_TTL);
     logger.info('tenant.retomada.sugestao', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
     res.json({ ok: true, cached: false, ...out });

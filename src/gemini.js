@@ -224,7 +224,7 @@ async function assistantReply({ schoolContext, leadName, leadConversation, histo
 
 // PARTE 3 — sugestão de retomada de lead silencioso. Analisa a conversa e propõe
 // uma abordagem natural e não invasiva. Retorna JSON {estrategia, rascunho}.
-async function sugestaoRetomada({ history = [], leadName, schoolContext }) {
+async function sugestaoRetomada({ history = [], leadName, schoolContext, engajamentoNota = '' }) {
   const convo = history
     .map((m) => `${String(m.role).toLowerCase() === 'assistant' ? 'Escola' : 'Lead'}: ${m.content ?? m.body ?? m.text ?? ''}`)
     .join('\n');
@@ -236,6 +236,7 @@ async function sugestaoRetomada({ history = [], leadName, schoolContext }) {
     'não estejam na conversa ou nas informações da escola.' +
     (leadName ? `\n\nLEAD: ${leadName}` : '') +
     (schoolContext ? `\n\nINFORMAÇÕES DA ESCOLA (referência):\n${schoolContext}` : '') +
+    (engajamentoNota ? `\n\nPADRÃO DE ENGAJAMENTO DESTE CLIENTE (use para calibrar o tom e a abordagem):\n${engajamentoNota}` : '') +
     `\n\nCONVERSA (mais antigo -> mais novo):\n${convo || '(sem histórico)'}` +
     '\n\nResponda SOMENTE com JSON: {"estrategia":"<por que e como reabordar, 1-2 frases para a ' +
     'recepcionista>","rascunho":"<mensagem pronta para enviar ao lead, tom da escola, sem emojis>"}';
