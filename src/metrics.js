@@ -671,13 +671,15 @@ async function computePainel(tenantId) {
       await c.query(
         `WITH inb AS (
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
-                  min(m.received_at) AS first_in, max(m.received_at) AS last_in
+                  min(m.received_at) AS first_in, max(m.received_at) AS last_in,
+                  array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) AS ts_in
              FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
             WHERE cv.tenant_id = $1 AND m.role = 'USER' GROUP BY 1
          ),
          outb AS (
            SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident,
-                  min(s.received_at) AS first_out, max(s.received_at) AS last_out
+                  min(s.received_at) AS first_out, max(s.received_at) AS last_out,
+                  array_agg(EXTRACT(EPOCH FROM s.received_at) ORDER BY s.received_at) AS ts_out
              FROM staff_outbound_samples s
             WHERE s.tenant_id = $1 AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
             GROUP BY 1
@@ -699,6 +701,7 @@ async function computePainel(tenantId) {
                 l.review_queue, l.review_result, l.classification_confidence,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
                 i.first_in, i.last_in, o.first_out, o.last_out, c.channel,
+                i.ts_in, o.ts_out,
                 d.draft_at, COALESCE(d.n, 0) AS drafts,
                 (p.lead_id IS NOT NULL) AS retomada_pendente
            FROM leads l
@@ -762,12 +765,20 @@ async function computePainel(tenantId) {
         tipo = 'monitorar';
         detalheSeg = (agora - new Date(l.created_at).getTime()) / 1000;
       }
+      // P5 — engajamento do cliente + bump: 🔴 silenciou sobe pro bucket retomada.
+      const eng = classificarEngajamento(l.ts_in, l.ts_out, agora / 1000);
+      const silenciouEng = eng.engajamento === 'silenciou';
+      if (silenciouEng && tipo === 'monitorar') tipo = 'retomada';
       fila.push({
         id: l.id, name: l.name || 'Lead sem nome',
         instrument: l.instrument || null, channel: l.channel || null,
         temperatura: temperatura(l), tipo, detalhe_seg: Math.max(0, Math.round(detalheSeg)),
         tem_rascunho: l.drafts > 0,
-        retomada_sugerida: !!l.retomada_pendente,   // ADR-020: sugestão IA pendente
+        retomada_sugerida: !!l.retomada_pendente || (silenciouEng && tipo === 'retomada'),   // ADR-020 + P5
+        engajamento_cliente: {
+          engajamento: eng.engajamento,
+          tempo_medio_resposta_cliente_seg: eng.tempo_medio_resposta_cliente_seg,
+        },
       });
     }
     const ordem = { responder_agora: 0, sem_resposta: 1, retomada: 2, monitorar: 3 };

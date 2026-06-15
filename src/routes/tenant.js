@@ -16,7 +16,7 @@ const meta = require('../meta');              // E6: envio outbound via Messenge
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
-const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, PERIODS } = require('../metrics');   // G: dashboard de gestão
+const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, PERIODS, classificarEngajamento } = require('../metrics');   // G: dashboard de gestão
 const { generateDraftForLead } = require('../engine');   // Bloco 2: rascunho ao confirmar lead
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
@@ -443,7 +443,15 @@ router.get(
                      > COALESCE((SELECT max(s.received_at) FROM staff_outbound_samples s
                         WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
                             = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')), 'epoch'::timestamptz)
-                    ) AS awaiting_reply
+                    ) AS awaiting_reply,
+                    -- P5: sequências de msgs p/ classificar o engajamento do cliente.
+                    (SELECT array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at)
+                       FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                      WHERE cv.external_id = l.phone AND m.role = 'USER') AS ts_in,
+                    (SELECT array_agg(EXTRACT(EPOCH FROM s.received_at) ORDER BY s.received_at)
+                       FROM staff_outbound_samples s
+                      WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
+                          = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')) AS ts_out
                FROM leads l
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
               WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
@@ -451,6 +459,14 @@ router.get(
               LIMIT 100`
           )
         ).rows;
+        // P5 — classifica engajamento do cliente por lead (e remove os arrays crus).
+        const nowSec = Date.now() / 1000;
+        for (const l of leads) {
+          const e = classificarEngajamento(l.ts_in, l.ts_out, nowSec);
+          l.engajamento = e.engajamento;
+          l.tempo_medio_resposta_cliente_seg = e.tempo_medio_resposta_cliente_seg;
+          delete l.ts_in; delete l.ts_out;
+        }
         const pendingTotal = (
           await c.query(
             `SELECT count(*)::int AS n FROM pending_approvals WHERE status = 'PENDING'`
