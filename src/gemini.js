@@ -144,6 +144,28 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
   if (clarification) {
     sys += `\n\nNESTA RESPOSTA, peça educadamente que o lead esclareça: ${clarification}.`;
   }
+  // Análise de tom/ritmo/momento/estilo ANTES de redigir: a sugestão deve ENTRAR no
+  // fluxo da conversa (não reiniciá-la) e espelhar o jeito da recepcionista.
+  sys +=
+    '\n\nANTES DE SUGERIR UMA RESPOSTA, ANALISE A CONVERSA:' +
+    '\n\n1. TOM: a conversa é formal ou informal?' +
+    '\n   - Mensagens curtas e diretas = informal' +
+    '\n   - Mensagens longas e elaboradas = formal' +
+    '\n\n2. RITMO: qual o tamanho médio das mensagens?' +
+    '\n   - Se curtas (1-2 frases) → responda em 1-2 frases' +
+    '\n   - Se longas → pode ser mais elaborado' +
+    '\n\n3. MOMENTO: onde estamos na conversa?' +
+    '\n   - Início: pode ser mais apresentativo' +
+    '\n   - Meio (conversa fluída): entre no fluxo, não reinicie' +
+    '\n   - Fim (lead respondeu algo conclusivo): seja direto' +
+    '\n\n4. ESTILO: como a recepcionista respondeu antes?' +
+    '\n   - Replique o mesmo estilo nas suas sugestões' +
+    '\n\nREGRAS OBRIGATÓRIAS:' +
+    '\n- NUNCA chame a pessoa pelo nome se a conversa já está fluída sem isso' +
+    "\n- NUNCA comece com 'Olá [nome]!' se já houve várias trocas de mensagens" +
+    '\n- NUNCA gere texto longo se a conversa é de mensagens curtas' +
+    '\n- Entre no ritmo da conversa, não reinicie ela' +
+    '\n- Seja natural, como se você fosse a própria recepcionista continuando a conversa';
   return withModelFallback(async (modelName) => {
     // temperature baixa (0.3) = respostas mais consistentes e ancoradas no prompt,
     // menos "criativas"/inventadas. Os classificadores já rodam em 0; aqui mantemos um
