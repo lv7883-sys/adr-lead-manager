@@ -573,18 +573,24 @@ async function computePainel(tenantId) {
          draft AS (
            SELECT lead_id, max(created_at) AS draft_at, count(*) AS n
              FROM pending_approvals WHERE tenant_id = $1 AND status = 'PENDING' GROUP BY 1
+         ),
+         pend AS (
+           SELECT lead_id FROM reabordagem_tentativas
+            WHERE tenant_id = $1 AND status = 'pendente' GROUP BY lead_id
          )
          SELECT l.id, l.name, l.status, l.intent, l.desfecho, l.created_at, l.temperatura_manual,
                 l.review_queue, l.review_result, l.classification_confidence,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
                 i.first_in, i.last_in, o.first_out, o.last_out, c.channel,
-                d.draft_at, COALESCE(d.n, 0) AS drafts
+                d.draft_at, COALESCE(d.n, 0) AS drafts,
+                (p.lead_id IS NOT NULL) AS retomada_pendente
            FROM leads l
            LEFT JOIN lead_qualifications q ON q.lead_id = l.id
            LEFT JOIN inb  i ON i.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
            LEFT JOIN outb o ON o.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
            LEFT JOIN chan c ON c.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
-           LEFT JOIN draft d ON d.lead_id = l.id`,
+           LEFT JOIN draft d ON d.lead_id = l.id
+           LEFT JOIN pend p ON p.lead_id = l.id`,
         [tenantId]
       )
     ).rows;
@@ -644,6 +650,7 @@ async function computePainel(tenantId) {
         instrument: l.instrument || null, channel: l.channel || null,
         temperatura: temperatura(l), tipo, detalhe_seg: Math.max(0, Math.round(detalheSeg)),
         tem_rascunho: l.drafts > 0,
+        retomada_sugerida: !!l.retomada_pendente,   // ADR-020: sugestão IA pendente
       });
     }
     const ordem = { responder_agora: 0, sem_resposta: 1, retomada: 2, monitorar: 3 };

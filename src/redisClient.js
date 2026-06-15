@@ -75,6 +75,14 @@ async function setCache(key, value, ttlSeconds) {
     logger.warn('redis.cache_set_failed', { key, error: err.message });
   }
 }
+async function delCache(key) {
+  try {
+    await ensureConnected();
+    await redis.del(key);
+  } catch (err) {
+    logger.warn('redis.cache_del_failed', { key, error: err.message });
+  }
+}
 
 module.exports = {
   redis,
@@ -85,4 +93,5 @@ module.exports = {
   invalidateSubStatus,
   getCache,
   setCache,
+  delCache,
 };

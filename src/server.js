@@ -120,6 +120,19 @@ if (require.main === module) {
     { timezone: 'America/Sao_Paulo' }
   );
 
+  // ADR-020: detecção diária de leads silenciosos — 07:00 America/Sao_Paulo.
+  // Gera sugestões de reabordagem (status='pendente') para a fila da recepção.
+  const { runDetectarSilenciosos } = require('./jobs/detectar-silenciosos');
+  cron.schedule(
+    '0 7 * * *',
+    () => {
+      runDetectarSilenciosos()
+        .then((s) => logger.info('cron.detectar_silenciosos.done', { tenants: s.tenants, detectados: s.detectados, sugeridos: s.sugeridos }))
+        .catch((e) => logger.error('cron.detectar_silenciosos.error', { error: e.message }));
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+
   // Encerramento gracioso para deploys/rolling restarts.
   const shutdown = (signal) => {
     logger.info('server.shutdown', { signal });

@@ -931,16 +931,57 @@ router.post('/:tenantId/leads/:id/enviar-retomada', authenticate, requireTenantA
     const r = await evolution.sendText({ instance: d.instance, apikey: d.apikey }, d.phone, text);
     const msgId = evolution.pickMessageId(r);
     await _registrarSaida(req.tenantId, { phone: d.phone, externalMessageId: msgId, sender: req.tenantRole, body: text });
-    await withTenant(req.tenantId, (c) => c.query(
-      `INSERT INTO reabordagem_tentativas (tenant_id, lead_id, texto, sugestao_estrategia, sugestao_rascunho)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [req.tenantId, id, text, estrategia, rascunho]
-    ));
+    // Se há uma sugestão PENDENTE (gerada pelo job ADR-020), aprova-a (vira
+    // 'enviado') em vez de criar uma 2ª linha; senão registra o envio manual.
+    await withTenant(req.tenantId, async (c) => {
+      const upd = await c.query(
+        `UPDATE reabordagem_tentativas
+            SET texto = $3, status = 'enviado', enviado_em = now(),
+                sugestao_estrategia = COALESCE($4, sugestao_estrategia),
+                sugestao_rascunho   = COALESCE($5, sugestao_rascunho)
+          WHERE id = (SELECT id FROM reabordagem_tentativas
+                       WHERE tenant_id = $1 AND lead_id = $2 AND status = 'pendente'
+                       ORDER BY enviado_em DESC LIMIT 1)`,
+        [req.tenantId, id, text, estrategia, rascunho]
+      );
+      if (upd.rowCount === 0) {
+        await c.query(
+          `INSERT INTO reabordagem_tentativas (tenant_id, lead_id, texto, sugestao_estrategia, sugestao_rascunho, status)
+           VALUES ($1, $2, $3, $4, $5, 'enviado')`,
+          [req.tenantId, id, text, estrategia, rascunho]
+        );
+      }
+    });
+    redisClient.delCache(`retomada:${req.tenantId}:${id}`).catch(() => {});
     logger.info('tenant.retomada.enviada', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
     res.json({ ok: true, message_id: msgId });
   } catch (err) {
     logger.error('tenant.retomada.enviar_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
     res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
+
+// POST /tenant/:tid/leads/:id/ignorar-retomada — ADR-020: descarta a sugestão de
+// reabordagem pendente (status 'pendente' -> 'ignorado'). Não envia nada.
+router.post('/:tenantId/leads/:id/ignorar-retomada', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  try {
+    const n = await withTenant(req.tenantId, (c) => c.query(
+      `UPDATE reabordagem_tentativas
+          SET status = 'ignorado'
+        WHERE id = (SELECT id FROM reabordagem_tentativas
+                     WHERE tenant_id = $1 AND lead_id = $2 AND status = 'pendente'
+                     ORDER BY enviado_em DESC LIMIT 1)`,
+      [req.tenantId, id]
+    ).then((r) => r.rowCount));
+    if (!n) return res.status(404).json({ error: 'no_pending' });
+    redisClient.delCache(`retomada:${req.tenantId}:${id}`).catch(() => {});
+    logger.info('tenant.retomada.ignorada', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error('tenant.retomada.ignorar_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(500).json({ error: 'internal error' });
   }
 });
 
