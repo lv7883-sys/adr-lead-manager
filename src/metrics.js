@@ -119,6 +119,14 @@ function classificarEngajamento(inbTs, outTs, nowSec) {
   };
 }
 
+// Segunda-feira (YYYY-MM-DD) da semana de um timestamp, em horário de SP.
+function mondaySP(ts) {
+  const x = new Date(new Date(ts).getTime() - 3 * 3600 * 1000); // wall clock SP como UTC
+  const dow = x.getUTCDay();                 // 0=Dom..6=Sáb
+  x.setUTCDate(x.getUTCDate() - (dow === 0 ? 6 : dow - 1));
+  return x.toISOString().slice(0, 10);
+}
+
 async function computeMetrics(tenantId, { period = '30d', channel = null } = {}) {
   const days = PERIODS[period] || 30;
 
@@ -275,6 +283,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     let silenciosos3d = 0;
     const silenciososLista = []; // PARTE 3 — { id, name, instrument, ultimo_contato_em, silencio_seg, faixa }
     const respPorDia = new Map(); // PARTE 4 — dia(YYYY-MM-DD) -> { soma, n } (tempo de 1ª resposta)
+    const slaSemana = new Map();  // SLA semanal — semana(segunda) -> { ate_30, ate_1h, ate_2h, acima_2h }
     const semRespostaLeads = []; // { id, name } — pro alerta com link direto
     const porRecep = new Map(); // sender -> { n, somaSeg, comTempo }
     const leadsTabela = []; // linha por lead pra seção "Lista de leads"
@@ -308,6 +317,14 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         const rd = respPorDia.get(dia) || { soma: 0, n: 0, em30: 0 };
         rd.soma += respSeg; rd.n++; if (respSeg <= 30 * 60) rd.em30++;
         respPorDia.set(dia, rd);
+        // SLA semanal: bucketiza o tempo de 1ª resposta por semana (segunda, SP).
+        const wk = mondaySP(l.first_out);
+        const ws = slaSemana.get(wk) || { ate_30: 0, ate_1h: 0, ate_2h: 0, acima_2h: 0 };
+        if (respSeg <= 1800) ws.ate_30++;
+        else if (respSeg <= 3600) ws.ate_1h++;
+        else if (respSeg <= 7200) ws.ate_2h++;
+        else ws.acima_2h++;
+        slaSemana.set(wk, ws);
         // Split por horário comercial: classifica pela chegada da 1ª msg do lead.
         if (dentroHorario(l.first_in, horario)) respComercial.push(respSeg);
         else respFora.push(respSeg);
@@ -474,10 +491,15 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       distribuicao: engDist,
     };
 
+    const bloco_sla_semanal = [...slaSemana.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([semana, v]) => ({ semana, ...v }));
+
     return {
       period, channel: channel || null, total_leads: totalLeads,
       leads_tabela: leadsTabela,
       engajamento,
+      bloco_sla_semanal,
       bloco1_sla: {
         primeira_resposta_seg: {
           mediana: round(percentile(respTimes, 0.5), 0),
