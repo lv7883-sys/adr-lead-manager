@@ -78,6 +78,47 @@ const NAO_MATRICULA = {
 };
 
 // --- principal -------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Engajamento do CLIENTE (ADR). Classifica um lead pela MEDIANA do tempo que ele
+// leva para responder às NOSSAS mensagens. inbTs = msgs do cliente (role USER);
+// outTs = nossas msgs (staff_outbound). Timestamps em epoch (segundos).
+//   alto      mediana <= 1h
+//   normal    1h–24h
+//   baixo     > 24h
+//   silenciou última msg foi nossa e passou >= 3 dias sem resposta
+// ---------------------------------------------------------------------------
+const ENGAJ_TRES_DIAS_SEG = 3 * 86400;
+function classificarEngajamento(inbTs, outTs, nowSec) {
+  const inb = (inbTs || []).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  const out = (outTs || []).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  // gaps: cada nossa msg -> 1ª resposta do cliente antes da próxima nossa.
+  const gaps = [];
+  for (let i = 0; i < out.length; i++) {
+    const t0 = out[i];
+    const tNext = i + 1 < out.length ? out[i + 1] : Infinity;
+    for (const t of inb) { if (t > t0 && t < tNext) { gaps.push(t - t0); break; } }
+  }
+  // trocas bidirecionais = mudanças de direção na timeline mesclada.
+  const ev = [];
+  for (const t of inb) ev.push([t, 0]);
+  for (const t of out) ev.push([t, 1]);
+  ev.sort((a, b) => a[0] - b[0]);
+  let trocas = 0;
+  for (let i = 1; i < ev.length; i++) if (ev[i][1] !== ev[i - 1][1]) trocas++;
+  const lastIn = inb.length ? inb[inb.length - 1] : -Infinity;
+  const lastOut = out.length ? out[out.length - 1] : -Infinity;
+  const silenciou = out.length > 0 && lastOut > lastIn && (nowSec - lastOut) >= ENGAJ_TRES_DIAS_SEG;
+  const mediana = gaps.length ? percentile([...gaps].sort((a, b) => a - b), 0.5) : null;
+  let engajamento = null;
+  if (silenciou) engajamento = 'silenciou';
+  else if (mediana != null) engajamento = mediana <= 3600 ? 'alto' : (mediana <= 86400 ? 'normal' : 'baixo');
+  return {
+    engajamento,
+    tempo_medio_resposta_cliente_seg: mediana != null ? Math.round(mediana) : null,
+    trocas, respondeu: gaps.length > 0, silenciou, tem_outbound: out.length > 0, gaps,
+  };
+}
+
 async function computeMetrics(tenantId, { period = '30d', channel = null } = {}) {
   const days = PERIODS[period] || 30;
 
@@ -380,9 +421,63 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       taxa: Number(m.decididos) ? round((Number(m.aceitos) / Number(m.decididos)) * 100) : null,
     }));
 
+    // ENGAJAMENTO DO CLIENTE — sequências de mensagens por lead ATIVO do período.
+    const engRows = (
+      await c.query(
+        `WITH base AS (
+           SELECT l.id, regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g') AS ident
+             FROM leads l
+            WHERE l.created_at >= now() - ($2 || ' days')::interval
+              AND l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE', 'CONVERTED')
+              AND l.desfecho IS NULL
+         ),
+         inb AS (
+           SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
+                  array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) AS ts
+             FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+            WHERE cv.tenant_id = $1 AND m.role = 'USER' GROUP BY 1
+         ),
+         outb AS (
+           SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident,
+                  array_agg(EXTRACT(EPOCH FROM s.received_at) ORDER BY s.received_at) AS ts
+             FROM staff_outbound_samples s
+            WHERE s.tenant_id = $1
+              AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+            GROUP BY 1
+         )
+         SELECT b.id, i.ts AS inb_ts, o.ts AS out_ts
+           FROM base b
+           LEFT JOIN inb  i ON i.ident = b.ident AND b.ident <> ''
+           LEFT JOIN outb o ON o.ident = b.ident AND b.ident <> ''`,
+        [tenantId, days]
+      )
+    ).rows;
+    const nowSec = agora / 1000;
+    let engComOut = 0, engResp = 0, engAtiva = 0, engSil = 0;
+    const engDist = { alto: 0, normal: 0, baixo: 0, silenciou: 0 };
+    const engGaps = [];
+    for (const r of engRows) {
+      const e = classificarEngajamento(r.inb_ts, r.out_ts, nowSec);
+      if (e.tem_outbound) engComOut++;
+      if (e.respondeu) engResp++;
+      if (e.trocas >= 3) engAtiva++;
+      if (e.silenciou) engSil++;
+      if (e.engajamento) engDist[e.engajamento]++;
+      for (const g of e.gaps) engGaps.push(g);
+    }
+    engGaps.sort((a, b) => a - b);
+    const engajamento = {
+      taxa_retorno_pct: engComOut ? round((engResp / engComOut) * 100) : 0,
+      tempo_medio_cliente_seg: engGaps.length ? Math.round(percentile(engGaps, 0.5)) : null,
+      leads_conversa_ativa: engAtiva,
+      leads_silenciosos_apos_resposta: engSil,
+      distribuicao: engDist,
+    };
+
     return {
       period, channel: channel || null, total_leads: totalLeads,
       leads_tabela: leadsTabela,
+      engajamento,
       bloco1_sla: {
         primeira_resposta_seg: {
           mediana: round(percentile(respTimes, 0.5), 0),
@@ -772,4 +867,5 @@ module.exports = {
   computeMetrics, computeFunil, computePainel, computeKanban,
   kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS,
   resolveFunilRange, percentile, temperatura, spHourDow, PERIODS,
+  classificarEngajamento,
 };
