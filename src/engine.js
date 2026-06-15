@@ -9,7 +9,6 @@ const notifyModule = require('./notify');
 const notificacao = require('./notificacao');   // Bloco 4: push WhatsApp pra recepção
 const redisClient = require('./redisClient');
 const gating = require('./gating');
-const { makeOptoutToken } = require('./optoutToken');
 
 const CONFIDENCE_THRESHOLD = 0.7;
 // Bloco 2 — roteamento por confidence (probabilidade de ser lead):
@@ -41,14 +40,10 @@ function _mediaCols(msg) {
   return [m && m.url || null, m && m.type || null, m && m.filename || null, m && m.transcription || null];
 }
 
-// LGPD (item 2) — rodapé discreto de opt-out, SÓ na 1ª mensagem (lead NEW).
-// Sem mencionar IA/assistente/tecnologia; link único por lead (token HMAC).
-const OPTOUT_BASE = process.env.OPTOUT_BASE_URL || 'https://agenda.leovecchi.com';
+// LGPD — versão do texto registrada no consent_records (consentimento implícito
+// no 1º contato). O rodapé de opt-out foi REMOVIDO das mensagens de leads (conversa
+// humana aprovada pela recepção); permanece só nos avisos automáticos do Scheduler.
 const CONSENT_VERSION = 'optout-footer-v1';
-function optoutFooter(tenantId, leadId) {
-  const token = makeOptoutToken(tenantId, leadId);
-  return `Não quer receber mensagens? Clique aqui: ${OPTOUT_BASE}/optout/${token}`;
-}
 
 const QUAL_FIELDS = ['name', 'instrument', 'availability'];
 const FIELD_LABELS = {
@@ -523,11 +518,11 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     log2.warn('gate2.intent_error', { gate: 2, error: err.message });
   }
 
-  // LGPD — rodapé de opt-out só na PRIMEIRA mensagem (lead recém-criado: NEW).
+  // LGPD — marca o 1º contato (lead NEW) para o registro de consentimento abaixo.
+  // O rodapé de opt-out NÃO é anexado às mensagens de leads: são conversa humana
+  // aprovada pela recepção. O opt-out só vai nos avisos automáticos de professores
+  // (Scheduler/orchestrator), nunca aqui.
   const primeiraMensagem = ctx.leadStatus === 'NEW';
-  if (primeiraMensagem) {
-    reply = `${reply}\n\n${optoutFooter(tenantId, ctx.leadId)}`;
-  }
 
   // tx2: persiste USER + ASSISTANT, promove o lead e cria a aprovação pendente.
   const result = await withTenant(tenantId, async (c) => {
