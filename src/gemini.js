@@ -127,45 +127,61 @@ async function classify({ message, examples }) {
 
 // Portão 2 — geração da resposta, com system prompt do tenant + histórico.
 // `clarification` (opcional): instrução para repergunta de dado ambíguo (E1-03).
+// Intervalo (horas) acima do qual uma retomada pode reabrir com saudação leve —
+// como faz a recepcionista de verdade quando o lead some por mais de um dia.
+const SAUDACAO_GAP_HORAS = 24;
+
+// Calcula horas desde o último turno do histórico (timestamps `at`); null se não houver.
+function _horasDesdeUltimoTurno(history) {
+  let ultimo = 0;
+  for (const m of history) {
+    const t = m && m.at ? new Date(m.at).getTime() : NaN;
+    if (Number.isFinite(t) && t > ultimo) ultimo = t;
+  }
+  if (!ultimo) return null;
+  return (Date.now() - ultimo) / 3.6e6;
+}
+
 async function generateReply({ systemPrompt, history = [], message, clarification, retomada }) {
   let sys = systemPrompt;
+  const primeiroContato = history.length === 0;
+  const horas = _horasDesdeUltimoTurno(history);
+  // Saudação/apresentação só valem no PRIMEIRO contato ou quando o lead some por um
+  // tempo longo (> 1 dia). Em conversa em andamento, nada de cumprimentar/assinar de novo.
+  const permitirSaudacao = primeiroContato || (horas != null && horas >= SAUDACAO_GAP_HORAS);
   // RETOMADA: quando JÁ existe conversa anterior (histórico real), a IA não deve tratar
   // como primeiro contato. Condiciona a apresentação/"REFERÊNCIA DE VOZ" do prompt a só
   // valerem sem histórico, e orienta uma retomada contextualizada.
   if (retomada) {
     sys +=
       '\n\nRETOMADA — JÁ EXISTE conversa anterior com esta pessoa (veja o histórico acima). ' +
-      'NÃO se apresente de novo nem trate como primeiro contato. IGNORE a instrução de ' +
-      '"primeira mensagem" e a "REFERÊNCIA DE VOZ" (elas valem só quando NÃO há histórico). ' +
+      'NÃO se apresente de novo (não repita seu nome/função nem a "REFERÊNCIA DE VOZ"). ' +
       'Identifique onde a conversa parou e qual foi o último assunto, referencie isso de forma ' +
       'natural e calorosa, e reconecte avançando para o agendamento da aula experimental. ' +
-      'Não invente nada que não foi discutido.';
+      'Não invente nada que não foi discutido.' +
+      (permitirSaudacao
+        ? ' Como faz tempo desde a última mensagem (mais de um dia), você PODE reabrir com um ' +
+          'cumprimento leve ("Oi! Tudo bem?") antes de retomar o assunto.'
+        : ' A conversa está em andamento (resposta recente): NÃO cumprimente de novo, apenas continue o fluxo.');
   }
   if (clarification) {
     sys += `\n\nNESTA RESPOSTA, peça educadamente que o lead esclareça: ${clarification}.`;
   }
-  // Análise de tom/ritmo/momento/estilo ANTES de redigir: a sugestão deve ENTRAR no
-  // fluxo da conversa (não reiniciá-la) e espelhar o jeito da recepcionista.
+  // Regras de redação: a sugestão deve ENTRAR no fluxo da conversa (não reiniciá-la) e
+  // espelhar o tamanho/tom das mensagens recentes. Mantemos imperativo e curto de
+  // propósito — frameworks de "análise" longos empurram o modelo para respostas formais
+  // e compridas, o oposto do que a recepção precisa.
   sys +=
-    '\n\nANTES DE SUGERIR UMA RESPOSTA, ANALISE A CONVERSA:' +
-    '\n\n1. TOM: a conversa é formal ou informal?' +
-    '\n   - Mensagens curtas e diretas = informal' +
-    '\n   - Mensagens longas e elaboradas = formal' +
-    '\n\n2. RITMO: qual o tamanho médio das mensagens?' +
-    '\n   - Se curtas (1-2 frases) → responda em 1-2 frases' +
-    '\n   - Se longas → pode ser mais elaborado' +
-    '\n\n3. MOMENTO: onde estamos na conversa?' +
-    '\n   - Início: pode ser mais apresentativo' +
-    '\n   - Meio (conversa fluída): entre no fluxo, não reinicie' +
-    '\n   - Fim (lead respondeu algo conclusivo): seja direto' +
-    '\n\n4. ESTILO: como a recepcionista respondeu antes?' +
-    '\n   - Replique o mesmo estilo nas suas sugestões' +
-    '\n\nREGRAS OBRIGATÓRIAS:' +
-    '\n- NUNCA chame a pessoa pelo nome se a conversa já está fluída sem isso' +
-    "\n- NUNCA comece com 'Olá [nome]!' se já houve várias trocas de mensagens" +
-    '\n- NUNCA gere texto longo se a conversa é de mensagens curtas' +
-    '\n- Entre no ritmo da conversa, não reinicie ela' +
-    '\n- Seja natural, como se você fosse a própria recepcionista continuando a conversa';
+    '\n\nCOMO ESCREVER A RESPOSTA (você é a própria recepcionista continuando a conversa no WhatsApp):' +
+    '\n- ESPELHE o tamanho das mensagens recentes. Se a conversa é de mensagens curtas, responda em UMA frase. Só escreva mais quando o assunto realmente exigir. Na dúvida, seja breve.' +
+    '\n- Responda direto ao que a última mensagem pede. Sem rodeios, sem resumir o que já foi dito, sem repetir informação que a pessoa já tem.' +
+    '\n- Use o nome do lead no máximo de forma esporádica e natural; jamais em toda mensagem.' +
+    '\n- Tom natural de WhatsApp: cordial e humano, espelhando o jeito (formal/informal) das mensagens anteriores. Nada de robótico ou formal demais.' +
+    (permitirSaudacao
+      ? (primeiroContato
+          ? '\n- É a PRIMEIRA mensagem: pode cumprimentar e se apresentar brevemente (uma linha), conforme a referência de voz da escola.'
+          : '\n- O lead ficou em silêncio por mais de um dia: um cumprimento leve de reabertura é bem-vindo, sem se reapresentar por completo.')
+      : '\n- A conversa está em andamento: NÃO cumprimente ("Olá", "Oi", "Bom dia") nem se apresente de novo, e NUNCA assine com seu nome ou o nome de quem atende ("Atenciosamente", "— Fulana", "Aqui é a Fulana"). A pessoa já está falando com você — apenas continue.');
   return withModelFallback(async (modelName) => {
     // temperature baixa (0.3) = respostas mais consistentes e ancoradas no prompt,
     // menos "criativas"/inventadas. Os classificadores já rodam em 0; aqui mantemos um

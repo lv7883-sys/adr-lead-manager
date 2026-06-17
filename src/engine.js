@@ -97,7 +97,7 @@ async function loadRealHistory(tenantId, { conversationId, ident, leadId }) {
   const rows = await withTenant(tenantId, (c) =>
     c
       .query(
-        `SELECT role, content FROM (
+        `SELECT role, content, received_at FROM (
            -- Áudio: usa a transcrição como conteúdo (a IA "ouve" o que foi dito).
            SELECT m.received_at, 'USER' AS role,
                   CASE WHEN m.media_type = 'audio' AND m.media_transcription IS NOT NULL
@@ -123,7 +123,9 @@ async function loadRealHistory(tenantId, { conversationId, ident, leadId }) {
       )
       .then((r) => r.rows)
   );
-  return rows.map((r) => ({ role: r.role, content: r.content }));
+  // `at` (timestamp) acompanha cada turno para a IA decidir se é retomada após
+  // intervalo longo (saudação/apresentação permitidas) ou conversa em andamento.
+  return rows.map((r) => ({ role: r.role, content: r.content, at: r.received_at }));
 }
 
 // F — captura do inbound mesmo quando NÃO vira lead (NOT_LEAD ou erro de triagem), pra
