@@ -67,16 +67,19 @@ async function status({ instance, apikey }) {
   return { state: pickState(d), number: pickNumber(d), raw: d };
 }
 
-async function sendText({ instance, apikey }, number, text) {
+// `quoted` (opcional) = citação do WhatsApp: { key: { id, remoteJid, fromMe, ... } }.
+// Incluído no corpo SÓ quando presente — sem `quoted`, o comportamento é idêntico ao anterior.
+async function sendText({ instance, apikey }, number, text, quoted) {
   const n = String(number || '').replace(/\D+/g, '');
+  const corpo = (num) => ({ number: num, text, ...(quoted ? { quoted } : {}) });
   try {
-    return await req('POST', `/message/sendText/${encodeURIComponent(instance)}`, apikey, { number: n, text });
+    return await req('POST', `/message/sendText/${encodeURIComponent(instance)}`, apikey, corpo(n));
   } catch (e) {
     // Número não encontrado no WhatsApp (HTTP 400) → tenta a forma com/sem o 9.
     if (e && e.status === 400) {
       const alt = _toggle9BR(n);
       if (alt && alt !== n) {
-        return req('POST', `/message/sendText/${encodeURIComponent(instance)}`, apikey, { number: alt, text });
+        return req('POST', `/message/sendText/${encodeURIComponent(instance)}`, apikey, corpo(alt));
       }
     }
     throw e;
