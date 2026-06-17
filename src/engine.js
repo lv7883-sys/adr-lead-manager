@@ -294,6 +294,32 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   // CONTEXTO DA MENSAGEM (avaliado pela IA no Portão 1) — não se o número já existe no
   // banco. Um cliente atual pode querer um curso adicional ou perguntar por outra pessoa.
 
+  // BUG2(2) — conversa estabelecida: se a recepção JÁ respondeu este contato
+  // (existe staff_outbound, fora de grupos @g.us), é lead por definição. Pula o
+  // Portão 1 pra não REBAIXAR (NOT_LEAD/REVIEW_QUEUE) uma conversa em andamento por
+  // uma saudação isolada de baixo sinal. Gatilho FORTE e específico de propósito —
+  // "inbound anterior" sozinho NÃO conta (pode ser ruído/spam).
+  let conversaEstabelecida = false;
+  {
+    const idStaff = String(phone || psid || '').replace(/\D/g, '');
+    if (idStaff) {
+      const r = await withTenant(tenantId, (c) =>
+        c.query(
+          `SELECT 1 FROM staff_outbound_samples
+             WHERE tenant_id = $1
+               AND regexp_replace(external_id, '[^0-9]', '', 'g') = $2
+               AND coalesce(raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+             LIMIT 1`,
+          [tenantId, idStaff]
+        )
+      );
+      conversaEstabelecida = r.rowCount > 0;
+    }
+  }
+  if (conversaEstabelecida && !msg.skipTriage) {
+    log.info('gate1.skipped_established', { gate: 1, reason: 'staff_already_replied' });
+  }
+
   // ---- LGPD: lead que pediu opt-out NUNCA mais é processado/respondido ----
   const optedOut = await withTenant(tenantId, (c) =>
     c.query("SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2 AND status = 'OPTED_OUT'", [tenantId, phone])
@@ -324,8 +350,9 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   // ---------------- PORTÃO 1: classificador leve -------------------
   // skipTriage: um lead vindo de Lead Ads (leadgen) já É um lead por definição —
   // pula o classificador (não há mensagem conversacional pra triar).
+  // conversaEstabelecida (BUG2-2): recepção já respondeu → não re-triar.
   let cls = null;
-  if (!msg.skipTriage) {
+  if (!msg.skipTriage && !conversaEstabelecida) {
     const examples = await _fewShotExamples(tenantId);   // few-shot dinâmico (PARTE 3)
     try {
       cls = await classify({ message: msg.body, examples });
@@ -544,9 +571,16 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     );
 
     // NEW -> QUALIFYING (só promove se ainda estava NEW).
+    // BUG2(1) — resgate do latch: chegar ao Portão 2 = lead confirmado (confidence
+    // >= 0.85, ou leadgen/conversa estabelecida). Promove também NOT_LEAD/REVIEW_QUEUE
+    // que tinham sido travados por uma triagem anterior, e limpa a flag de revisão.
+    // review_result IS NULL preserva decisões HUMANAS explícitas (não ressuscita o que
+    // a recepção marcou como não-lead).
     await c.query(
-      `UPDATE leads SET status = 'QUALIFYING', updated_at = now()
-        WHERE id = $1 AND status = 'NEW'`,
+      `UPDATE leads SET status = 'QUALIFYING', review_queue = false, updated_at = now()
+        WHERE id = $1
+          AND status IN ('NEW', 'NOT_LEAD', 'REVIEW_QUEUE')
+          AND review_result IS NULL`,
       [ctx.leadId]
     );
 
