@@ -36,6 +36,8 @@ function normalizeMessage(body) {
       sender: body.senderName || body.chatName || null,
       source: null,
       body: body.text?.message ?? body.image?.caption ?? null,
+      // grupo nunca é um lead (vale p/ qualquer tenant) — sinaliza p/ o guard.
+      isGroup: Boolean(body.isGroup) || /@g\.us$/.test(String(body.phone)),
     };
   }
   // Evolution API: { data: { key: { remoteJid, fromMe, id }, pushName, message }, source }
@@ -55,6 +57,8 @@ function normalizeMessage(body) {
       source: data.source ?? body.source ?? null,
       body: texto,
       media: media ? { ...media, rawMessage: m, messageKey: data.key } : null,
+      // grupo nunca é um lead (vale p/ qualquer tenant) — sinaliza p/ o guard.
+      isGroup: /@g\.us$/.test(jid),
     };
   }
   return null;
@@ -153,6 +157,12 @@ async function handleZapiWebhook(req, res) {
 
   if (!msg || !msg.externalId) {
     log.info('webhook.no_message', { reason: 'unparseable_payload' });
+    return;
+  }
+  // Grupo (@g.us) NUNCA vira lead — guard genérico, antes de qualquer ingestão
+  // (sem criar lead nem capturar staff_sample; o id de grupo não é telefone).
+  if (msg.isGroup) {
+    log.info('webhook.skipped', { reason: 'group_message' });
     return;
   }
   if (msg.fromMe) {
