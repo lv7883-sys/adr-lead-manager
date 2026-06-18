@@ -549,13 +549,19 @@ router.get(
         // Casamento por dígitos do external_id (conversations usa "+55..."; o capture
         // de fromMe usa "55..."). Vale pra todos os canais (telefone OU psid).
         const ident = String(lead.phone || lead.meta_psid || '').replace(/\D/g, '');
-        const timeline = ident
+        // Cada linha expõe `id` (id interno da própria linha) e, quando cita outra
+        // mensagem, `reply_to_id` (FK -> messages.id). O LEFT JOIN `rt` resolve a
+        // citada (sempre uma linha de messages) p/ montar reply_to {id, author, preview}.
+        const timelineRows = ident
           ? (
               await c.query(
-                `SELECT received_at, kind, sender, body, media_url, media_type, media_filename, media_transcription FROM (
+                `SELECT t.id, t.received_at, t.kind, t.sender, t.body,
+                        t.media_url, t.media_type, t.media_filename, t.media_transcription,
+                        t.reply_to_id, rt.role AS rt_role, rt.body AS rt_body, rt.media_type AS rt_media_type
+                   FROM (
                    -- Entrada do LEAD (USER). Rascunhos da IA (ASSISTANT) NÃO entram na
                    -- conversa: os pendentes pertencem ao bloco "Resposta sugerida".
-                   SELECT m.received_at, 'lead' AS kind, m.sender, m.body,
+                   SELECT m.id, m.reply_to_message_id AS reply_to_id, m.received_at, 'lead' AS kind, m.sender, m.body,
                           m.media_url, m.media_type, m.media_filename, m.media_transcription
                      FROM messages m
                      JOIN conversations cv ON cv.id = m.conversation_id
@@ -566,7 +572,7 @@ router.get(
                    -- Respostas REAIS da recepção (fromMe). Exclui GRUPOS (@g.us — nunca
                    -- são conversa com o lead) e os textos que a IA já enviou (mostrados
                    -- abaixo como 'ia', pra não duplicar).
-                   SELECT s.received_at, 'recepcao' AS kind, s.sender, s.body,
+                   SELECT s.id, s.reply_to_message_id AS reply_to_id, s.received_at, 'recepcao' AS kind, s.sender, s.body,
                           s.media_url, s.media_type, s.media_filename, NULL AS media_transcription
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
@@ -580,7 +586,7 @@ router.get(
                       )
                    UNION ALL
                    -- Respostas da IA que foram APROVADAS/ENVIADAS ao cliente (tag "IA").
-                   SELECT pa.created_at AS received_at, 'ia' AS kind, NULL AS sender,
+                   SELECT pa.id, pa.reply_to_message_id AS reply_to_id, pa.created_at AS received_at, 'ia' AS kind, NULL AS sender,
                           pa.suggested_response AS body,
                           NULL AS media_url, NULL AS media_type, NULL AS media_filename, NULL AS media_transcription
                      FROM pending_approvals pa
@@ -588,11 +594,30 @@ router.get(
                       AND pa.status IN ('APPROVED', 'EDITED')
                       AND pa.suggested_response IS NOT NULL
                  ) t
-                 ORDER BY received_at ASC`,
+                 LEFT JOIN messages rt ON rt.id = t.reply_to_id
+                 ORDER BY t.received_at ASC`,
                 [req.tenantId, ident, id]
               )
             ).rows
           : [];
+        // Monta reply_to {id, author:"lead"|"staff", preview}. author vem do papel da
+        // citada (USER=lead; ASSISTANT=escola/IA=staff). preview: ~80 chars ou "[mídia]".
+        const timeline = timelineRows.map((r) => {
+          const row = {
+            id: r.id, received_at: r.received_at, kind: r.kind, sender: r.sender, body: r.body,
+            media_url: r.media_url, media_type: r.media_type, media_filename: r.media_filename,
+            media_transcription: r.media_transcription, reply_to: null,
+          };
+          if (r.reply_to_id) {
+            const txt = r.rt_body && r.rt_body.trim() ? r.rt_body.trim() : null;
+            row.reply_to = {
+              id: r.reply_to_id,
+              author: r.rt_role === 'USER' ? 'lead' : 'staff',
+              preview: txt ? txt.slice(0, 80) : (r.rt_media_type ? '[mídia]' : ''),
+            };
+          }
+          return row;
+        });
 
         const pending = (
           await c.query(
@@ -661,7 +686,7 @@ router.get(
 // Resolve a aprovação pendente mais recente do lead para um status terminal.
 // approve: APPROVED (ou EDITED se vier um texto editado != sugerido).
 // reject : REJECTED.
-async function decidePending(tenantId, leadId, { status, response, decidedBy }) {
+async function decidePending(tenantId, leadId, { status, response, decidedBy, replyToMessageId }) {
   return withTenant(tenantId, async (c) => {
     const pending = (
       await c.query(
@@ -680,13 +705,16 @@ async function decidePending(tenantId, leadId, { status, response, decidedBy }) 
       finalText = response;
     }
 
+    // Citação (só no approve): persiste a citada na própria aprovação (linha 'ia' da
+    // timeline). undefined em reject -> mantém NULL.
     const row = (
       await c.query(
         `UPDATE pending_approvals
-            SET status = $2, suggested_response = $3, decided_at = now(), decided_by = $4
+            SET status = $2, suggested_response = $3, decided_at = now(), decided_by = $4,
+                reply_to_message_id = $5
           WHERE id = $1
         RETURNING id, status, suggested_response, lead_id, conversation_id, created_at, decided_at`,
-        [pending.id, finalStatus, finalText, decidedBy || null]
+        [pending.id, finalStatus, finalText, decidedBy || null, replyToMessageId || null]
       )
     ).rows[0];
     return { approval: row };
@@ -698,7 +726,7 @@ async function decidePending(tenantId, leadId, { status, response, decidedBy }) 
 // respeita o guardrail de não-auto-envio: quem decide enviar é a recepcionista.
 // Best-effort: devolve { sent, reason?, messageId? } e o chamador trata erro sem
 // derrubar o approve (o status da aprovação já está gravado nesse ponto).
-async function enviarRespostaAprovada(tenantId, leadId, texto) {
+async function enviarRespostaAprovada(tenantId, leadId, texto, quoted) {
   if (!texto || !texto.trim()) return { sent: false, reason: 'empty_text' };
   // Telefone do lead + credencial Evolution do tenant, na mesma transação (RLS).
   const dados = await withTenant(tenantId, async (c) => {
@@ -715,7 +743,7 @@ async function enviarRespostaAprovada(tenantId, leadId, texto) {
   // Só envia se a instância estiver conectada (evita gastar a chamada à toa).
   const st = await evolution.status({ instance, apikey });
   if (st.state !== 'open') return { sent: false, reason: 'instancia=' + st.state };
-  const res = await evolution.sendText({ instance, apikey }, dados.phone, texto);
+  const res = await evolution.sendText({ instance, apikey }, dados.phone, texto, quoted);
   return { sent: true, messageId: evolution.pickMessageId(res) };
 }
 
@@ -730,16 +758,33 @@ async function _credsLead(tenantId, leadId) {
 
 // Registra a saída da recepção em staff_outbound_samples (timeline 'recepcao').
 // O eco fromMe do webhook deduplica pela unique (tenant_id, external_message_id).
-async function _registrarSaida(tenantId, { phone, externalMessageId, sender, body, media }) {
+async function _registrarSaida(tenantId, { phone, externalMessageId, sender, body, media, replyToMessageId }) {
   await withTenant(tenantId, (c) => c.query(
     `INSERT INTO staff_outbound_samples
        (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
-        media_url, media_type, media_filename)
-     VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, NULL, $6, $7, $8)
+        media_url, media_type, media_filename, reply_to_message_id)
+     VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, NULL, $6, $7, $8, $9)
      ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
     [tenantId, phone, externalMessageId || null, sender || 'Recepção', body || null,
-     (media && media.url) || null, (media && media.type) || null, (media && media.filename) || null]
+     (media && media.url) || null, (media && media.type) || null, (media && media.filename) || null,
+     replyToMessageId || null]
   ));
+}
+
+// Citação: resolve a mensagem citada (sempre uma linha de messages, FK reply_to_message_id).
+// Devolve { id, role, body, media_type, wa_key } ou null se o id for inválido/inexistente —
+// nesse caso degrada para envio sem quoted, sem violar a FK. wa_key = key do WhatsApp
+// (raw->'data'->'key') usada no quoted da Evolution; null p/ msg da IA (raw vazio) ou Z-API.
+async function _msgCitada(tenantId, replyToMessageId) {
+  if (!replyToMessageId || !isUuid(replyToMessageId)) return null;
+  return withTenant(tenantId, async (c) => {
+    const r = await c.query(
+      `SELECT id, role, body, media_type, raw->'data'->'key' AS wa_key
+         FROM messages WHERE id = $1`,
+      [replyToMessageId]
+    );
+    return r.rows[0] || null;
+  });
 }
 
 // Registra feedback de classificação (aprendizado — ADR-011 Fase 2) com o
@@ -810,17 +855,22 @@ router.post('/:tenantId/leads/:id/mensagem', authenticate, requireTenantAccess(W
   if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
   const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
   if (!text) return res.status(400).json({ error: 'empty text' });
+  const replyToId = typeof req.body?.reply_to_message_id === 'string' ? req.body.reply_to_message_id : null;
   try {
     const d = await _credsLead(req.tenantId, id);
     if (!d.phone) return res.status(400).json({ error: 'no_phone' });
     if (!d.instance || !d.apikey) return res.status(400).json({ error: 'tenant_sem_evolution' });
     const st = await evolution.status({ instance: d.instance, apikey: d.apikey });
     if (st.state !== 'open') return res.status(409).json({ error: 'instancia=' + st.state });
-    const r = await evolution.sendText({ instance: d.instance, apikey: d.apikey }, d.phone, text);
+    // Citação: resolve a citada; quoted só quando ela tem a key do WhatsApp (fallback:
+    // sem key, envia sem quoted mas persiste reply_to_message_id p/ a citação visual).
+    const citada = await _msgCitada(req.tenantId, replyToId);
+    const quoted = citada && citada.wa_key ? { key: citada.wa_key } : undefined;
+    const r = await evolution.sendText({ instance: d.instance, apikey: d.apikey }, d.phone, text, quoted);
     const msgId = evolution.pickMessageId(r);
-    await _registrarSaida(req.tenantId, { phone: d.phone, externalMessageId: msgId, sender: req.tenantRole, body: text });
-    logger.info('tenant.lead.mensagem_enviada', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
-    res.json({ ok: true, message_id: msgId });
+    await _registrarSaida(req.tenantId, { phone: d.phone, externalMessageId: msgId, sender: req.tenantRole, body: text, replyToMessageId: citada ? citada.id : null });
+    logger.info('tenant.lead.mensagem_enviada', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole, quoted: !!quoted });
+    res.json({ ok: true, message_id: msgId, quoted: !!quoted });
   } catch (err) {
     logger.error('tenant.lead.mensagem_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
     res.status(502).json({ error: 'send_failed', detail: err.message });
@@ -835,6 +885,7 @@ router.post('/:tenantId/leads/:id/mensagem-meta', authenticate, requireTenantAcc
   if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
   const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
   if (!text) return res.status(400).json({ error: 'empty text' });
+  const replyToId = typeof req.body?.reply_to_message_id === 'string' ? req.body.reply_to_message_id : null;
   try {
     const info = await withTenant(req.tenantId, async (c) => {
       const lead = (await c.query('SELECT meta_psid FROM leads WHERE id = $1', [id])).rows[0];
@@ -852,17 +903,22 @@ router.post('/:tenantId/leads/:id/mensagem-meta', authenticate, requireTenantAcc
     if (!info.psid) return res.status(400).json({ error: 'no_psid' });
     const creds = await meta.pageCredsForTenant(req.tenantId);
     if (!creds || !creds.pageId || !creds.token) return res.status(400).json({ error: 'tenant_sem_meta' });
+    // LIMITAÇÃO Meta: a Send API (Messenger/IG) não oferece um "quoted reply" nativo
+    // confiável referenciando uma mensagem anterior pelo mid que guardamos — então NÃO
+    // enviamos reply nativo do Graph aqui. A citação é PERSISTIDA (reply_to_message_id)
+    // e renderizada visualmente pela timeline; o envio sai sem quote nativo.
     const r = await meta.sendMessage(creds, info.psid, text);
     const msgId = (r && (r.message_id || r.mid)) || null;
+    const citada = await _msgCitada(req.tenantId, replyToId);
     await withTenant(req.tenantId, (c) => c.query(
       `INSERT INTO staff_outbound_samples
-         (tenant_id, channel, external_id, external_message_id, source, sender, body, raw)
-       VALUES ($1, $2, $3, $4, 'api', $5, $6, NULL)
+         (tenant_id, channel, external_id, external_message_id, source, sender, body, raw, reply_to_message_id)
+       VALUES ($1, $2, $3, $4, 'api', $5, $6, NULL, $7)
        ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
-      [req.tenantId, info.channel || 'facebook_messenger', info.psid, msgId, req.tenantRole || 'Recepção', text]
+      [req.tenantId, info.channel || 'facebook_messenger', info.psid, msgId, req.tenantRole || 'Recepção', text, citada ? citada.id : null]
     ));
-    logger.info('tenant.lead.mensagem_meta_enviada', { tenant_id: req.tenantId, lead_id: id, channel: info.channel, by: req.tenantRole });
-    res.json({ ok: true, message_id: msgId });
+    logger.info('tenant.lead.mensagem_meta_enviada', { tenant_id: req.tenantId, lead_id: id, channel: info.channel, by: req.tenantRole, quoted_persisted: !!citada });
+    res.json({ ok: true, message_id: msgId, quoted: false, quoted_native_unsupported: !!citada });
   } catch (err) {
     const detail = err && err.body ? JSON.stringify(err.body) : err.message;
     logger.error('tenant.lead.mensagem_meta_error', { tenant_id: req.tenantId, lead_id: id, error: detail });
@@ -1202,14 +1258,18 @@ router.post(
     const { id } = req.params;
     if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
     const response = typeof req.body?.response === 'string' ? req.body.response.trim() : null;
+    const replyToId = typeof req.body?.reply_to_message_id === 'string' ? req.body.reply_to_message_id : null;
     try {
-      const r = await decidePending(req.tenantId, id, { status: 'APPROVED', response, decidedBy: req.tenantRole });
+      // Citação: resolve a citada antes de decidir (id válido p/ persistir + key p/ o quoted).
+      const citada = await _msgCitada(req.tenantId, replyToId);
+      const r = await decidePending(req.tenantId, id, { status: 'APPROVED', response, decidedBy: req.tenantRole, replyToMessageId: citada ? citada.id : null });
       if (r.notFound) return res.status(404).json({ error: 'no pending approval' });
       // E4 — após gravar o status, envia a resposta aprovada ao lead. Best-effort:
       // falha de envio NÃO derruba o approve (a aprovação já está persistida).
       let envio = { sent: false, reason: 'not_attempted' };
       try {
-        envio = await enviarRespostaAprovada(req.tenantId, id, r.approval.suggested_response);
+        const quoted = citada && citada.wa_key ? { key: citada.wa_key } : undefined;
+        envio = await enviarRespostaAprovada(req.tenantId, id, r.approval.suggested_response, quoted);
       } catch (sendErr) {
         envio = { sent: false, reason: 'error', error: sendErr.message };
         logger.error('tenant.lead.send_error', { tenant_id: req.tenantId, lead_id: id, error: sendErr.message });
