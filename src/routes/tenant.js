@@ -197,14 +197,17 @@ router.get(
   }
 );
 
-// GET /tenant/:tid/unclassified — ADR-019: rede de resgate. NOT_LEAD auto-descartados
-// (<0.40, ainda não resolvidos) + mensagens de contatos internos descartadas.
+// GET /tenant/:tid/unclassified — ADR-019: rede de resgate. POR-CONTATO: só leads
+// NOT_LEAD auto-descartados (<0.40, ainda não resolvidos) = 1 linha por lead. A parte
+// "mensagens de contatos internos descartadas" foi removida (era 1 linha por MENSAGEM,
+// inflava o contato — ex.: Daniele 40×). O Gate 0 segue descartando internos; as msgs
+// históricas continuam no banco, só deixam de ser listadas aqui.
 const _IDENT = "regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')";
 router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {
     const items = await withTenant(req.tenantId, async (c) => (
       await c.query(
-        `(SELECT 'lead' AS kind, l.id::text AS id, coalesce(l.phone, l.meta_psid) AS phone, l.name,
+        `SELECT 'lead' AS kind, l.id::text AS id, coalesce(l.phone, l.meta_psid) AS phone, l.name,
                  l.classification_confidence AS confidence, 'low_confidence' AS reason,
                  (SELECT min(m.received_at) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT} AND m.role = 'USER') AS received_at,
@@ -215,15 +218,7 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT}
                    ORDER BY cv.updated_at DESC LIMIT 1) AS channel
             FROM leads l
-           WHERE l.status = 'NOT_LEAD' AND l.review_queue = true AND l.review_result IS NULL)
-         UNION ALL
-         (SELECT 'message' AS kind, m.id::text AS id, cv.external_id AS phone,
-                 (SELECT ic.name FROM internal_contacts ic WHERE ic.tenant_id = $1
-                   AND regexp_replace(ic.phone, '[^0-9]', '', 'g') = regexp_replace(cv.external_id, '[^0-9]', '', 'g') LIMIT 1) AS name,
-                 NULL::decimal AS confidence, 'internal_contact' AS reason,
-                 m.received_at, m.body AS first_message, cv.channel
-            FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-           WHERE cv.tenant_id = $1 AND m.discarded = true AND m.discard_reason = 'internal_contact')
+           WHERE l.status = 'NOT_LEAD' AND l.review_queue = true AND l.review_result IS NULL
          ORDER BY received_at DESC NULLS LAST
          LIMIT 100`,
         [req.tenantId]
