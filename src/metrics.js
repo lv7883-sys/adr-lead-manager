@@ -332,7 +332,9 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       // "respondemos mas o lead parou": última palavra foi nossa.
       if (respondido && lout != null && (lin == null || lout > lin)) leadParou++;
       // ADR-021 — estado atual (só leads ativos): aguardando nós / silencioso 3d+.
-      const ativo021 = !l.desfecho && l.status !== 'CONVERTED';
+      // EXPERIMENTAL_AGENDADA é estado "parado" (aula marcada) — sai dos buckets de
+      // espera/silêncio: a última msg de cortesia do cliente NÃO reabre a espera.
+      const ativo021 = !l.desfecho && l.status !== 'CONVERTED' && l.status !== 'EXPERIMENTAL_AGENDADA';
       if (ativo021 && lin != null && (lout == null || lin > lout)) {
         aguardandoLista.push({ id: l.id, name: l.name || 'Lead sem nome', ultimo_contato_em: l.last_in, esperando_seg: Math.max(0, Math.round((agora - lin) / 1000)) });
       } else if (ativo021 && lout != null && (agora - lout) / 1000 > TRES_DIAS) {
@@ -740,8 +742,11 @@ async function computePainel(tenantId) {
       // Leads na fila de revisão ficam SÓ na aba "Revisar" (não na fila de ação).
       if (l.review_queue && !l.review_result) { comRascunho += l.drafts > 0 ? 1 : 0; continue; }
       // Leads não-reais ficam fora da fila de ação (igual ao funil): NOT_LEAD/REVIEW_QUEUE.
+      // EXPERIMENTAL_AGENDADA (aula marcada) também sai da fila de ação: está parado
+      // aguardando a aula, não a recepção — não deve aparecer como "esperando resposta".
       const ativo = !l.desfecho && l.status !== 'CONVERTED'
-        && l.status !== 'NOT_LEAD' && l.status !== 'REVIEW_QUEUE';
+        && l.status !== 'NOT_LEAD' && l.status !== 'REVIEW_QUEUE'
+        && l.status !== 'EXPERIMENTAL_AGENDADA';
       if (!ativo) continue;
       const fin = l.first_in ? new Date(l.first_in).getTime() : null;
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
@@ -810,14 +815,16 @@ function kanbanColuna(status, desfecho) {
   if (PERDIDO_DESFECHOS.includes(desfecho)) return 'perdido';
   if (desfecho === 'matriculado' || status === 'CONVERTED') return 'convertido';
   if (status === 'NEW') return 'novo';
+  if (status === 'EXPERIMENTAL_AGENDADA') return 'experimental';
   if (status === 'QUALIFIED') return 'qualificado';
   return 'qualificando';
 }
 // Transições permitidas (origem -> destinos). Terminais não saem.
 const KANBAN_TRANSICOES = {
-  novo: ['qualificando', 'qualificado', 'convertido', 'perdido'],
-  qualificando: ['qualificado', 'convertido', 'perdido'],
-  qualificado: ['convertido', 'perdido'],
+  novo: ['qualificando', 'qualificado', 'experimental', 'convertido', 'perdido'],
+  qualificando: ['qualificado', 'experimental', 'convertido', 'perdido'],
+  qualificado: ['experimental', 'convertido', 'perdido'],
+  experimental: ['qualificado', 'convertido', 'perdido'],
   convertido: [],
   perdido: [],
 };
@@ -866,13 +873,14 @@ async function computeKanban(tenantId, { period = '30d' } = {}) {
     ).rows;
 
     const agora = Date.now();
-    const cols = { novo: [], qualificando: [], qualificado: [], convertido: [], perdido: [] };
+    const cols = { novo: [], qualificando: [], qualificado: [], experimental: [], convertido: [], perdido: [] };
     for (const l of rows) {
       const lin = l.last_in ? new Date(l.last_in).getTime() : null;
       const lout = l.last_out ? new Date(l.last_out).getTime() : null;
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
-      // urgência: último contato foi DO lead e estamos devendo resposta.
-      const ultLead = lin != null && (lout == null || lin > lout);
+      // urgência: último contato foi DO lead e estamos devendo resposta. Em
+      // EXPERIMENTAL_AGENDADA não há resposta devida (aula marcada) — sem badge.
+      const ultLead = l.status !== 'EXPERIMENTAL_AGENDADA' && lin != null && (lout == null || lin > lout);
       let bucket = null, esperandoSeg = null;
       if (ultLead) { bucket = fout == null ? 'sem_resposta' : 'responder_agora'; esperandoSeg = Math.max(0, Math.round((agora - lin) / 1000)); }
       const ultimaMsgMs = Math.max(lin || 0, lout || 0) || null;

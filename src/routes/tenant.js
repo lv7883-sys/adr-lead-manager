@@ -119,7 +119,7 @@ router.get('/:tenantId/leads/kanban', authenticate, requireTenantAccess(READ_ROL
 
 // PUT /tenant/:tid/leads/:id/mover-kanban — body { destino, desfecho? }. Valida a
 // transição e atualiza status/desfecho (PERDIDO preserva o status — só grava desfecho).
-const _KANBAN_DEST_COL = { QUALIFYING: 'qualificando', QUALIFIED: 'qualificado', CONVERTED: 'convertido', PERDIDO: 'perdido' };
+const _KANBAN_DEST_COL = { QUALIFYING: 'qualificando', QUALIFIED: 'qualificado', EXPERIMENTAL_AGENDADA: 'experimental', CONVERTED: 'convertido', PERDIDO: 'perdido' };
 router.put('/:tenantId/leads/:id/mover-kanban', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   const { id } = req.params;
   if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
@@ -138,6 +138,7 @@ router.put('/:tenantId/leads/:id/mover-kanban', authenticate, requireTenantAcces
       let r;
       if (destCol === 'qualificando') r = await c.query("UPDATE leads SET status='QUALIFYING', updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
       else if (destCol === 'qualificado') r = await c.query("UPDATE leads SET status='QUALIFIED', updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
+      else if (destCol === 'experimental') r = await c.query("UPDATE leads SET status='EXPERIMENTAL_AGENDADA', updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
       else if (destCol === 'convertido') r = await c.query("UPDATE leads SET status='CONVERTED', desfecho='matriculado', desfecho_em=now(), updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
       else r = await c.query('UPDATE leads SET desfecho=$2, desfecho_em=now(), updated_at=now() WHERE id=$1 RETURNING status, desfecho', [id, desfecho]);
       return { row: r.rows[0], origem };
@@ -437,7 +438,10 @@ router.get(
                              WHERE pa.lead_id = l.id AND pa.status = 'EDITED' AND pa.decided_at >= ${SP_HOJE}) AS edited_today,
                     -- "aguardando resposta": último contato foi DO lead (USER) e mais
                     -- recente que o último outbound da escola (igual ao bucket do painel).
-                    ((SELECT max(m.received_at) FROM messages m
+                    -- EXPERIMENTAL_AGENDADA (aula marcada) nunca "aguarda resposta": a
+                    -- mensagem de cortesia do cliente não reabre a espera.
+                    (l.status <> 'EXPERIMENTAL_AGENDADA' AND
+                     (SELECT max(m.received_at) FROM messages m
                         JOIN conversations cv ON cv.id = m.conversation_id
                        WHERE cv.external_id = l.phone AND m.role = 'USER')
                      > COALESCE((SELECT max(s.received_at) FROM staff_outbound_samples s
