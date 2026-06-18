@@ -136,9 +136,12 @@ router.put('/:tenantId/leads/:id/mover-kanban', authenticate, requireTenantAcces
       const origem = kanbanColuna(lead.status, lead.desfecho);
       if (!(KANBAN_TRANSICOES[origem] || []).includes(destCol)) return { invalid: true, origem };
       let r;
-      if (destCol === 'qualificando') r = await c.query("UPDATE leads SET status='QUALIFYING', updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
-      else if (destCol === 'qualificado') r = await c.query("UPDATE leads SET status='QUALIFIED', updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
-      else if (destCol === 'experimental') r = await c.query("UPDATE leads SET status='EXPERIMENTAL_AGENDADA', updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
+      // Destinos NÃO-terminais limpam o desfecho (e desfecho_em): reativar um lead
+      // convertido/perdido tem de tirar o 'matriculado'/desfecho de perda, senão
+      // kanbanColuna() re-deriva a coluna terminal e o card "volta" sozinho.
+      if (destCol === 'qualificando') r = await c.query("UPDATE leads SET status='QUALIFYING', desfecho=NULL, desfecho_em=NULL, updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
+      else if (destCol === 'qualificado') r = await c.query("UPDATE leads SET status='QUALIFIED', desfecho=NULL, desfecho_em=NULL, updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
+      else if (destCol === 'experimental') r = await c.query("UPDATE leads SET status='EXPERIMENTAL_AGENDADA', desfecho=NULL, desfecho_em=NULL, updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
       else if (destCol === 'convertido') r = await c.query("UPDATE leads SET status='CONVERTED', desfecho='matriculado', desfecho_em=now(), updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
       else r = await c.query('UPDATE leads SET desfecho=$2, desfecho_em=now(), updated_at=now() WHERE id=$1 RETURNING status, desfecho', [id, desfecho]);
       return { row: r.rows[0], origem };

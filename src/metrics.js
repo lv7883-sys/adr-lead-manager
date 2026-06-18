@@ -819,14 +819,19 @@ function kanbanColuna(status, desfecho) {
   if (status === 'QUALIFIED') return 'qualificado';
   return 'qualificando';
 }
-// Transições permitidas (origem -> destinos). Terminais não saem.
+// Transições permitidas (origem -> destinos). Política PERMISSIVA (recall-first):
+// full mesh entre as 5 etapas de trabalho — qualquer etapa vai pra qualquer outra,
+// incluindo voltar (qualificado→qualificando) e reativar (convertido/perdido → etapa
+// anterior). 'novo' é intake: é origem possível, mas NÃO é destino de arrasto.
+// A fricção do Matriculado (confirmar saída de convertido) fica no front.
+const _ETAPAS_TRABALHO = ['qualificando', 'qualificado', 'experimental', 'convertido', 'perdido'];
 const KANBAN_TRANSICOES = {
-  novo: ['qualificando', 'qualificado', 'experimental', 'convertido', 'perdido'],
-  qualificando: ['qualificado', 'experimental', 'convertido', 'perdido'],
-  qualificado: ['experimental', 'convertido', 'perdido'],
-  experimental: ['qualificado', 'convertido', 'perdido'],
-  convertido: [],
-  perdido: [],
+  novo: [..._ETAPAS_TRABALHO],
+  qualificando: _ETAPAS_TRABALHO.filter((c) => c !== 'qualificando'),
+  qualificado: _ETAPAS_TRABALHO.filter((c) => c !== 'qualificado'),
+  experimental: _ETAPAS_TRABALHO.filter((c) => c !== 'experimental'),
+  convertido: _ETAPAS_TRABALHO.filter((c) => c !== 'convertido'),
+  perdido: _ETAPAS_TRABALHO.filter((c) => c !== 'perdido'),
 };
 
 async function computeKanban(tenantId, { period = '30d' } = {}) {
