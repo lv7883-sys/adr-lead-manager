@@ -251,6 +251,38 @@ async function captureForReview(tenantId, channel, externalId, msg, rawBody, cls
   }
 }
 
+// Fase 1 — SHADOW / log-only (classifier_shadow). Braço de CONTROLE: quando a
+// conversa já está estabelecida o funil PULA o Portão 1 e auto-promove o lead
+// (engine.js, condição `!conversaEstabelecida`). Aqui rodamos o classificador
+// ATUAL na MESMA mensagem isolada — só pra REGISTRAR o que ele DECIDIRIA — e
+// gravamos em classifier_shadow. NÃO toca o lead nem o funil. Best-effort total:
+// qualquer falha (Gemini, DB) é logada e engolida; o fluxo real nunca depende disto.
+async function recordShadowClassification(tenantId, { leadId, phone, msg, classify, log }) {
+  try {
+    const examples = await _fewShotExamples(tenantId);            // mesmo few-shot do Portão 1 real
+    const cls = await classify({ message: msg.body, examples });  // mesma função, msg isolada
+    const score = cls.confidence;
+    const shadowDecision =
+      score >= AUTO_THRESHOLD ? 'would_promote'
+        : score >= REVIEW_THRESHOLD ? 'would_review'
+          : 'would_reject';
+    await withTenant(tenantId, (c) =>
+      c.query(
+        `INSERT INTO classifier_shadow
+           (tenant, lead_id, telefone, msg_body, conversa_estabelecida,
+            acao_real, shadow_score, shadow_decision, shadow_intent)
+         VALUES ($1, $2, $3, $4, true, 'skip_promote', $5, $6, $7)`,
+        [tenantId, leadId || null, phone || null, msg.body || null,
+         score, shadowDecision, cls.label || null]
+      )
+    );
+    log.info('shadow.recorded', { lead_id: leadId, shadow_score: score, shadow_decision: shadowDecision });
+  } catch (err) {
+    // NUNCA propaga: o shadow é puro log e não pode afetar o fluxo real.
+    log.warn('shadow.error', { lead_id: leadId, error: err.message });
+  }
+}
+
 /**
  * Processa uma mensagem recebida pelo funil de triagem do ADR-003.
  * Idempotente, assíncrono e tolerante a falhas: qualquer erro é logado e
@@ -648,6 +680,14 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     approval_id: result.approvalId,
     lead_promoted: ctx.leadStatus === 'NEW',
   });
+
+  // Fase 1 SHADOW — quando a conversa já estava estabelecida o Portão 1 foi PULADO
+  // e o lead promoveu por skip (comportamento INALTERADO acima). Além disso, e só
+  // pra LOGAR, roda o classificador atual nesta mesma mensagem e grava em
+  // classifier_shadow. Sem await que altere o fluxo: isto é puro registro.
+  if (conversaEstabelecida && !msg.skipTriage) {
+    await recordShadowClassification(tenantId, { leadId: ctx.leadId, phone, msg, classify, log: log2 });
+  }
 
   // Bloco 4 — notifica a recepção (best-effort). Gatilho 1 (lead novo) ou 2 (lead
   // existente respondeu). nome/instrumento do que foi extraído nesta passagem.
