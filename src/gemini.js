@@ -125,6 +125,83 @@ async function classify({ message, examples }) {
   });
 }
 
+// ============================================================================
+// CLASSIFICADOR CONTEXT-AWARE (Fase build+validação) — SEPARADO de classify().
+// Recebe a CONVERSA INTEIRA (lead + recepção, em ordem cronológica) e pede pra IA
+// julgar com TODO o contexto, não a mensagem isolada. IA PURA, sem determinismo.
+// NÃO é usada no fluxo vivo ainda — só build + validação.
+//   conversation: [{ role:'USER'|'ASSISTANT', content, at? }]  (USER=lead, ASSISTANT=escola)
+//   examples:     few-shot (mesmo formato de classify)
+// Retorna { is_lead, confidence (0-1), reasoning, intent }.
+// ============================================================================
+const CONVERSA_INTENTS = ['NOVA_OPORTUNIDADE', 'ROTINA_CLIENTE', 'INTERNO', 'INDEFINIDO'];
+
+const TRIAGE_CONVERSA_PROMPT = `Você é um classificador de triagem de conversas de WhatsApp de uma escola de música.
+Recebe a CONVERSA INTEIRA entre a pessoa (LEAD) e a escola (ESCOLA), em ordem cronológica, e decide
+se a conversa CORRENTE representa uma OPORTUNIDADE DE NOVO NEGÓCIO (lead) ou não.
+
+PRINCÍPIO CENTRAL: a INTENÇÃO da conversa decide, NUNCA a identidade da pessoa.
+Uma relação longa tem vários episódios — julgue a intenção ATUAL/RECENTE da conversa, não a pessoa
+nem meses de histórico misturado. O que importa é se a conversa CORRENTE traz uma oportunidade nova.
+
+NÃO é lead (is_lead=false):
+- Cliente/aluno já existente tratando de ROTINA: remarcação de aula, renovação, cobrança/pagamento,
+  evento interno, agradecimento, recado, dúvida administrativa do dia a dia.
+- Conversa interna/operacional da escola (professores, equipe, horários, materiais, salas, bandas).
+- Assunto sem nenhuma relação com matricular/conhecer aulas.
+
+É lead (is_lead=true):
+- Cliente existente trazendo NOVA oportunidade: 2º curso/instrumento, indicação de outra pessoa,
+  novo aluno na família (filho, cônjuge), interesse em matricular alguém.
+- Pessoa nova demonstrando interesse real em conhecer/contratar aulas.
+
+Responda SOMENTE com JSON:
+{"is_lead":<true|false>,"confidence":<0.0-1.0>,"reasoning":"<1-2 frases em pt-BR citando o contexto da conversa>","intent":"NOVA_OPORTUNIDADE"|"ROTINA_CLIENTE"|"INTERNO"|"INDEFINIDO"}
+
+REGRAS:
+- "confidence" = PROBABILIDADE de a conversa CORRENTE ser uma oportunidade de novo negócio (0.0 = certeza que NÃO; 1.0 = certeza que SIM). Use a escala toda; na dúvida real, ~0.5.
+- "is_lead" = true quando confidence >= 0.5.
+- "intent": NOVA_OPORTUNIDADE (novo negócio), ROTINA_CLIENTE (cliente em assunto de rotina), INTERNO (equipe/operacional), INDEFINIDO (não dá pra decidir).
+- "reasoning": curto, citando o que na conversa justifica a decisão.`;
+
+function _formatConversa(conversation) {
+  if (!Array.isArray(conversation) || !conversation.length) return '(sem histórico)';
+  return conversation
+    .map((m) => {
+      const quem = String(m.role).toUpperCase() === 'ASSISTANT' ? 'ESCOLA' : 'LEAD';
+      const txt = String(m.content ?? m.body ?? m.text ?? '').replace(/\s+/g, ' ').trim();
+      if (!txt) return null;
+      const ts = m.at ? ` [${new Date(m.at).toISOString().slice(0, 16).replace('T', ' ')}]` : '';
+      return `${quem}${ts}: ${txt}`;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+async function classifyConversa({ conversation, examples /*, tenant */ }) {
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({
+      model: modelName,
+      generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+    });
+    const convo = _formatConversa(conversation);
+    const res = await model.generateContent(
+      `${TRIAGE_CONVERSA_PROMPT}${_fewShot(examples)}\n\nCONVERSA (mais antigo -> mais novo):\n${convo}`
+    );
+    const parsed = JSON.parse(res.response.text());
+    const confidence = Math.min(1, Math.max(0, Number(parsed.confidence) || 0));
+    const isLead = typeof parsed.is_lead === 'boolean' ? parsed.is_lead : confidence >= 0.5;
+    const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning
+      : (typeof parsed.reason === 'string' ? parsed.reason : null);
+    return {
+      is_lead: isLead,
+      confidence,
+      reasoning,
+      intent: CONVERSA_INTENTS.includes(parsed.intent) ? parsed.intent : 'INDEFINIDO',
+    };
+  });
+}
+
 // Portão 2 — geração da resposta, com system prompt do tenant + histórico.
 // `clarification` (opcional): instrução para repergunta de dado ambíguo (E1-03).
 // Intervalo (horas) acima do qual uma retomada pode reabrir com saudação leve —
@@ -359,6 +436,7 @@ async function transcribeAudio({ base64, mimetype }) {
 
 module.exports = {
   classify,
+  classifyConversa,
   transcribeAudio,
   generateReply,
   improveReply,
