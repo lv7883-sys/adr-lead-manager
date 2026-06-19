@@ -720,10 +720,22 @@ async function computePainel(tenantId) {
     const hojeRow = (
       await c.query(
         `SELECT
-           (SELECT count(DISTINCT regexp_replace(external_id, '[^0-9]', '', 'g'))
-              FROM staff_outbound_samples
-             WHERE tenant_id = $1 AND coalesce(raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
-               AND received_at >= ${SP_HOJE}) AS leads_respondidos,
+           -- "Leads respondidos hoje" = RESPOSTAS REAIS: contatos a quem a recepção
+           -- mandou HOJE uma mensagem que veio DEPOIS de algum inbound do lead.
+           -- Exclui disparo proativo (staff sem inbound antes) — não é "resposta".
+           -- Usa received_at real do evento, nunca updated_at (imune ao batch).
+           (SELECT count(DISTINCT sx.ident) FROM (
+              SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident, s.received_at AS sent
+                FROM staff_outbound_samples s
+               WHERE s.tenant_id = $1 AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+                 AND s.received_at >= ${SP_HOJE}
+            ) sx
+            WHERE EXISTS (
+              SELECT 1 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+               WHERE cv.tenant_id = $1 AND m.role = 'USER'
+                 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = sx.ident
+                 AND m.received_at < sx.sent
+            )) AS leads_respondidos,
            (SELECT count(*) FROM pending_approvals WHERE tenant_id = $1 AND status = 'APPROVED' AND decided_at >= ${SP_HOJE}) AS aprovados,
            (SELECT count(*) FROM pending_approvals WHERE tenant_id = $1 AND status = 'EDITED'   AND decided_at >= ${SP_HOJE}) AS editados`,
         [tenantId]
@@ -754,7 +766,11 @@ async function computePainel(tenantId) {
       const lout = l.last_out ? new Date(l.last_out).getTime() : null;
       leadsAtivos++;
       if (l.drafts > 0) comRascunho++;
-      if (fout != null && fout >= spTodayMs && fin != null) tempoHoje.push((fout - fin) / 1000);
+      // Tempo de resposta = 1ª resposta da recepção − 1ª msg do lead (segundos), com
+      // a 1ª resposta DENTRO de hoje. Só pares VÁLIDOS: resposta DEPOIS da mensagem
+      // (fout >= fin). Thread iniciada pela escola (staff antes do 1º inbound) daria
+      // delta NEGATIVO — EXCLUI (nunca exibir negativo). received_at real, nunca updated_at.
+      if (fout != null && fin != null && fout >= fin && fout >= spTodayMs) tempoHoje.push((fout - fin) / 1000);
 
       // ADR-021 — hierarquia por recência do último contato.
       const ultLead = lin != null && (lout == null || lin > lout);   // último contato foi DO lead
