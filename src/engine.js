@@ -1,6 +1,6 @@
 'use strict';
 
-const { withTenant } = require('./db');
+const { withTenant, pool } = require('./db');
 const logger = require('./logger');
 const { toE164 } = require('./validation');
 const { resolveSystemPrompt } = require('./templates');
@@ -251,35 +251,106 @@ async function captureForReview(tenantId, channel, externalId, msg, rawBody, cls
   }
 }
 
-// Fase 1 — SHADOW / log-only (classifier_shadow). Braço de CONTROLE: quando a
-// conversa já está estabelecida o funil PULA o Portão 1 e auto-promove o lead
-// (engine.js, condição `!conversaEstabelecida`). Aqui rodamos o classificador
-// ATUAL na MESMA mensagem isolada — só pra REGISTRAR o que ele DECIDIRIA — e
-// gravamos em classifier_shadow. NÃO toca o lead nem o funil. Best-effort total:
-// qualquer falha (Gemini, DB) é logada e engolida; o fluxo real nunca depende disto.
-async function recordShadowClassification(tenantId, { leadId, phone, msg, classify, log }) {
+// ROTEAMENTO VIVO — relationship contact (professor): telefone ∈ app.professor_notificacao.
+// Professor NUNCA auto-promove pro funil (classifyConversa → Revisar). Fonte única
+// (schema do Scheduler), sem duplicar/sync. READ-only cross-schema — grant em
+// db/grants/professor_notificacao_read.sql. Best-effort: falha de leitura → trata como
+// NÃO-professor (o default-seguro de dúvida já cobre os demais intents; só a
+// NOVA_OPORTUNIDADE de professor depende deste sinal).
+async function _isProfessor(identDigits) {
+  if (!identDigits) return false;
   try {
-    const examples = await _fewShotExamples(tenantId);            // mesmo few-shot do Portão 1 real
-    const cls = await classify({ message: msg.body, examples });  // mesma função, msg isolada
-    const score = cls.confidence;
-    const shadowDecision =
-      score >= AUTO_THRESHOLD ? 'would_promote'
-        : score >= REVIEW_THRESHOLD ? 'would_review'
-          : 'would_reject';
-    await withTenant(tenantId, (c) =>
-      c.query(
-        `INSERT INTO classifier_shadow
-           (tenant, lead_id, telefone, msg_body, conversa_estabelecida,
-            acao_real, shadow_score, shadow_decision, shadow_intent)
-         VALUES ($1, $2, $3, $4, true, 'skip_promote', $5, $6, $7)`,
-        [tenantId, leadId || null, phone || null, msg.body || null,
-         score, shadowDecision, cls.label || null]
-      )
+    const r = await pool.query(
+      `SELECT 1 FROM app.professor_notificacao
+        WHERE regexp_replace(coalesce(telefone_override, telefone), '[^0-9]', '', 'g') = $1
+        LIMIT 1`,
+      [identDigits]
     );
-    log.info('shadow.recorded', { lead_id: leadId, shadow_score: score, shadow_decision: shadowDecision });
-  } catch (err) {
-    // NUNCA propaga: o shadow é puro log e não pode afetar o fluxo real.
-    log.warn('shadow.error', { lead_id: leadId, error: err.message });
+    return r.rowCount > 0;
+  } catch (e) {
+    logger.warn('estab.professor_lookup_failed', { error: e.message });
+    return false;
+  }
+}
+
+// Retry/backoff curto p/ o classifyConversa no ingest (429 do flash é transitório).
+// Bounded de propósito: roda depois do webhook já ter respondido 200, mas não pode
+// prender o processamento. Esgotou as tentativas → lança (o chamador manda pra Revisar).
+async function _classifyConversaRetry(classifyConversa, args) {
+  let last;
+  for (let i = 0; i < 3; i += 1) {
+    try { return await classifyConversa(args); }
+    catch (e) { last = e; await new Promise((s) => setTimeout(s, 800 * (i + 1))); }
+  }
+  throw last;
+}
+
+// ROTEAMENTO VIVO — captura a mensagem e roteia um lead de conversa ESTABELECIDA para
+// FORA do funil (NOT_LEAD = não-classificadas reviewável | REVIEW_QUEUE = Revisar), SEM
+// gerar resposta nem promover. Em lead já existente, só muda o status quando NÃO há
+// decisão humana (review_result) nem desfecho — preserva o que a recepção/desfecho fixou.
+// Idempotente. Best-effort: nunca lança. Retorna o leadId (p/ notificação) ou null.
+async function captureRoutedEstablished(tenantId, channel, externalId, msg, rawBody, route) {
+  if (!externalId || !msg.body) return null;
+  const psid = msg.psid || null;
+  const phone = psid ? null : externalId;
+  const signals = JSON.stringify([route.intent].filter(Boolean));
+  // Em conflito, status/review_queue só mudam se o lead não tiver decisão humana/desfecho.
+  const onConflictSet =
+    `status = CASE WHEN leads.review_result IS NULL AND leads.desfecho IS NULL THEN EXCLUDED.status ELSE leads.status END,
+     review_queue = CASE WHEN leads.review_result IS NULL AND leads.desfecho IS NULL THEN EXCLUDED.review_queue ELSE leads.review_queue END,
+     classification_confidence = EXCLUDED.classification_confidence,
+     classification_reasoning = EXCLUDED.classification_reasoning,
+     classification_signals = EXCLUDED.classification_signals,
+     updated_at = now()`;
+  try {
+    return await withTenant(tenantId, async (c) => {
+      let lead;
+      if (psid) {
+        lead = await c.query(
+          `INSERT INTO leads (tenant_id, name, status, meta_psid, review_queue,
+                              classification_confidence, classification_reasoning, classification_signals)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (tenant_id, meta_psid) WHERE meta_psid IS NOT NULL
+           DO UPDATE SET ${onConflictSet}
+           RETURNING id`,
+          [tenantId, msg.sender || externalId, route.status, externalId, route.reviewQueue,
+           route.confidence, route.reasoning, signals]
+        );
+      } else {
+        lead = await c.query(
+          `INSERT INTO leads (tenant_id, name, phone, status, review_queue,
+                              classification_confidence, classification_reasoning, classification_signals)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
+           DO UPDATE SET ${onConflictSet}
+           RETURNING id`,
+          [tenantId, msg.sender || phone, phone, route.status, route.reviewQueue,
+           route.confidence, route.reasoning, signals]
+        );
+      }
+      const conv = (
+        await c.query(
+          `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
+           ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
+           RETURNING id`,
+          [tenantId, channel, externalId]
+        )
+      ).rows[0];
+      await c.query(
+        `INSERT INTO messages
+           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw,
+            media_url, media_type, media_filename, media_transcription)
+         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (tenant_id, external_message_id)
+           WHERE external_message_id IS NOT NULL DO NOTHING`,
+        [tenantId, conv.id, msg.externalMessageId, msg.sender, msg.body, rawBody, ..._mediaCols(msg)]
+      );
+      return lead.rows[0].id;
+    });
+  } catch (e) {
+    logger.warn('gate1.estab.route_failed', { tenant_id: tenantId, error: e.message });
+    return null;
   }
 }
 
@@ -292,6 +363,7 @@ async function recordShadowClassification(tenantId, { leadId, phone, msg, classi
  */
 async function processInbound(tenant, msg, rawBody, deps = {}) {
   const classify = deps.classify || gemini.classify;
+  const classifyConversa = deps.classifyConversa || gemini.classifyConversa;
   const generate = deps.generate || gemini.generateReply;
   const classifyIntent = deps.classifyIntent || gemini.classifyIntent;
   const extract = deps.extract || gemini.extractQualification;
@@ -348,10 +420,6 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       conversaEstabelecida = r.rowCount > 0;
     }
   }
-  if (conversaEstabelecida && !msg.skipTriage) {
-    log.info('gate1.skipped_established', { gate: 1, reason: 'staff_already_replied' });
-  }
-
   // ---- LGPD: lead que pediu opt-out NUNCA mais é processado/respondido ----
   const optedOut = await withTenant(tenantId, (c) =>
     c.query("SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2 AND status = 'OPTED_OUT'", [tenantId, phone])
@@ -379,11 +447,97 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     }
   }
 
+  let cls = null;
+
+  // ============================================================================
+  // ROTEAMENTO VIVO em conversa ESTABELECIDA (substitui o auto-promote do skip).
+  // Antes: established → pulava o Portão 1 e auto-promovia NEW→QUALIFYING. Agora o
+  // classifyConversa (conversa INTEIRA) GOVERNA, roteando por INTENT (sinal estável;
+  // NUNCA por confidence, que não é P(lead)). Seguro por construção: não-lead CLARO
+  // → não-classificadas (rede reviewável, não inunda a Revisar); dúvida/erro/professor
+  // → Revisar; nova oportunidade → funil. Staff já saiu no gate de internal_contacts.
+  // ============================================================================
+  if (conversaEstabelecida && !msg.skipTriage) {
+    const identEstab = String(phone || psid || '').replace(/\D/g, '');
+    // Monta a conversa: histórico real + a mensagem ATUAL (ainda não persistida).
+    let conversation = [];
+    try {
+      const convRow = await withTenant(tenantId, (c) =>
+        c.query(
+          `SELECT id FROM conversations WHERE tenant_id = $1
+             AND regexp_replace(external_id, '[^0-9]', '', 'g') = $2
+           ORDER BY updated_at DESC LIMIT 1`,
+          [tenantId, identEstab]
+        ).then((r) => r.rows[0]));
+      const leadRow = await withTenant(tenantId, (c) =>
+        c.query(
+          `SELECT id FROM leads WHERE tenant_id = $1
+             AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+           LIMIT 1`,
+          [tenantId, identEstab]
+        ).then((r) => r.rows[0]));
+      if (convRow) {
+        conversation = await loadRealHistory(tenantId, {
+          conversationId: convRow.id, ident: identEstab, leadId: leadRow ? leadRow.id : null,
+        });
+      }
+    } catch (e) {
+      log.warn('gate1.estab.history_error', { error: e.message });
+    }
+    conversation = [...conversation, { role: 'USER', content: msg.body, at: new Date() }];
+
+    const examplesEstab = await _fewShotExamples(tenantId);
+    const isProf = await _isProfessor(identEstab);
+
+    // route=null → segue pro Portão 2 (funil/QUALIFYING). Senão, roteia e RETORNA.
+    let route = null;
+    try {
+      const r = await _classifyConversaRetry(classifyConversa, {
+        conversation, examples: examplesEstab, tenant: tenantId,
+      });
+      log.info('gate1.estab.classified', { intent: r.intent, is_lead: r.is_lead });
+      if (r.intent === 'NOVA_OPORTUNIDADE') {
+        if (isProf) {
+          // professor NUNCA auto-funil: oportunidade aparente → confirmação humana.
+          route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'PROFESSOR_OPORTUNIDADE',
+                    reasoning: '[vivo] professor com sinal de oportunidade — Revisar', confidence: r.confidence };
+        } else {
+          // funil: deixa cair no Portão 2 (auto-promove). Registra a classificação no lead.
+          cls = { confidence: r.confidence, reasoning: `[vivo] ${r.reasoning || 'nova oportunidade'}`,
+                  profile_signals: [r.intent], is_lead: true };
+        }
+      } else if (r.intent === 'ROTINA_CLIENTE' || r.intent === 'INTERNO') {
+        // não-lead CLARO → não-classificadas (rede reviewável).
+        route = { status: 'NOT_LEAD', reviewQueue: true, intent: r.intent,
+                  reasoning: `[vivo] ${r.reasoning || r.intent}`, confidence: r.confidence };
+      } else {
+        // INDEFINIDO → Revisar.
+        route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'INDEFINIDO',
+                  reasoning: `[vivo] ${r.reasoning || 'indefinido'}`, confidence: r.confidence };
+      }
+    } catch (err) {
+      // falha/429 esgotado → Revisar (default seguro). Nunca quebra o ingest.
+      log.warn('gate1.estab.classify_error', { error: err.message });
+      route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'ERRO',
+                reasoning: '[vivo] erro no classificador — enviado para Revisar', confidence: null };
+    }
+
+    if (route) {
+      const routedLeadId = await captureRoutedEstablished(tenantId, channel, phone || psid, msg, rawBody, route);
+      log.info('gate1.estab.routed', { status: route.status, intent: route.intent, lead_id: routedLeadId });
+      // Só Revisar notifica; não-classificadas segue silencioso (igual ao Portão 1).
+      if (route.status === 'REVIEW_QUEUE' && routedLeadId) {
+        await notificar(tenantId, 'revisao', { leadId: routedLeadId });
+      }
+      return;
+    }
+    // route === null → NOVA_OPORTUNIDADE (não-professor): cai no Portão 2 (funil).
+  }
+
   // ---------------- PORTÃO 1: classificador leve -------------------
   // skipTriage: um lead vindo de Lead Ads (leadgen) já É um lead por definição —
   // pula o classificador (não há mensagem conversacional pra triar).
-  // conversaEstabelecida (BUG2-2): recepção já respondeu → não re-triar.
-  let cls = null;
+  // conversaEstabelecida (BUG2-2): recepção já respondeu → roteamento vivo acima.
   if (!msg.skipTriage && !conversaEstabelecida) {
     const examples = await _fewShotExamples(tenantId);   // few-shot dinâmico (PARTE 3)
     try {
@@ -680,14 +834,6 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     approval_id: result.approvalId,
     lead_promoted: ctx.leadStatus === 'NEW',
   });
-
-  // Fase 1 SHADOW — quando a conversa já estava estabelecida o Portão 1 foi PULADO
-  // e o lead promoveu por skip (comportamento INALTERADO acima). Além disso, e só
-  // pra LOGAR, roda o classificador atual nesta mesma mensagem e grava em
-  // classifier_shadow. Sem await que altere o fluxo: isto é puro registro.
-  if (conversaEstabelecida && !msg.skipTriage) {
-    await recordShadowClassification(tenantId, { leadId: ctx.leadId, phone, msg, classify, log: log2 });
-  }
 
   // Bloco 4 — notifica a recepção (best-effort). Gatilho 1 (lead novo) ou 2 (lead
   // existente respondeu). nome/instrumento do que foi extraído nesta passagem.

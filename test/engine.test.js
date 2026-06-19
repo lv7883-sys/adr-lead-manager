@@ -243,7 +243,10 @@ test('Portão 2: lead existente — generate recebe a conversa REAL mesclada + r
   let capturedHistory = null;
   let capturedRetomada = null;
   const deps = {
-    classify: async () => ({ label: 'LEAD', confidence: 0.9, reason: 'retorno' }),
+    classify: async () => assert.fail('Portão 1 não roda em conversa estabelecida'),
+    // Roteamento vivo: conversa estabelecida passa pelo classifyConversa. NOVA_OPORTUNIDADE
+    // → cai no Portão 2 (funil) exatamente como antes do auto-promote por skip.
+    classifyConversa: async () => ({ is_lead: true, confidence: 1, reasoning: 'novo curso', intent: 'NOVA_OPORTUNIDADE' }),
     generate: async ({ history, retomada }) => {
       capturedHistory = history;
       capturedRetomada = retomada;
@@ -261,7 +264,7 @@ test('Portão 2: lead existente — generate recebe a conversa REAL mesclada + r
   );
 
   assert.deepEqual(
-    capturedHistory,
+    (capturedHistory || []).map(({ role, content }) => ({ role, content })),
     [
       { role: 'USER', content: 'oi, vi o anúncio' },
       { role: 'ASSISTANT', content: 'oi! que bom, sobre qual instrumento?' },
@@ -269,6 +272,58 @@ test('Portão 2: lead existente — generate recebe a conversa REAL mesclada + r
     'generate recebe a conversa real mesclada (lead + recepção), em ordem cronológica'
   );
   assert.equal(capturedRetomada, true, 'com histórico real, retomada = true');
+});
+
+test('Roteamento vivo: conversa estabelecida em ROTINA_CLIENTE → NOT_LEAD (não-classificadas), sem resposta', async () => {
+  const phone = '+5511900000007';
+  await withTenant(TENANT_ID, async (c) => {
+    await c.query(
+      `INSERT INTO leads (tenant_id, name, phone, status) VALUES ($1, 'Aluno Rotina', $2, 'QUALIFYING')`,
+      [TENANT_ID, phone]
+    );
+    const r = await c.query(
+      `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, 'whatsapp', $2) RETURNING id`,
+      [TENANT_ID, phone]
+    );
+    await c.query(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, role, body, received_at)
+       VALUES ($1, $2, 'inbound', 'USER', 'obrigado!', now() - interval '2 minutes')`,
+      [TENANT_ID, r.rows[0].id]
+    );
+    await c.query(
+      `INSERT INTO staff_outbound_samples (tenant_id, channel, external_id, body, received_at)
+       VALUES ($1, 'whatsapp', '5511900000007', 'de nada! até a próxima aula', now() - interval '1 minute')`,
+      [TENANT_ID]
+    );
+  });
+
+  const deps = {
+    classify: async () => assert.fail('Portão 1 não roda em conversa estabelecida'),
+    classifyConversa: async () => ({ is_lead: false, confidence: 0, reasoning: 'agradecimento de aluno', intent: 'ROTINA_CLIENTE' }),
+    generate: async () => assert.fail('não gera resposta para não-lead'),
+    notify: async () => ({ sent: false }),
+    notificar: async () => ({ sent: false }),
+    redis: redisClient,
+  };
+
+  await engine.processInbound(
+    tenant,
+    { externalId: '5511900000007', externalMessageId: 'estab-rotina-1', sender: 'Aluno Rotina', body: 'obrigado!' },
+    {},
+    deps
+  );
+
+  const lead = await q(
+    'SELECT status, review_queue FROM leads WHERE tenant_id = $1 AND phone = $2',
+    [TENANT_ID, phone]
+  );
+  assert.equal(lead[0].status, 'NOT_LEAD', 'rotina de aluno → NOT_LEAD (não-classificadas)');
+  assert.equal(lead[0].review_queue, true, 'fica reviewável (rede), não descartado');
+  const pa = await q(
+    "SELECT 1 FROM pending_approvals WHERE tenant_id = $1 AND lead_id = $2",
+    [TENANT_ID, lead.length ? (await q('SELECT id FROM leads WHERE tenant_id=$1 AND phone=$2', [TENANT_ID, phone]))[0].id : null]
+  );
+  assert.equal(pa.length, 0, 'não cria rascunho de resposta para não-lead');
 });
 
 test('webhook retorna 200 mesmo quando o Gemini falha', async () => {
