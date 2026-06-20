@@ -230,10 +230,13 @@ router.get(
 const _IDENT = "regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')";
 router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {
-    const items = await withTenant(req.tenantId, async (c) => (
+    const { items, motivos } = await withTenant(req.tenantId, async (c) => ({
+      motivos: await _naoLeadMotivos(c, req.tenantId),
+      items: (
       await c.query(
         `SELECT 'lead' AS kind, l.id::text AS id, coalesce(l.phone, l.meta_psid) AS phone, l.name,
                  l.classification_confidence AS confidence, 'low_confidence' AS reason,
+                 l.classification_reasoning AS reasoning, l.intent,
                  (SELECT min(m.received_at) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT} AND m.role = 'USER') AS received_at,
                  (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
@@ -248,8 +251,9 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
          LIMIT 100`,
         [req.tenantId]
       )
-    ).rows);
-    res.json({ tenant_id: req.tenantId, count: items.length, items });
+    ).rows,
+    }));
+    res.json({ tenant_id: req.tenantId, count: items.length, items, motivos });
   } catch (err) {
     logger.error('tenant.unclassified.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
@@ -269,26 +273,31 @@ router.post('/:tenantId/unclassified/:id/promote', authenticate, requireTenantAc
   const { id } = req.params;
   const kind = req.body?.kind;
   if (!isUuid(id) || (kind !== 'lead' && kind !== 'message')) return res.status(400).json({ error: 'invalid' });
+  // Temperatura opcional (passo secundário do controle "é lead" compartilhado).
+  const temperature = ['quente', 'morno', 'frio'].includes(req.body?.temperature) ? req.body.temperature : null;
   try {
     const leadId = await withTenant(req.tenantId, async (c) => {
       if (kind === 'lead') {
         const r = await c.query(
-          "UPDATE leads SET status = 'QUALIFYING', review_queue = false, updated_at = now() WHERE id = $1 RETURNING id", [id]
+          `UPDATE leads SET status = 'QUALIFYING', review_queue = false,
+                            temperatura_manual = COALESCE($2, temperatura_manual), updated_at = now()
+            WHERE id = $1 RETURNING id`, [id, temperature]
         );
         if (!r.rows[0]) return null;
-        await _registrarFeedback(c, req.tenantId, id, 'lead', req.tenantRole);
+        await _registrarFeedback(c, req.tenantId, id, 'lead', req.tenantRole, { temperature });
         return id;
       }
       const m = await _msgInfo(c, id);
       if (!m) return null;
       const lead = await c.query(
-        `INSERT INTO leads (tenant_id, name, phone, status) VALUES ($1, $2, $3, 'QUALIFYING')
-         ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL DO UPDATE SET status = 'QUALIFYING', updated_at = now()
+        `INSERT INTO leads (tenant_id, name, phone, status, temperatura_manual) VALUES ($1, $2, $3, 'QUALIFYING', $4)
+         ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
+         DO UPDATE SET status = 'QUALIFYING', temperatura_manual = COALESCE(EXCLUDED.temperatura_manual, leads.temperatura_manual), updated_at = now()
          RETURNING id`,
-        [req.tenantId, m.sender || m.external_id, m.external_id]
+        [req.tenantId, m.sender || m.external_id, m.external_id, temperature]
       );
       await c.query("UPDATE messages SET discarded = false, discard_reason = 'promoted' WHERE id = $1", [id]);
-      await _registrarFeedback(c, req.tenantId, lead.rows[0].id, 'lead', req.tenantRole);
+      await _registrarFeedback(c, req.tenantId, lead.rows[0].id, 'lead', req.tenantRole, { temperature });
       return lead.rows[0].id;
     });
     if (!leadId) return res.status(404).json({ error: 'not found' });
@@ -308,11 +317,18 @@ router.post('/:tenantId/unclassified/:id/ignore', authenticate, requireTenantAcc
   const { id } = req.params;
   const kind = req.body?.kind;
   if (!isUuid(id) || (kind !== 'lead' && kind !== 'message')) return res.status(400).json({ error: 'invalid' });
+  // Motivo (tópico ou texto livre) — vira rótulo content-based no classification_feedback,
+  // mesmo caminho da Revisar. Mantém o lead fora do funil.
+  const motivo = typeof req.body?.motivo === 'string' ? req.body.motivo.trim().slice(0, 200) || null : null;
   try {
     const ok = await withTenant(req.tenantId, async (c) => {
-      const r = kind === 'lead'
-        ? await c.query("UPDATE leads SET review_result = 'confirmed_not_lead', review_em = now(), review_by = $2 WHERE id = $1 RETURNING id", [id, req.tenantRole])
-        : await c.query("UPDATE messages SET discard_reason = 'ignored' WHERE id = $1 AND discarded = true RETURNING id", [id]);
+      if (kind === 'lead') {
+        const r = await c.query("UPDATE leads SET review_result = 'confirmed_not_lead', review_em = now(), review_by = $2 WHERE id = $1 RETURNING id", [id, req.tenantRole]);
+        if (!r.rows[0]) return false;
+        await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole, { context: motivo });
+        return true;
+      }
+      const r = await c.query("UPDATE messages SET discard_reason = 'ignored' WHERE id = $1 AND discarded = true RETURNING id", [id]);
       return !!r.rows[0];
     });
     if (!ok) return res.status(404).json({ error: 'not found' });

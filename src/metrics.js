@@ -667,6 +667,32 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
 // Início do dia de hoje em America/Sao_Paulo (expressão SQL, sem input externo).
 const SP_HOJE = `date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo'`;
 
+// Closer-suppression (ADR — fila de ação): um "closer" é uma mensagem CURTA de
+// agradecimento/confirmação, SEM pergunta, que NÃO pede resposta. Tokens genéricos
+// de pt-BR (multi-tenant, sem hardcode de unidade). Quando o último inbound é um
+// closer e a recepção JÁ respondeu antes, o cliente não está esperando → não marca
+// "responder agora". Suprime apenas (nunca escala).
+const CLOSER_EMOJIS = ['👍', '🙏', '😊', '❤️', '❤', '🥰', '👏', '🙌', '😀', '😁', '🤝', '😉', '🥳', '💪', '✅', '👌', '🙂'];
+const CLOSER_WORDS = new Set([
+  'obrigado', 'obrigada', 'obg', 'obgd', 'obgda', 'obgdo', 'valeu', 'vlw', 'ok', 'okk', 'okay', 'okey', 'oki',
+  'combinado', 'combinada', 'perfeito', 'perfeita', 'otimo', 'ótimo', 'otima', 'ótima', 'show', 'beleza', 'blz',
+  'tranquilo', 'tranquila', 'certo', 'certinho', 'certissimo', 'maravilha', 'top', 'joia', 'jóia', 'sim', 'simm',
+  'uhum', 'aham', 'isso', 'massa', 'legal', 'bom', 'boa', 'agradecido', 'agradecida', 'grato', 'grata', 'gratidao',
+  'gratidão', 'flw', 'falou', 'fechou', 'fechado', 'demais', 'show de bola', 'ótimoo', 'entao', 'então', 'opa',
+]);
+function _ehCloser(text) {
+  let t = String(text || '').trim();
+  if (!t || t.includes('?')) return false;          // pergunta nunca é closer
+  if (t.length > 60) return false;                  // mensagem longa não é closer
+  for (const e of CLOSER_EMOJIS) t = t.split(e).join(' ');
+  const words = t.toLowerCase()
+    .replace(/[!.,;:()\-—…"'’]/g, ' ')
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}️]/gu, ' ') // demais emojis → espaço
+    .split(/\s+/).filter(Boolean);
+  if (!words.length) return true;                   // só emoji/pontuação curta → closer
+  return words.every((w) => CLOSER_WORDS.has(w));   // toda palavra precisa ser closer
+}
+
 async function computePainel(tenantId) {
   return withTenant(tenantId, async (c) => {
     const rows = (
@@ -674,6 +700,7 @@ async function computePainel(tenantId) {
         `WITH inb AS (
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
                   min(m.received_at) AS first_in, max(m.received_at) AS last_in,
+                  (array_agg(coalesce(m.media_transcription, m.body) ORDER BY m.received_at DESC))[1] AS last_in_body,
                   array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) AS ts_in
              FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
             WHERE cv.tenant_id = $1 AND m.role = 'USER' GROUP BY 1
@@ -702,7 +729,7 @@ async function computePainel(tenantId) {
          SELECT l.id, l.name, l.status, l.intent, l.desfecho, l.created_at, l.temperatura_manual,
                 l.review_queue, l.review_result, l.classification_confidence,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
-                i.first_in, i.last_in, o.first_out, o.last_out, c.channel,
+                i.first_in, i.last_in, i.last_in_body, o.first_out, o.last_out, c.channel,
                 i.ts_in, o.ts_out,
                 d.draft_at, COALESCE(d.n, 0) AS drafts,
                 (p.lead_id IS NOT NULL) AS retomada_pendente
@@ -776,9 +803,16 @@ async function computePainel(tenantId) {
       const ultLead = lin != null && (lout == null || lin > lout);   // último contato foi DO lead
       let tipo, detalheSeg;
       if (ultLead) {
-        tipo = fout == null ? 'sem_resposta' : 'responder_agora';    // nunca respondemos vs respondemos e voltou
         detalheSeg = (agora - lin) / 1000;
-        aguardando++;                                                // bucket 1 + 2
+        // Closer-suppression: se já respondemos antes (fout != null) e o último inbound
+        // é só agradecimento/confirmação (closer, sem pergunta), o cliente NÃO está
+        // esperando resposta → cai pro bucket calmo (monitorar). Nunca escala.
+        if (fout != null && _ehCloser(l.last_in_body)) {
+          tipo = 'monitorar';
+        } else {
+          tipo = fout == null ? 'sem_resposta' : 'responder_agora';  // nunca respondemos vs respondemos e voltou
+          aguardando++;                                              // bucket 1 + 2
+        }
       } else if (lout != null) {                                     // último contato foi DA escola
         detalheSeg = (agora - lout) / 1000;
         tipo = (agora - lout) > TRES_DIAS ? 'retomada' : 'monitorar';
