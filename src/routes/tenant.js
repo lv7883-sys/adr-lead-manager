@@ -166,6 +166,26 @@ router.put('/:tenantId/leads/:id/mover-kanban', authenticate, requireTenantAcces
       else if (destCol === 'experimental') r = await c.query("UPDATE leads SET status='EXPERIMENTAL_AGENDADA', desfecho=NULL, desfecho_em=NULL, updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
       else if (destCol === 'convertido') r = await c.query("UPDATE leads SET status='CONVERTED', desfecho='matriculado', desfecho_em=now(), updated_at=now() WHERE id=$1 RETURNING status, desfecho", [id]);
       else r = await c.query('UPDATE leads SET desfecho=$2, desfecho_em=now(), updated_at=now() WHERE id=$1 RETURNING status, desfecho', [id, desfecho]);
+      // HISTÓRICO: registra a mudança de etapa (drag E dropdown caem aqui). Reativação
+      // (terminal→não-terminal) guarda o desfecho ANTERIOR — limpar não é perda de dado.
+      if (origem !== destCol) {
+        const conteudo = ['convertido', 'perdido'].includes(origem)
+          ? `reativado de ${origem}${lead.desfecho ? ` [${lead.desfecho}]` : ''} → ${destCol}`
+          : (destCol === 'perdido' ? `${origem} → perdido [${desfecho}]` : `${origem} → ${destCol}`);
+        await c.query(
+          `INSERT INTO lead_eventos (tenant_id, lead_id, tipo, autor, conteudo, etapa_key)
+           VALUES ($1, $2, 'mudanca_etapa', $3, $4, $5)`,
+          [req.tenantId, id, req.tenantRole || null, conteudo, destCol]
+        );
+      }
+      // Anotação opcional junto da mudança (o botão "Registrar" pode mandar as duas).
+      const nota = typeof req.body?.nota === 'string' ? req.body.nota.trim().slice(0, 2000) : '';
+      if (nota) {
+        await c.query(
+          `INSERT INTO lead_eventos (tenant_id, lead_id, tipo, autor, conteudo) VALUES ($1, $2, 'nota', $3, $4)`,
+          [req.tenantId, id, req.tenantRole || null, nota]
+        );
+      }
       return { row: r.rows[0], origem };
     });
     if (out.notFound) return res.status(404).json({ error: 'lead not found' });
@@ -174,6 +194,44 @@ router.put('/:tenantId/leads/:id/mover-kanban', authenticate, requireTenantAcces
     res.json({ ok: true, coluna: destCol, ...out.row });
   } catch (err) {
     logger.error('tenant.lead.kanban_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /tenant/:tid/leads/:id/eventos — timeline do lead (mudança de etapa + notas).
+router.get('/:tenantId/leads/:id/eventos', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  try {
+    const eventos = await withTenant(req.tenantId, (c) => c.query(
+      `SELECT id, tipo, autor, conteudo, etapa_key, created_at
+         FROM lead_eventos WHERE tenant_id = $1 AND lead_id = $2
+        ORDER BY created_at DESC LIMIT 200`, [req.tenantId, id]).then((r) => r.rows));
+    res.json({ ok: true, eventos });
+  } catch (err) {
+    logger.error('tenant.lead.eventos_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tid/leads/:id/nota — anotação avulsa (sem mudar etapa). Append-only.
+router.post('/:tenantId/leads/:id/nota', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  const nota = typeof req.body?.nota === 'string' ? req.body.nota.trim().slice(0, 2000) : '';
+  if (!nota) return res.status(400).json({ error: 'nota vazia' });
+  try {
+    const ok = await withTenant(req.tenantId, async (c) => {
+      if ((await c.query('SELECT 1 FROM leads WHERE id = $1', [id])).rowCount === 0) return false;
+      await c.query(
+        `INSERT INTO lead_eventos (tenant_id, lead_id, tipo, autor, conteudo) VALUES ($1, $2, 'nota', $3, $4)`,
+        [req.tenantId, id, req.tenantRole || null, nota]);
+      return true;
+    });
+    if (!ok) return res.status(404).json({ error: 'lead not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error('tenant.lead.nota_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
     res.status(500).json({ error: 'internal error' });
   }
 });
