@@ -20,6 +20,8 @@ function present(row) {
     available_instruments: row.available_instruments,
     business_hours: row.business_hours,
     notification_whatsapp: row.notification_whatsapp,
+    // ADR sugestão-de-etapa: definições por etapa que alimentam o detector (key→descrição).
+    stage_definitions: row.stage_definitions || null,
     // Prompt resolvido: override, ou template padrão renderizado.
     system_prompt: resolveSystemPrompt(row),
     updated_at: row.updated_at,

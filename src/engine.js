@@ -9,6 +9,7 @@ const notifyModule = require('./notify');
 const notificacao = require('./notificacao');   // Bloco 4: push WhatsApp pra recepção
 const redisClient = require('./redisClient');
 const gating = require('./gating');
+const { kanbanColuna } = require('./metrics');   // ADR sugestão-de-etapa: travas de posição
 
 const CONFIDENCE_THRESHOLD = 0.7;
 // Bloco 2 — roteamento por confidence (probabilidade de ser lead):
@@ -32,6 +33,41 @@ async function _fewShotExamples(tenantId) {
       context: r.correction_context, temperature: r.corrected_temperature,
     }));
   } catch { return []; }
+}
+
+// ADR sugestão-de-etapa — definições de etapa do tenant (key→descrição) que alimentam
+// o detector. Vazio/ausente → recurso desligado (multi-tenant, sem hardcode).
+async function _stageDefinitions(tenantId) {
+  try {
+    const res = await withTenant(tenantId, (c) => c.query(
+      'SELECT stage_definitions FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]));
+    return res.rows[0]?.stage_definitions || null;
+  } catch { return null; }
+}
+
+// ADR sugestão-de-etapa — persiste a sugestão da IA (suggestion-only) com as DUAS travas:
+// (1) nunca sugerir a etapa em que o lead JÁ está; (2) não re-sugerir uma etapa que a
+// recepção já dispensou (suggested_stage_dismissed). NUNCA move o lead. Best-effort.
+async function persistStageSuggestion(tenantId, leadId, suggestedStage, stageReasoning) {
+  if (!leadId || !suggestedStage) return;
+  try {
+    await withTenant(tenantId, async (c) => {
+      const row = (await c.query(
+        'SELECT status, desfecho, suggested_stage_dismissed FROM leads WHERE id = $1', [leadId]
+      )).rows[0];
+      if (!row) return;
+      const atual = kanbanColuna(row.status, row.desfecho);
+      // Já está na etapa sugerida, ou foi exatamente essa que a recepção dispensou → não sugere.
+      if (suggestedStage === atual || suggestedStage === row.suggested_stage_dismissed) return;
+      await c.query(
+        `UPDATE leads SET suggested_stage = $2, stage_reasoning = $3, stage_suggested_at = now()
+          WHERE id = $1`,
+        [leadId, suggestedStage, stageReasoning || null]
+      );
+    });
+  } catch (e) {
+    logger.warn('stage.suggestion_persist_failed', { tenant_id: tenantId, lead_id: leadId, error: e.message });
+  }
 }
 
 // ADR-016 — params de mídia da mensagem (4 colunas), na ordem do INSERT.
@@ -493,16 +529,20 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     conversation = [...conversation, { role: 'USER', content: msg.body, at: new Date() }];
 
     const examplesEstab = await _fewShotExamples(tenantId);
+    const stageDefs = await _stageDefinitions(tenantId);
     const isProf = await _isProfessor(identEstab);
 
     // route=null → segue pro Portão 2 (funil/QUALIFYING). Senão, roteia e RETORNA.
     let route = null;
     try {
       const r = await _classifyConversaRetry(classifyConversa, {
-        conversation, examples: examplesEstab, tenant: tenantId,
+        conversation, examples: examplesEstab, stageDefinitions: stageDefs, tenant: tenantId,
       });
-      log.info('gate1.estab.classified', { intent: r.intent, is_lead: r.is_lead, state: r.conversation_state });
+      log.info('gate1.estab.classified', { intent: r.intent, is_lead: r.is_lead, state: r.conversation_state, stage: r.suggested_stage });
       const estado = { conversation_state: r.conversation_state, state_reasoning: r.state_reasoning };
+      // Sugestão de etapa: só carrega quando É lead (independente de intent/estado).
+      const sugEtapa = r.is_lead ? r.suggested_stage : null;
+      const sugMotivo = r.is_lead ? r.stage_reasoning : null;
       if (r.intent === 'NOVA_OPORTUNIDADE') {
         if (isProf) {
           // professor NUNCA auto-funil: oportunidade aparente → confirmação humana.
@@ -512,11 +552,13 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
           // CONSUMIDOR 2 — oportunidade já resolvida (agendou/encerrou): mantém no funil,
           // SEM gerar novo rascunho (não infla "aguardando aprovação" com conversa encerrada).
           route = { status: 'QUALIFYING', reviewQueue: false, intent: r.intent,
-                    reasoning: `[vivo] ${r.reasoning || 'oportunidade resolvida'}`, confidence: r.confidence, ...estado };
+                    reasoning: `[vivo] ${r.reasoning || 'oportunidade resolvida'}`, confidence: r.confidence,
+                    suggested_stage: sugEtapa, stage_reasoning: sugMotivo, ...estado };
         } else {
           // funil: deixa cair no Portão 2 (auto-promove + rascunho). Registra a classificação + estado.
           cls = { confidence: r.confidence, reasoning: `[vivo] ${r.reasoning || 'nova oportunidade'}`,
-                  profile_signals: [r.intent], is_lead: true, ...estado };
+                  profile_signals: [r.intent], is_lead: true,
+                  suggested_stage: sugEtapa, stage_reasoning: sugMotivo, ...estado };
         }
       } else if (r.intent === 'ROTINA_CLIENTE' || r.intent === 'INTERNO') {
         // não-lead CLARO → não-classificadas (rede reviewável).
@@ -537,6 +579,11 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     if (route) {
       const routedLeadId = await captureRoutedEstablished(tenantId, channel, phone || psid, msg, rawBody, route);
       log.info('gate1.estab.routed', { status: route.status, intent: route.intent, lead_id: routedLeadId });
+      // Sugestão de etapa (suggestion-only): só persiste em lead do FUNIL (QUALIFYING);
+      // lead em Revisar/não-classificadas ainda não está no kanban — nada a sugerir.
+      if (route.status === 'QUALIFYING' && route.suggested_stage && routedLeadId) {
+        await persistStageSuggestion(tenantId, routedLeadId, route.suggested_stage, route.stage_reasoning);
+      }
       // Só Revisar notifica; não-classificadas segue silencioso (igual ao Portão 1).
       if (route.status === 'REVIEW_QUEUE' && routedLeadId) {
         await notificar(tenantId, 'revisao', { leadId: routedLeadId });
@@ -850,6 +897,13 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     approval_id: result.approvalId,
     lead_promoted: ctx.leadStatus === 'NEW',
   });
+
+  // ADR sugestão-de-etapa — agora que o lead está no funil (promovido a QUALIFYING/
+  // QUALIFIED), persiste a sugestão de etapa vinda do detector (roteamento vivo). As
+  // travas (etapa atual / dispensa) ficam na helper. Suggestion-only: nunca move.
+  if (cls && cls.suggested_stage) {
+    await persistStageSuggestion(tenantId, ctx.leadId, cls.suggested_stage, cls.stage_reasoning);
+  }
 
   // Bloco 4 — notifica a recepção (best-effort). Gatilho 1 (lead novo) ou 2 (lead
   // existente respondeu). nome/instrumento do que foi extraído nesta passagem.

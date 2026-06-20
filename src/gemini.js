@@ -178,6 +178,30 @@ REGRAS:
 - "reasoning": curto, citando o que na conversa justifica a decisão.
 - "conversation_state": o estado ATUAL pela regra acima. "state_reasoning": 1 frase curta.`;
 
+// ADR sugestão-de-etapa — bloco de prompt das DEFINIÇÕES de etapa do tenant.
+// `stageDefinitions` = { key: "descrição natural do que dispara a etapa" } (vindo de
+// tenant_lead_config.stage_definitions). Multi-tenant, SEM hardcode: sem defs → recurso
+// desligado (o detector não sugere nada). Retorna { text, keys } pra validar a saída.
+function _stageBlock(stageDefinitions) {
+  if (!stageDefinitions || typeof stageDefinitions !== 'object') return { text: '', keys: [] };
+  const keys = Object.keys(stageDefinitions).filter(
+    (k) => typeof stageDefinitions[k] === 'string' && stageDefinitions[k].trim()
+  );
+  if (!keys.length) return { text: '', keys: [] };
+  let s =
+    '\n\nSUGESTÃO DE ETAPA (suggested_stage) — eixo de POSIÇÃO no funil, INDEPENDENTE de ' +
+    'is_lead/intent/conversation_state. QUANDO E SOMENTE QUANDO is_lead=true, avalie se a ' +
+    'conversa indica CLARAMENTE que o lead deveria estar em UMA destas etapas. Cada etapa tem ' +
+    'uma condição; só sugira se a conversa satisfaz a condição sem ambiguidade. Se nenhuma se ' +
+    'aplica com clareza, retorne suggested_stage=null.\nETAPAS POSSÍVEIS:';
+  for (const k of keys) s += `\n- "${k}": ${String(stageDefinitions[k]).trim()}`;
+  s +=
+    '\nINCLUA TAMBÉM no JSON: "suggested_stage":"<uma das chaves acima, ou null>", ' +
+    '"stage_reasoning":"<1 frase em pt-BR citando o trecho da conversa que dispara a etapa; ' +
+    'vazio se null>". NUNCA invente uma chave fora da lista. Na dúvida, suggested_stage=null.';
+  return { text: s, keys };
+}
+
 function _formatConversa(conversation) {
   if (!Array.isArray(conversation) || !conversation.length) return '(sem histórico)';
   return conversation
@@ -192,7 +216,8 @@ function _formatConversa(conversation) {
     .join('\n');
 }
 
-async function classifyConversa({ conversation, examples /*, tenant */ }) {
+async function classifyConversa({ conversation, examples, stageDefinitions /*, tenant */ }) {
+  const stage = _stageBlock(stageDefinitions);
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
       model: modelName,
@@ -200,7 +225,7 @@ async function classifyConversa({ conversation, examples /*, tenant */ }) {
     });
     const convo = _formatConversa(conversation);
     const res = await model.generateContent(
-      `${TRIAGE_CONVERSA_PROMPT}${_fewShot(examples)}\n\nCONVERSA (mais antigo -> mais novo):\n${convo}`
+      `${TRIAGE_CONVERSA_PROMPT}${stage.text}${_fewShot(examples)}\n\nCONVERSA (mais antigo -> mais novo):\n${convo}`
     );
     const parsed = JSON.parse(res.response.text());
     const confidence = Math.min(1, Math.max(0, Number(parsed.confidence) || 0));
@@ -209,6 +234,10 @@ async function classifyConversa({ conversation, examples /*, tenant */ }) {
       : (typeof parsed.reason === 'string' ? parsed.reason : null);
     // Estado da conversa — na dúvida cai em INDEFINIDO (nunca RESOLVIDO por engano).
     const state = CONVERSA_STATES.includes(parsed.conversation_state) ? parsed.conversation_state : 'INDEFINIDO';
+    // Sugestão de etapa: só vale se LEAD e se a key estiver entre as definidas pelo tenant.
+    // Saída CATEGÓRICA (key válida ou null) — roteia por ela + reasoning, nunca por banda.
+    const suggestedStage = isLead && stage.keys.includes(parsed.suggested_stage)
+      ? parsed.suggested_stage : null;
     return {
       is_lead: isLead,
       confidence,
@@ -216,6 +245,9 @@ async function classifyConversa({ conversation, examples /*, tenant */ }) {
       intent: CONVERSA_INTENTS.includes(parsed.intent) ? parsed.intent : 'INDEFINIDO',
       conversation_state: state,
       state_reasoning: typeof parsed.state_reasoning === 'string' ? parsed.state_reasoning : null,
+      suggested_stage: suggestedStage,
+      stage_reasoning: suggestedStage && typeof parsed.stage_reasoning === 'string'
+        ? parsed.stage_reasoning : null,
     };
   });
 }
