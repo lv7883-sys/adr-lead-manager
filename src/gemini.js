@@ -137,33 +137,50 @@ async function classify({ message, examples }) {
 const CONVERSA_INTENTS = ['NOVA_OPORTUNIDADE', 'ROTINA_CLIENTE', 'INTERNO', 'INDEFINIDO'];
 const CONVERSA_STATES = ['AGUARDANDO_RECEPCAO', 'AGUARDANDO_CLIENTE', 'RESOLVIDO', 'INDEFINIDO'];
 
-const TRIAGE_CONVERSA_PROMPT = `Você é um classificador de triagem de conversas de WhatsApp de uma escola de música.
-Recebe a CONVERSA INTEIRA entre a pessoa (LEAD) e a escola (ESCOLA), em ordem cronológica, e decide
-se a conversa CORRENTE representa uma OPORTUNIDADE DE NOVO NEGÓCIO (lead) ou não.
+// Definição genérica padrão quando o tenant não setou `lead_definition` (multi-tenant
+// limpo: nenhum domínio assumido — o classificador trabalha só com os princípios gerais).
+const LEAD_DEFINITION_FALLBACK =
+  'LEAD = pessoa demonstrando interesse real em contratar/adquirir o produto ou serviço do ' +
+  'negócio, ou cliente existente trazendo uma NOVA oportunidade (novo produto, indicação, ' +
+  'nova pessoa). ROTINA/NÃO-LEAD = cliente existente em assunto de pós-venda/administrativo do ' +
+  'dia a dia, ou conversa interna/operacional da equipe.';
+
+// Template GENÉRICO de triagem de conversa. A definição de negócio/lead NÃO fica cravada:
+// vem do tenant (`lead_definition` em tenant_lead_config) e é injetada aqui. is_lead/intent/
+// conversation_state continuam idênticos — só a DEFINIÇÃO de domínio é externalizada.
+function _triageConversaPrompt(leadDefinition) {
+  const def = (typeof leadDefinition === 'string' && leadDefinition.trim())
+    ? leadDefinition.trim() : LEAD_DEFINITION_FALLBACK;
+  return `Você é um classificador de triagem de conversas de WhatsApp de um negócio.
+Recebe a CONVERSA INTEIRA entre a pessoa (LEAD) e o ATENDIMENTO (ATENDIMENTO), em ordem cronológica,
+e decide se a conversa CORRENTE representa uma OPORTUNIDADE DE NOVO NEGÓCIO (lead) ou não.
+
+DEFINIÇÃO DO NEGÓCIO E DE LEAD (deste cliente — use como critério principal):
+${def}
 
 PRINCÍPIO CENTRAL: a INTENÇÃO da conversa decide, NUNCA a identidade da pessoa.
 Uma relação longa tem vários episódios — julgue a intenção ATUAL/RECENTE da conversa, não a pessoa
 nem meses de histórico misturado. O que importa é se a conversa CORRENTE traz uma oportunidade nova.
 
 NÃO é lead (is_lead=false):
-- Cliente/aluno já existente tratando de ROTINA: remarcação de aula, renovação, cobrança/pagamento,
-  evento interno, agradecimento, recado, dúvida administrativa do dia a dia.
-- Conversa interna/operacional da escola (professores, equipe, horários, materiais, salas, bandas).
-- Assunto sem nenhuma relação com matricular/conhecer aulas.
+- Cliente já existente tratando de ROTINA/pós-venda (conforme a definição acima): assuntos
+  administrativos do dia a dia, remarcação, renovação, cobrança/pagamento, agradecimento, recado.
+- Conversa interna/operacional da equipe do negócio.
+- Assunto sem nenhuma relação com a oportunidade de negócio descrita na definição acima.
 
 É lead (is_lead=true):
-- Cliente existente trazendo NOVA oportunidade: 2º curso/instrumento, indicação de outra pessoa,
-  novo aluno na família (filho, cônjuge), interesse em matricular alguém.
-- Pessoa nova demonstrando interesse real em conhecer/contratar aulas.
+- Cliente existente trazendo NOVA oportunidade (conforme a definição acima): novo produto/serviço,
+  indicação de outra pessoa, nova pessoa (família/empresa) interessada.
+- Pessoa nova demonstrando interesse real na oferta do negócio.
 
 ESTADO DA CONVERSA (conversation_state): leia a conversa INTEIRA e diga em que estado ela está
 AGORA — com quem está a bola e se já foi resolvida. Julgue pelo CONTEXTO (não por palavras soltas):
 - AGUARDANDO_RECEPCAO: o cliente fez a última jogada relevante (pergunta, pedido, interesse) e
-  espera a escola responder/agir. A bola está com a escola.
-- AGUARDANDO_CLIENTE: a escola respondeu/perguntou por último e espera o cliente (ele é quem deve
-  responder). A bola está com o cliente.
+  espera o atendimento responder/agir. A bola está com o atendimento.
+- AGUARDANDO_CLIENTE: o atendimento respondeu/perguntou por último e espera o cliente (ele é quem
+  deve responder). A bola está com o cliente.
 - RESOLVIDO: a conversa chegou a um desfecho natural e NÃO pede ação imediata — ex.: agendamento/
-  matrícula confirmados e o cliente só agradeceu/encerrou; assunto resolvido; despedida.
+  fechamento confirmados e o cliente só agradeceu/encerrou; assunto resolvido; despedida.
 - INDEFINIDO: não dá pra ter certeza do estado.
 SEGURANÇA: na dúvida entre RESOLVIDO e esperar resposta, escolha AGUARDANDO_RECEPCAO ou INDEFINIDO —
 NUNCA marque RESOLVIDO sem certeza (não podemos esconder um cliente que ainda espera).
@@ -177,6 +194,7 @@ REGRAS:
 - "intent": NOVA_OPORTUNIDADE (novo negócio), ROTINA_CLIENTE (cliente em assunto de rotina), INTERNO (equipe/operacional), INDEFINIDO (não dá pra decidir).
 - "reasoning": curto, citando o que na conversa justifica a decisão.
 - "conversation_state": o estado ATUAL pela regra acima. "state_reasoning": 1 frase curta.`;
+}
 
 // ADR sugestão-de-etapa — bloco de prompt das DEFINIÇÕES de etapa do tenant.
 // `stageDefinitions` = { key: "descrição natural do que dispara a etapa" } (vindo de
@@ -206,7 +224,7 @@ function _formatConversa(conversation) {
   if (!Array.isArray(conversation) || !conversation.length) return '(sem histórico)';
   return conversation
     .map((m) => {
-      const quem = String(m.role).toUpperCase() === 'ASSISTANT' ? 'ESCOLA' : 'LEAD';
+      const quem = String(m.role).toUpperCase() === 'ASSISTANT' ? 'ATENDIMENTO' : 'LEAD';
       const txt = String(m.content ?? m.body ?? m.text ?? '').replace(/\s+/g, ' ').trim();
       if (!txt) return null;
       const ts = m.at ? ` [${new Date(m.at).toISOString().slice(0, 16).replace('T', ' ')}]` : '';
@@ -216,8 +234,9 @@ function _formatConversa(conversation) {
     .join('\n');
 }
 
-async function classifyConversa({ conversation, examples, stageDefinitions /*, tenant */ }) {
+async function classifyConversa({ conversation, examples, stageDefinitions, leadDefinition /*, tenant */ }) {
   const stage = _stageBlock(stageDefinitions);
+  const basePrompt = _triageConversaPrompt(leadDefinition);
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
       model: modelName,
@@ -225,7 +244,7 @@ async function classifyConversa({ conversation, examples, stageDefinitions /*, t
     });
     const convo = _formatConversa(conversation);
     const res = await model.generateContent(
-      `${TRIAGE_CONVERSA_PROMPT}${stage.text}${_fewShot(examples)}\n\nCONVERSA (mais antigo -> mais novo):\n${convo}`
+      `${basePrompt}${stage.text}${_fewShot(examples)}\n\nCONVERSA (mais antigo -> mais novo):\n${convo}`
     );
     const parsed = JSON.parse(res.response.text());
     const confidence = Math.min(1, Math.max(0, Number(parsed.confidence) || 0));

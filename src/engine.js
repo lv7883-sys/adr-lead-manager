@@ -35,14 +35,17 @@ async function _fewShotExamples(tenantId) {
   } catch { return []; }
 }
 
-// ADR sugestão-de-etapa — definições de etapa do tenant (key→descrição) que alimentam
-// o detector. Vazio/ausente → recurso desligado (multi-tenant, sem hardcode).
-async function _stageDefinitions(tenantId) {
+// Config do classificador por tenant (multi-tenant, sem hardcode):
+//  - lead_definition  : a DEFINIÇÃO de negócio/lead injetada no prompt do classifyConversa
+//                       (externaliza o que antes era "escola de música" cravado).
+//  - stage_definitions: as etapas sugeríveis do detector (key→descrição).
+// Ausente/NULL → o prompt cai no fallback genérico / o detector não sugere nada.
+async function _classifierConfig(tenantId) {
   try {
     const res = await withTenant(tenantId, (c) => c.query(
-      'SELECT stage_definitions FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]));
-    return res.rows[0]?.stage_definitions || null;
-  } catch { return null; }
+      'SELECT lead_definition, stage_definitions FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]));
+    return { leadDefinition: res.rows[0]?.lead_definition || null, stageDefinitions: res.rows[0]?.stage_definitions || null };
+  } catch { return { leadDefinition: null, stageDefinitions: null }; }
 }
 
 // ADR sugestão-de-etapa — persiste a sugestão da IA (suggestion-only) com as DUAS travas:
@@ -287,13 +290,15 @@ async function captureForReview(tenantId, channel, externalId, msg, rawBody, cls
   }
 }
 
-// ROTEAMENTO VIVO — relationship contact (professor): telefone ∈ app.professor_notificacao.
-// Professor NUNCA auto-promove pro funil (classifyConversa → Revisar). Fonte única
-// (schema do Scheduler), sem duplicar/sync. READ-only cross-schema — grant em
-// db/grants/professor_notificacao_read.sql. Best-effort: falha de leitura → trata como
-// NÃO-professor (o default-seguro de dúvida já cobre os demais intents; só a
-// NOVA_OPORTUNIDADE de professor depende deste sinal).
-async function _isProfessor(identDigits) {
+// ROTEAMENTO VIVO — CONTATO DE RELACIONAMENTO (genérico, multi-tenant): pessoa com vínculo
+// existente que NUNCA deve auto-entrar no funil mesmo parecendo oportunidade — precisa de
+// confirmação humana (classifyConversa → Revisar). Distinto do gate DURO de staff
+// (internal_contacts), que descarta de vez. Cada tenant define sua fonte de contatos de
+// relacionamento; no ADR o valor é PROFESSOR (telefone ∈ app.professor_notificacao, schema
+// do Scheduler, READ-only cross-schema — grant em db/grants/professor_notificacao_read.sql).
+// Best-effort: falha de leitura → trata como NÃO-relacionamento (o default-seguro de dúvida
+// já cobre os demais intents; só a NOVA_OPORTUNIDADE depende deste sinal).
+async function _isRelationshipContact(identDigits) {
   if (!identDigits) return false;
   try {
     const r = await pool.query(
@@ -304,7 +309,7 @@ async function _isProfessor(identDigits) {
     );
     return r.rowCount > 0;
   } catch (e) {
-    logger.warn('estab.professor_lookup_failed', { error: e.message });
+    logger.warn('estab.relationship_lookup_failed', { error: e.message });
     return false;
   }
 }
@@ -496,8 +501,8 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   // Antes: established → pulava o Portão 1 e auto-promovia NEW→QUALIFYING. Agora o
   // classifyConversa (conversa INTEIRA) GOVERNA, roteando por INTENT (sinal estável;
   // NUNCA por confidence, que não é P(lead)). Seguro por construção: não-lead CLARO
-  // → não-classificadas (rede reviewável, não inunda a Revisar); dúvida/erro/professor
-  // → Revisar; nova oportunidade → funil. Staff já saiu no gate de internal_contacts.
+  // → não-classificadas (rede reviewável, não inunda a Revisar); dúvida/erro/contato de
+  // relacionamento → Revisar; nova oportunidade → funil. Staff já saiu no gate de internal_contacts.
   // ============================================================================
   if (conversaEstabelecida && !msg.skipTriage) {
     const identEstab = String(phone || psid || '').replace(/\D/g, '');
@@ -529,14 +534,14 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     conversation = [...conversation, { role: 'USER', content: msg.body, at: new Date() }];
 
     const examplesEstab = await _fewShotExamples(tenantId);
-    const stageDefs = await _stageDefinitions(tenantId);
-    const isProf = await _isProfessor(identEstab);
+    const { leadDefinition, stageDefinitions: stageDefs } = await _classifierConfig(tenantId);
+    const isRelationship = await _isRelationshipContact(identEstab);
 
     // route=null → segue pro Portão 2 (funil/QUALIFYING). Senão, roteia e RETORNA.
     let route = null;
     try {
       const r = await _classifyConversaRetry(classifyConversa, {
-        conversation, examples: examplesEstab, stageDefinitions: stageDefs, tenant: tenantId,
+        conversation, examples: examplesEstab, stageDefinitions: stageDefs, leadDefinition, tenant: tenantId,
       });
       log.info('gate1.estab.classified', { intent: r.intent, is_lead: r.is_lead, state: r.conversation_state, stage: r.suggested_stage });
       const estado = { conversation_state: r.conversation_state, state_reasoning: r.state_reasoning };
@@ -544,10 +549,10 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       const sugEtapa = r.is_lead ? r.suggested_stage : null;
       const sugMotivo = r.is_lead ? r.stage_reasoning : null;
       if (r.intent === 'NOVA_OPORTUNIDADE') {
-        if (isProf) {
-          // professor NUNCA auto-funil: oportunidade aparente → confirmação humana.
-          route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'PROFESSOR_OPORTUNIDADE',
-                    reasoning: '[vivo] professor com sinal de oportunidade — Revisar', confidence: r.confidence, ...estado };
+        if (isRelationship) {
+          // contato de relacionamento NUNCA auto-funil: oportunidade aparente → confirmação humana.
+          route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'RELACIONAMENTO_OPORTUNIDADE',
+                    reasoning: '[vivo] contato de relacionamento com sinal de oportunidade — Revisar', confidence: r.confidence, ...estado };
         } else if (r.conversation_state === 'RESOLVIDO') {
           // CONSUMIDOR 2 — oportunidade já resolvida (agendou/encerrou): mantém no funil,
           // SEM gerar novo rascunho (não infla "aguardando aprovação" com conversa encerrada).
@@ -590,7 +595,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       }
       return;
     }
-    // route === null → NOVA_OPORTUNIDADE (não-professor): cai no Portão 2 (funil).
+    // route === null → NOVA_OPORTUNIDADE (não-relacionamento): cai no Portão 2 (funil).
   }
 
   // ---------------- PORTÃO 1: classificador leve -------------------
