@@ -728,6 +728,7 @@ async function computePainel(tenantId) {
          )
          SELECT l.id, l.name, l.status, l.intent, l.desfecho, l.created_at, l.temperatura_manual,
                 l.review_queue, l.review_result, l.classification_confidence,
+                l.conversation_state, l.state_computed_at,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
                 i.first_in, i.last_in, i.last_in_body, o.first_out, o.last_out, c.channel,
                 i.ts_in, o.ts_out,
@@ -801,17 +802,36 @@ async function computePainel(tenantId) {
 
       // ADR-021 — hierarquia por recência do último contato.
       const ultLead = lin != null && (lout == null || lin > lout);   // último contato foi DO lead
+      // ESTADO DA CONVERSA pela IA (substitui a heurística de closer). Só vale se foi
+      // computado DEPOIS do último inbound (senão está stale → cai no fallback). Segurança:
+      // INDEFINIDO/ausente NUNCA esconde — fica visível em bucket calmo.
+      const stateAt = l.state_computed_at ? new Date(l.state_computed_at).getTime() : null;
+      const stateFresh = l.conversation_state && (lin == null || (stateAt != null && stateAt >= lin));
       let tipo, detalheSeg;
-      if (ultLead) {
+      if (stateFresh) {
+        if (l.conversation_state === 'AGUARDANDO_RECEPCAO') {
+          // a bola está com a escola → urgência (responder agora / sem resposta).
+          detalheSeg = (agora - (lin != null ? lin : (lout != null ? lout : new Date(l.created_at).getTime()))) / 1000;
+          tipo = fout == null ? 'sem_resposta' : 'responder_agora';
+          aguardando++;
+        } else if (l.conversation_state === 'AGUARDANDO_CLIENTE') {
+          // a bola está com o cliente → monitorar / retomada se sumiu há muito.
+          const base = lout != null ? lout : (lin != null ? lin : new Date(l.created_at).getTime());
+          detalheSeg = (agora - base) / 1000;
+          tipo = (agora - base) > TRES_DIAS ? 'retomada' : 'monitorar';
+        } else {
+          // RESOLVIDO ou INDEFINIDO → calmo e VISÍVEL (monitorar), sem urgência.
+          const base = lin != null ? lin : (lout != null ? lout : new Date(l.created_at).getTime());
+          detalheSeg = (agora - base) / 1000;
+          tipo = 'monitorar';
+        }
+      } else if (ultLead) {                                          // FALLBACK heurístico (estado ausente/stale)
         detalheSeg = (agora - lin) / 1000;
-        // Closer-suppression: se já respondemos antes (fout != null) e o último inbound
-        // é só agradecimento/confirmação (closer, sem pergunta), o cliente NÃO está
-        // esperando resposta → cai pro bucket calmo (monitorar). Nunca escala.
         if (fout != null && _ehCloser(l.last_in_body)) {
           tipo = 'monitorar';
         } else {
-          tipo = fout == null ? 'sem_resposta' : 'responder_agora';  // nunca respondemos vs respondemos e voltou
-          aguardando++;                                              // bucket 1 + 2
+          tipo = fout == null ? 'sem_resposta' : 'responder_agora';
+          aguardando++;
         }
       } else if (lout != null) {                                     // último contato foi DA escola
         detalheSeg = (agora - lout) / 1000;

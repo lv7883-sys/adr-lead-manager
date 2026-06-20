@@ -237,6 +237,7 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
         `SELECT 'lead' AS kind, l.id::text AS id, coalesce(l.phone, l.meta_psid) AS phone, l.name,
                  l.classification_confidence AS confidence, 'low_confidence' AS reason,
                  l.classification_reasoning AS reasoning, l.intent,
+                 l.conversation_state, l.state_reasoning,
                  CASE WHEN l.review_result = 'confirmed_not_lead' THEN 'recepcao' ELSE 'ia' END AS origem_descarte,
                  (SELECT min(m.received_at) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT} AND m.role = 'USER') AS received_at,

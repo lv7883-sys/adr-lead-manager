@@ -135,6 +135,7 @@ async function classify({ message, examples }) {
 // Retorna { is_lead, confidence (0-1), reasoning, intent }.
 // ============================================================================
 const CONVERSA_INTENTS = ['NOVA_OPORTUNIDADE', 'ROTINA_CLIENTE', 'INTERNO', 'INDEFINIDO'];
+const CONVERSA_STATES = ['AGUARDANDO_RECEPCAO', 'AGUARDANDO_CLIENTE', 'RESOLVIDO', 'INDEFINIDO'];
 
 const TRIAGE_CONVERSA_PROMPT = `Você é um classificador de triagem de conversas de WhatsApp de uma escola de música.
 Recebe a CONVERSA INTEIRA entre a pessoa (LEAD) e a escola (ESCOLA), em ordem cronológica, e decide
@@ -155,14 +156,27 @@ NÃO é lead (is_lead=false):
   novo aluno na família (filho, cônjuge), interesse em matricular alguém.
 - Pessoa nova demonstrando interesse real em conhecer/contratar aulas.
 
+ESTADO DA CONVERSA (conversation_state): leia a conversa INTEIRA e diga em que estado ela está
+AGORA — com quem está a bola e se já foi resolvida. Julgue pelo CONTEXTO (não por palavras soltas):
+- AGUARDANDO_RECEPCAO: o cliente fez a última jogada relevante (pergunta, pedido, interesse) e
+  espera a escola responder/agir. A bola está com a escola.
+- AGUARDANDO_CLIENTE: a escola respondeu/perguntou por último e espera o cliente (ele é quem deve
+  responder). A bola está com o cliente.
+- RESOLVIDO: a conversa chegou a um desfecho natural e NÃO pede ação imediata — ex.: agendamento/
+  matrícula confirmados e o cliente só agradeceu/encerrou; assunto resolvido; despedida.
+- INDEFINIDO: não dá pra ter certeza do estado.
+SEGURANÇA: na dúvida entre RESOLVIDO e esperar resposta, escolha AGUARDANDO_RECEPCAO ou INDEFINIDO —
+NUNCA marque RESOLVIDO sem certeza (não podemos esconder um cliente que ainda espera).
+
 Responda SOMENTE com JSON:
-{"is_lead":<true|false>,"confidence":<0.0-1.0>,"reasoning":"<1-2 frases em pt-BR citando o contexto da conversa>","intent":"NOVA_OPORTUNIDADE"|"ROTINA_CLIENTE"|"INTERNO"|"INDEFINIDO"}
+{"is_lead":<true|false>,"confidence":<0.0-1.0>,"reasoning":"<1-2 frases em pt-BR citando o contexto da conversa>","intent":"NOVA_OPORTUNIDADE"|"ROTINA_CLIENTE"|"INTERNO"|"INDEFINIDO","conversation_state":"AGUARDANDO_RECEPCAO"|"AGUARDANDO_CLIENTE"|"RESOLVIDO"|"INDEFINIDO","state_reasoning":"<1 frase: com quem está a bola e por quê>"}
 
 REGRAS:
 - "confidence" = PROBABILIDADE de a conversa CORRENTE ser uma oportunidade de novo negócio (0.0 = certeza que NÃO; 1.0 = certeza que SIM). Use a escala toda; na dúvida real, ~0.5.
 - "is_lead" = true quando confidence >= 0.5.
 - "intent": NOVA_OPORTUNIDADE (novo negócio), ROTINA_CLIENTE (cliente em assunto de rotina), INTERNO (equipe/operacional), INDEFINIDO (não dá pra decidir).
-- "reasoning": curto, citando o que na conversa justifica a decisão.`;
+- "reasoning": curto, citando o que na conversa justifica a decisão.
+- "conversation_state": o estado ATUAL pela regra acima. "state_reasoning": 1 frase curta.`;
 
 function _formatConversa(conversation) {
   if (!Array.isArray(conversation) || !conversation.length) return '(sem histórico)';
@@ -193,11 +207,15 @@ async function classifyConversa({ conversation, examples /*, tenant */ }) {
     const isLead = typeof parsed.is_lead === 'boolean' ? parsed.is_lead : confidence >= 0.5;
     const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning
       : (typeof parsed.reason === 'string' ? parsed.reason : null);
+    // Estado da conversa — na dúvida cai em INDEFINIDO (nunca RESOLVIDO por engano).
+    const state = CONVERSA_STATES.includes(parsed.conversation_state) ? parsed.conversation_state : 'INDEFINIDO';
     return {
       is_lead: isLead,
       confidence,
       reasoning,
       intent: CONVERSA_INTENTS.includes(parsed.intent) ? parsed.intent : 'INDEFINIDO',
+      conversation_state: state,
+      state_reasoning: typeof parsed.state_reasoning === 'string' ? parsed.state_reasoning : null,
     };
   });
 }

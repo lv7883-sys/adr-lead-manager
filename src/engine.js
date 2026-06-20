@@ -296,12 +296,16 @@ async function captureRoutedEstablished(tenantId, channel, externalId, msg, rawB
   const phone = psid ? null : externalId;
   const signals = JSON.stringify([route.intent].filter(Boolean));
   // Em conflito, status/review_queue só mudam se o lead não tiver decisão humana/desfecho.
+  // O estado da conversa (observação da IA) é sempre atualizado.
   const onConflictSet =
     `status = CASE WHEN leads.review_result IS NULL AND leads.desfecho IS NULL THEN EXCLUDED.status ELSE leads.status END,
      review_queue = CASE WHEN leads.review_result IS NULL AND leads.desfecho IS NULL THEN EXCLUDED.review_queue ELSE leads.review_queue END,
      classification_confidence = EXCLUDED.classification_confidence,
      classification_reasoning = EXCLUDED.classification_reasoning,
      classification_signals = EXCLUDED.classification_signals,
+     conversation_state = EXCLUDED.conversation_state,
+     state_reasoning = EXCLUDED.state_reasoning,
+     state_computed_at = now(),
      updated_at = now()`;
   try {
     return await withTenant(tenantId, async (c) => {
@@ -309,24 +313,26 @@ async function captureRoutedEstablished(tenantId, channel, externalId, msg, rawB
       if (psid) {
         lead = await c.query(
           `INSERT INTO leads (tenant_id, name, status, meta_psid, review_queue,
-                              classification_confidence, classification_reasoning, classification_signals)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                              classification_confidence, classification_reasoning, classification_signals,
+                              conversation_state, state_reasoning, state_computed_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
            ON CONFLICT (tenant_id, meta_psid) WHERE meta_psid IS NOT NULL
            DO UPDATE SET ${onConflictSet}
            RETURNING id`,
           [tenantId, msg.sender || externalId, route.status, externalId, route.reviewQueue,
-           route.confidence, route.reasoning, signals]
+           route.confidence, route.reasoning, signals, route.conversation_state || null, route.state_reasoning || null]
         );
       } else {
         lead = await c.query(
           `INSERT INTO leads (tenant_id, name, phone, status, review_queue,
-                              classification_confidence, classification_reasoning, classification_signals)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                              classification_confidence, classification_reasoning, classification_signals,
+                              conversation_state, state_reasoning, state_computed_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
            ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
            DO UPDATE SET ${onConflictSet}
            RETURNING id`,
           [tenantId, msg.sender || phone, phone, route.status, route.reviewQueue,
-           route.confidence, route.reasoning, signals]
+           route.confidence, route.reasoning, signals, route.conversation_state || null, route.state_reasoning || null]
         );
       }
       const conv = (
@@ -495,25 +501,31 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       const r = await _classifyConversaRetry(classifyConversa, {
         conversation, examples: examplesEstab, tenant: tenantId,
       });
-      log.info('gate1.estab.classified', { intent: r.intent, is_lead: r.is_lead });
+      log.info('gate1.estab.classified', { intent: r.intent, is_lead: r.is_lead, state: r.conversation_state });
+      const estado = { conversation_state: r.conversation_state, state_reasoning: r.state_reasoning };
       if (r.intent === 'NOVA_OPORTUNIDADE') {
         if (isProf) {
           // professor NUNCA auto-funil: oportunidade aparente → confirmação humana.
           route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'PROFESSOR_OPORTUNIDADE',
-                    reasoning: '[vivo] professor com sinal de oportunidade — Revisar', confidence: r.confidence };
+                    reasoning: '[vivo] professor com sinal de oportunidade — Revisar', confidence: r.confidence, ...estado };
+        } else if (r.conversation_state === 'RESOLVIDO') {
+          // CONSUMIDOR 2 — oportunidade já resolvida (agendou/encerrou): mantém no funil,
+          // SEM gerar novo rascunho (não infla "aguardando aprovação" com conversa encerrada).
+          route = { status: 'QUALIFYING', reviewQueue: false, intent: r.intent,
+                    reasoning: `[vivo] ${r.reasoning || 'oportunidade resolvida'}`, confidence: r.confidence, ...estado };
         } else {
-          // funil: deixa cair no Portão 2 (auto-promove). Registra a classificação no lead.
+          // funil: deixa cair no Portão 2 (auto-promove + rascunho). Registra a classificação + estado.
           cls = { confidence: r.confidence, reasoning: `[vivo] ${r.reasoning || 'nova oportunidade'}`,
-                  profile_signals: [r.intent], is_lead: true };
+                  profile_signals: [r.intent], is_lead: true, ...estado };
         }
       } else if (r.intent === 'ROTINA_CLIENTE' || r.intent === 'INTERNO') {
         // não-lead CLARO → não-classificadas (rede reviewável).
         route = { status: 'NOT_LEAD', reviewQueue: true, intent: r.intent,
-                  reasoning: `[vivo] ${r.reasoning || r.intent}`, confidence: r.confidence };
+                  reasoning: `[vivo] ${r.reasoning || r.intent}`, confidence: r.confidence, ...estado };
       } else {
         // INDEFINIDO → Revisar.
         route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'INDEFINIDO',
-                  reasoning: `[vivo] ${r.reasoning || 'indefinido'}`, confidence: r.confidence };
+                  reasoning: `[vivo] ${r.reasoning || 'indefinido'}`, confidence: r.confidence, ...estado };
       }
     } catch (err) {
       // falha/429 esgotado → Revisar (default seguro). Nunca quebra o ingest.
@@ -612,9 +624,13 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     if (cls) {
       await c.query(
         `UPDATE leads SET classification_confidence = $2, classification_reasoning = $3,
-                          classification_signals = $4
+                          classification_signals = $4,
+                          conversation_state = COALESCE($5, conversation_state),
+                          state_reasoning = COALESCE($6, state_reasoning),
+                          state_computed_at = CASE WHEN $5 IS NOT NULL THEN now() ELSE state_computed_at END
           WHERE id = $1`,
-        [lead.rows[0].id, cls.confidence, cls.reasoning, JSON.stringify(cls.profile_signals || [])]
+        [lead.rows[0].id, cls.confidence, cls.reasoning, JSON.stringify(cls.profile_signals || []),
+         cls.conversation_state || null, cls.state_reasoning || null]
       );
     }
 
