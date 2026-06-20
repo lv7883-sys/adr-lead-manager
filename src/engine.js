@@ -553,12 +553,14 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
           // contato de relacionamento NUNCA auto-funil: oportunidade aparente → confirmação humana.
           route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'RELACIONAMENTO_OPORTUNIDADE',
                     reasoning: '[vivo] contato de relacionamento com sinal de oportunidade — Revisar', confidence: r.confidence, ...estado };
-        } else if (r.conversation_state === 'RESOLVIDO') {
-          // CONSUMIDOR 2 — oportunidade já resolvida (agendou/encerrou): mantém no funil,
-          // SEM gerar novo rascunho (não infla "aguardando aprovação" com conversa encerrada).
+        } else if (r.conversation_state === 'RESOLVIDO' || r.conversation_state === 'AGUARDANDO_CLIENTE') {
+          // CONSUMIDOR 2 (estendido) — rascunho pendente só faz sentido pra AGUARDANDO_RECEPCAO
+          // (a bola está com a escola). RESOLVIDO (encerrou) e AGUARDANDO_CLIENTE (a escola já
+          // respondeu, espera o cliente) NÃO precisam de resposta agora: mantém no funil, SEM
+          // gerar rascunho "aguardando aprovação" (não infla a fila com conversa que não devemos).
           route = { status: 'QUALIFYING', reviewQueue: false, intent: r.intent,
-                    reasoning: `[vivo] ${r.reasoning || 'oportunidade resolvida'}`, confidence: r.confidence,
-                    suggested_stage: sugEtapa, stage_reasoning: sugMotivo, ...estado };
+                    reasoning: `[vivo] ${r.reasoning || (r.conversation_state === 'RESOLVIDO' ? 'oportunidade resolvida' : 'aguardando cliente')}`,
+                    confidence: r.confidence, suggested_stage: sugEtapa, stage_reasoning: sugMotivo, ...estado };
         } else {
           // funil: deixa cair no Portão 2 (auto-promove + rascunho). Registra a classificação + estado.
           cls = { confidence: r.confidence, reasoning: `[vivo] ${r.reasoning || 'nova oportunidade'}`,

@@ -779,8 +779,10 @@ async function computePainel(tenantId) {
     const TRES_DIAS = 3 * 86400 * 1000;
     let leadsAtivos = 0, aguardando = 0, comRascunho = 0;
     for (const l of rows) {
-      // Leads na fila de revisão ficam SÓ na aba "Revisar" (não na fila de ação).
-      if (l.review_queue && !l.review_result) { comRascunho += l.drafts > 0 ? 1 : 0; continue; }
+      // Leads na fila de revisão ficam SÓ na aba "Revisar" (não na fila de ação) — e
+      // FORA do contador de "resposta pronta": o rascunho é subconjunto da FILA, nunca
+      // pilha separada maior. Quem está em Revisar não conta como rascunho da fila.
+      if (l.review_queue && !l.review_result) { continue; }
       // Leads não-reais ficam fora da fila de ação (igual ao funil): NOT_LEAD/REVIEW_QUEUE.
       // EXPERIMENTAL_AGENDADA (aula marcada) também sai da fila de ação: está parado
       // aguardando a aula, não a recepção — não deve aparecer como "esperando resposta".
