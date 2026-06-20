@@ -24,6 +24,28 @@ const multer = require('multer');                        // ADR-016 P1: upload d
 const mediaLib = require('../media');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
+// Motivos de "não é lead" — fallback usado quando o tenant não configurou
+// `tenant_lead_config.nao_lead_motivos` (migration 035). Tópicos, nunca identidade.
+// O motivo escolhido vira rótulo em classification_feedback.correction_context.
+const DEFAULT_NAO_LEAD_MOTIVOS = [
+  { value: 'renovacao_cobranca', label: 'Renovação / cobrança' },
+  { value: 'remarcacao_agenda', label: 'Remarcação / reposição / agenda' },
+  { value: 'aviso_ausencia', label: 'Aviso de ausência' },
+  { value: 'assunto_interno', label: 'Assunto interno' },
+  { value: 'fornecedor', label: 'Fornecedor' },
+  { value: 'sem_intencao_matricula', label: 'Sem intenção de matrícula' },
+  { value: 'spam', label: 'Spam' },
+];
+
+// Lê os motivos do tenant (config) com fallback pro default. Roda dentro de um client `c`.
+async function _naoLeadMotivos(c, tenantId) {
+  try {
+    const r = await c.query('SELECT nao_lead_motivos FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]);
+    const m = r.rows[0] && r.rows[0].nao_lead_motivos;
+    return Array.isArray(m) && m.length ? m : DEFAULT_NAO_LEAD_MOTIVOS;
+  } catch { return DEFAULT_NAO_LEAD_MOTIVOS; }
+}
+
 // Valida funil_period: '6m' | '12m' | 'year:YYYY' (senão cai no padrão 6m).
 function parseFunilPeriod(v) {
   const s = typeof v === 'string' ? v.trim() : '';
@@ -164,9 +186,11 @@ router.get(
   requireTenantAccess(READ_ROLES),
   async (req, res) => {
     try {
-      const leads = await withTenant(req.tenantId, async (c) => (
+      const { leads, motivos } = await withTenant(req.tenantId, async (c) => ({
+        motivos: await _naoLeadMotivos(c, req.tenantId),
+        leads: (
         await c.query(
-          `SELECT l.id, l.name, l.phone, l.meta_psid, l.status,
+          `SELECT l.id, l.name, l.phone, l.meta_psid, l.status, l.intent,
                   l.classification_confidence AS confidence,
                   l.classification_reasoning  AS reasoning,
                   l.classification_signals    AS signals,
@@ -188,8 +212,9 @@ router.get(
             LIMIT 200`,
           [req.tenantId]
         )
-      ).rows);
-      res.json({ tenant_id: req.tenantId, count: leads.length, leads });
+      ).rows,
+      }));
+      res.json({ tenant_id: req.tenantId, count: leads.length, leads, motivos });
     } catch (err) {
       logger.error('tenant.review_queue.error', { tenant_id: req.tenantId, error: err.message });
       res.status(500).json({ error: 'internal error' });
@@ -350,6 +375,11 @@ router.post(
     if (result !== 'confirmed_lead' && result !== 'confirmed_not_lead') {
       return res.status(400).json({ error: 'invalid result' });
     }
+    // Decisão da Revisar agora carrega o passo secundário: É LEAD → temperatura;
+    // NÃO É LEAD → motivo (tópico ou texto livre). Ambos opcionais e não-quebram
+    // o uso atual (botões sem esses campos seguem funcionando).
+    const temperature = ['quente', 'morno', 'frio'].includes(req.body?.temperature) ? req.body.temperature : null;
+    const motivo = typeof req.body?.motivo === 'string' ? req.body.motivo.trim().slice(0, 200) || null : null;
     try {
       const updated = await withTenant(req.tenantId, async (c) => {
         const isLead = result === 'confirmed_lead';
@@ -358,14 +388,18 @@ router.post(
               SET review_result = $2, review_em = now(), review_by = $3,
                   review_queue = false,
                   status = CASE WHEN $4 THEN 'QUALIFYING' ELSE 'NOT_LEAD' END,
+                  temperatura_manual = CASE WHEN $4 AND $5::text IS NOT NULL THEN $5 ELSE temperatura_manual END,
                   updated_at = now()
             WHERE id = $1 AND review_queue = true AND review_result IS NULL
             RETURNING id, status`,
-          [id, result, req.tenantRole, isLead]
+          [id, result, req.tenantRole, isLead, temperature]
         );
-        // Feedback de aprendizado (ADR-011 Fase 2): a decisão real da recepção.
+        // Feedback de aprendizado (ADR-011 Fase 2): a decisão real da recepção. Mesmo
+        // motor de rótulo do requalificar — motivo → correction_context (tópico que a
+        // IA aprende), temperatura → corrected_temperature.
         if (r.rows[0]) {
-          await _registrarFeedback(c, req.tenantId, id, isLead ? 'lead' : 'not_lead', req.tenantRole);
+          await _registrarFeedback(c, req.tenantId, id, isLead ? 'lead' : 'not_lead', req.tenantRole,
+            { context: isLead ? null : motivo, temperature: isLead ? temperature : null });
         }
         return r.rows[0] || null;
       });
