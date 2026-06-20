@@ -237,6 +237,7 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
         `SELECT 'lead' AS kind, l.id::text AS id, coalesce(l.phone, l.meta_psid) AS phone, l.name,
                  l.classification_confidence AS confidence, 'low_confidence' AS reason,
                  l.classification_reasoning AS reasoning, l.intent,
+                 CASE WHEN l.review_result = 'confirmed_not_lead' THEN 'recepcao' ELSE 'ia' END AS origem_descarte,
                  (SELECT min(m.received_at) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT} AND m.role = 'USER') AS received_at,
                  (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
@@ -246,8 +247,12 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT}
                    ORDER BY cv.updated_at DESC LIMIT 1) AS channel
             FROM leads l
-           WHERE l.status = 'NOT_LEAD' AND l.review_queue = true AND l.review_result IS NULL
-         ORDER BY received_at DESC NULLS LAST
+           -- Descartados = CASA DE RESGATE: tudo fora do funil como NOT_LEAD que dá pra
+           -- recuperar — descartado pela IA (review_result NULL) OU marcado "não é lead"
+           -- pela recepção (confirmed_not_lead). Exclui desfecho (decisão de resultado).
+           WHERE l.status = 'NOT_LEAD' AND l.desfecho IS NULL
+             AND (l.review_result IS NULL OR l.review_result = 'confirmed_not_lead')
+         ORDER BY coalesce(l.review_em, l.created_at) DESC NULLS LAST
          LIMIT 100`,
         [req.tenantId]
       )
@@ -280,8 +285,9 @@ router.post('/:tenantId/unclassified/:id/promote', authenticate, requireTenantAc
       if (kind === 'lead') {
         const r = await c.query(
           `UPDATE leads SET status = 'QUALIFYING', review_queue = false,
+                            review_result = 'confirmed_lead', review_em = now(), review_by = $3,
                             temperatura_manual = COALESCE($2, temperatura_manual), updated_at = now()
-            WHERE id = $1 RETURNING id`, [id, temperature]
+            WHERE id = $1 RETURNING id`, [id, temperature, req.tenantRole]
         );
         if (!r.rows[0]) return null;
         await _registrarFeedback(c, req.tenantId, id, 'lead', req.tenantRole, { temperature });
