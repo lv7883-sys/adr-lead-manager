@@ -10,22 +10,65 @@ const meta = require('./meta');
 const engine = require('./engine');
 const logger = require('./logger');
 
-// Procura um campo de instrumento entre as respostas do formulário (nome do campo
-// costuma conter "instrument"/"instrumento").
-function findInstrument(fieldMap) {
-  for (const [k, v] of Object.entries(fieldMap)) {
-    if (/instrument|instrumento/i.test(k) && v) return v;
+// Default do mapeamento de campos do Lead Ad. ESPELHO EXATO do field_map seedado em
+// db/migrations/041_tenant_lead_source.sql (linha do ADR) — manter os dois em sincronia.
+// É o fallback quando a fonte (tenant_lead_source) ainda não tem field_map: garante
+// comportamento idêntico ao histórico cravado (música/ADR) p/ qualquer tenant sem config.
+const DEFAULT_FIELD_MAP = {
+  name_keys: ['full_name', 'name'],
+  name_compose_keys: ['first_name', 'last_name'],
+  phone_keys: ['phone_number', 'phone'],
+  interest_key_pattern: 'instrument|instrumento',
+  welcome: {
+    prefix: 'Olá! Vim pelo anúncio e tenho interesse',
+    with_interest: ' em aula de {interest}.',
+    without_interest: ' nas aulas.',
+    with_name: ' Meu nome é {name}.',
+  },
+};
+
+// Primeiro valor não-vazio entre `keys`.
+function firstByKeys(values, keys) {
+  for (const k of keys || []) { if (values[k]) return values[k]; }
+  return null;
+}
+
+// Compõe um valor juntando `keys` na ordem (ex.: first_name + last_name).
+function composeByKeys(values, keys) {
+  return (keys || []).map((k) => values[k]).filter(Boolean).join(' ') || null;
+}
+
+// Acha o valor cujo NOME de campo casa o padrão de interesse (ex.: instrumento).
+// Generaliza a antiga findInstrument: o padrão vem do field_map (domínio externalizado).
+function findInterest(values, pattern) {
+  if (!pattern) return null;
+  let re;
+  try { re = new RegExp(pattern, 'i'); } catch { return null; }
+  for (const [k, v] of Object.entries(values)) {
+    if (re.test(k) && v) return v;
   }
   return null;
 }
 
-// Monta uma 1ª mensagem em 1ª pessoa a partir dos dados do formulário, pra dar
-// contexto ao Gemini gerar a resposta de boas-vindas.
-function buildLeadgenMessage(name, instrument) {
-  let m = 'Olá! Vim pelo anúncio e tenho interesse';
-  m += instrument ? ` em aula de ${instrument}.` : ' nas aulas.';
-  if (name) m += ` Meu nome é ${name}.`;
+// Monta a 1ª mensagem em 1ª pessoa (contexto p/ o Gemini gerar a boas-vindas) a partir
+// do template `welcome` do field_map. Placeholders {interest} e {name}.
+function buildLeadgenMessage(welcome, name, interest) {
+  const w = welcome || DEFAULT_FIELD_MAP.welcome;
+  let m = w.prefix;
+  m += interest ? w.with_interest.replace('{interest}', interest) : w.without_interest;
+  if (name) m += w.with_name.replace('{name}', name);
   return m;
+}
+
+// Aplica um field_map (config por-fonte OU o DEFAULT) ao field_data já mapeado do form.
+// Retorna { name, phone, interest, body } — paridade total com o hardcode quando cfg=DEFAULT.
+function applyFieldMap(values, cfg) {
+  const c = cfg || DEFAULT_FIELD_MAP;
+  const name = firstByKeys(values, c.name_keys) || composeByKeys(values, c.name_compose_keys) || null;
+  const phone = firstByKeys(values, c.phone_keys) || null;
+  const interest = findInterest(values, c.interest_key_pattern);
+  const body = buildLeadgenMessage(c.welcome, name, interest);
+  return { name, phone, interest, body };
 }
 
 async function ingestLeadgen(value, isUpdate) {
@@ -42,24 +85,23 @@ async function ingestLeadgen(value, isUpdate) {
 
   const lead = await meta.fetchLead(leadgenId, creds.token);   // pode lançar (id falso -> 404)
   const f = meta.fieldDataToMap(lead.field_data);
-  const name = f.full_name || f.name ||
-    [f.first_name, f.last_name].filter(Boolean).join(' ') || null;
-  const phone = f.phone_number || f.phone || null;
-  const instrument = findInstrument(f);
+  // field_map por-tenant (externalizado); fallback ao DEFAULT (paridade c/ o hardcode).
+  const cfg = (await meta.leadSourceFieldMap(tenantId, pageId)) || DEFAULT_FIELD_MAP;
+  const { name, phone, interest, body } = applyFieldMap(f, cfg);
 
   const msg = {
     channel: 'meta_lead_ads',
     externalId: phone || leadgenId,
     phone,
     sender: name,
-    body: buildLeadgenMessage(name, instrument),
+    body,
     skipTriage: true,
     leadgenId,
     // Idempotência: leadgen reentregue não duplica; update reprocessa (created_time).
     externalMessageId: (isUpdate ? 'leadgen_update:' + leadgenId + ':' + (value.created_time || '')
                                  : 'leadgen:' + leadgenId),
   };
-  log.info('meta.leadgen.ingesting', { tenant_id: tenantId, has_phone: !!phone, instrument: instrument || null });
+  log.info('meta.leadgen.ingesting', { tenant_id: tenantId, has_phone: !!phone, interest: interest || null });
   await engine.processInbound({ id: tenantId }, msg, { meta_leadgen: lead });
 }
 
@@ -117,4 +159,7 @@ async function ingest(body) {
   }
 }
 
-module.exports = { ingest, ingestLeadgen, ingestMessage, findInstrument, buildLeadgenMessage };
+module.exports = {
+  ingest, ingestLeadgen, ingestMessage,
+  applyFieldMap, findInterest, buildLeadgenMessage, DEFAULT_FIELD_MAP,
+};

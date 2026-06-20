@@ -108,6 +108,20 @@ async function tenantByPageId(pageId) {
   return (rows[0] && rows[0].id) || null;
 }
 
+// field_map por-fonte (tenant_lead_source). Roda APÓS o tenant resolvido, sob RLS
+// (withTenant) — a policy tenant_isolation libera só a própria linha. Retorna o jsonb
+// de config ou null (caller cai no DEFAULT_FIELD_MAP — paridade p/ fonte sem config).
+async function leadSourceFieldMap(tenantId, entityId) {
+  if (!tenantId || !entityId) return null;
+  const row = await withTenant(tenantId, (c) =>
+    c.query(
+      "SELECT field_map FROM tenant_lead_source WHERE tenant_id = $1 AND platform = 'meta' AND entity_id = $2 AND active",
+      [tenantId, String(entityId)]
+    ).then((r) => r.rows[0])
+  );
+  return (row && row.field_map) || null;
+}
+
 // Page Access Token (decifrado) + page_id do tenant. null se não configurado.
 async function pageCredsForTenant(tenantId) {
   const row = await withTenant(tenantId, (c) =>
@@ -134,5 +148,5 @@ function verifySignature(rawBody, signatureHeader) {
 
 module.exports = {
   fetchLead, fetchUserName, fieldDataToMap, sendMessage,
-  tenantByPageId, pageCredsForTenant, verifySignature,
+  tenantByPageId, leadSourceFieldMap, pageCredsForTenant, verifySignature,
 };
