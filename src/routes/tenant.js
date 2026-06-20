@@ -631,18 +631,20 @@ router.get(
                              WHERE pa.lead_id = l.id AND pa.status = 'APPROVED' AND pa.decided_at >= ${SP_HOJE}) AS approved_today,
                     EXISTS (SELECT 1 FROM pending_approvals pa
                              WHERE pa.lead_id = l.id AND pa.status = 'EDITED' AND pa.decided_at >= ${SP_HOJE}) AS edited_today,
-                    -- "aguardando resposta": último contato foi DO lead (USER) e mais
-                    -- recente que o último outbound da escola (igual ao bucket do painel).
-                    -- EXPERIMENTAL_AGENDADA (aula marcada) nunca "aguarda resposta": a
-                    -- mensagem de cortesia do cliente não reabre a espera.
-                    (l.status <> 'EXPERIMENTAL_AGENDADA' AND
-                     (SELECT max(m.received_at) FROM messages m
-                        JOIN conversations cv ON cv.id = m.conversation_id
-                       WHERE cv.external_id = l.phone AND m.role = 'USER')
-                     > COALESCE((SELECT max(s.received_at) FROM staff_outbound_samples s
-                        WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
-                            = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')), 'epoch'::timestamptz)
-                    ) AS awaiting_reply,
+                    -- D1 — "aguardando resposta" = conversation_state AGUARDANDO_RECEPCAO
+                    -- (independe de termos mandado msg: resposta-promessa NÃO encerra).
+                    -- Fallback p/ a heurística de timestamps quando o estado é NULL (não
+                    -- esconder quem espera). Fora: EXPERIMENTAL_AGENDADA, CONVERTED, desfecho.
+                    (l.status <> 'EXPERIMENTAL_AGENDADA' AND l.status <> 'CONVERTED' AND l.desfecho IS NULL AND (
+                      l.conversation_state = 'AGUARDANDO_RECEPCAO'
+                      OR (l.conversation_state IS NULL AND
+                          (SELECT max(m.received_at) FROM messages m
+                             JOIN conversations cv ON cv.id = m.conversation_id
+                            WHERE cv.external_id = l.phone AND m.role = 'USER')
+                          > COALESCE((SELECT max(s.received_at) FROM staff_outbound_samples s
+                             WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
+                                 = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')), 'epoch'::timestamptz))
+                    )) AS awaiting_reply,
                     -- P5: sequências de msgs p/ classificar o engajamento do cliente.
                     (SELECT array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at)
                        FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
@@ -655,7 +657,7 @@ router.get(
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
               WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
               ORDER BY l.created_at DESC
-              LIMIT 100`
+              LIMIT 1000`
           )
         ).rows;
         // P5 — classifica engajamento do cliente por lead (e remove os arrays crus).

@@ -136,6 +136,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       await c.query(
         `WITH base AS (
            SELECT l.id, l.name, l.status, l.intent, l.created_at, l.desfecho, l.desfecho_em, l.temperatura_manual,
+                  l.conversation_state,
                   regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g') AS ident,
                   q.instrument, COALESCE(q.qualification_complete, false) AS qualif
              FROM leads l
@@ -165,7 +166,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
              FROM conversations WHERE tenant_id = $1 GROUP BY 1
          )
          SELECT b.id, b.name, b.status, b.intent, b.created_at, b.desfecho, b.desfecho_em, b.temperatura_manual,
-                b.instrument, b.qualif,
+                b.instrument, b.qualif, b.conversation_state,
                 i.first_in, i.last_in, o.first_out, o.last_out, o.first_sender,
                 c.channel
            FROM base b
@@ -277,6 +278,12 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const respComercial = [], respFora = []; // split por horário comercial (1ª msg do lead)
     let semResposta = 0, leadParou = 0, comInbound = 0;
     let em30 = 0, em2h = 0; // faixas de SLA: <=30min (verde), <=2h (verde+amarelo)
+    // D1 — SLA honesto baseado em conversation_state: o denominador inclui os leads
+    // que NUNCA respondemos e que SEGUEM esperando nós (AGUARDANDO_RECEPCAO). Esses
+    // contam como "fora da meta" (não somem da conta). `backlog*` é o split desses
+    // sem-resposta por horário comercial — pra o % comercial × global serem comparáveis
+    // (mesma natureza de denominador), não % sobre universos diferentes.
+    let slaBacklog = 0, backlogComercial = 0, backlogFora = 0;
     // ADR-021 — estado AGORA: clientes esperando nossa resposta + leads silenciosos 3d+.
     const TRES_DIAS = 3 * 86400;
     const aguardandoLista = []; // { id, name, esperando_seg }
@@ -335,8 +342,23 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       // EXPERIMENTAL_AGENDADA é estado "parado" (aula marcada) — sai dos buckets de
       // espera/silêncio: a última msg de cortesia do cliente NÃO reabre a espera.
       const ativo021 = !l.desfecho && l.status !== 'CONVERTED' && l.status !== 'EXPERIMENTAL_AGENDADA';
-      if (ativo021 && lin != null && (lout == null || lin > lout)) {
-        aguardandoLista.push({ id: l.id, name: l.name || 'Lead sem nome', ultimo_contato_em: l.last_in, esperando_seg: Math.max(0, Math.round((agora - lin) / 1000)) });
+      // D1 — "esperando nossa resposta" = conversation_state AGUARDANDO_RECEPCAO,
+      // INDEPENDENTE de já termos mandado msg (resposta-promessa NÃO encerra). Fallback
+      // pra heurística de timestamps quando o estado ainda é NULL (não esconder quem espera).
+      const estado = l.conversation_state || null;
+      const esperandoNos = ativo021 && (
+        estado === 'AGUARDANDO_RECEPCAO' ||
+        (estado == null && lin != null && (lout == null || lin > lout))
+      );
+      // SLA D1: quem espera nós e AINDA não teve 1ª resposta válida entra no denominador
+      // como "fora da meta". Split por horário comercial (chegada da 1ª msg) p/ comparabilidade.
+      if (esperandoNos && !respondido) {
+        slaBacklog++;
+        if (dentroHorario(l.first_in, horario)) backlogComercial++; else backlogFora++;
+      }
+      if (esperandoNos) {
+        const ref = lin != null ? lin : new Date(l.created_at).getTime();
+        aguardandoLista.push({ id: l.id, name: l.name || 'Lead sem nome', ultimo_contato_em: l.last_in, esperando_seg: Math.max(0, Math.round((agora - ref) / 1000)) });
       } else if (ativo021 && lout != null && (agora - lout) / 1000 > TRES_DIAS) {
         silenciosos3d++;
         const silSeg = Math.round((agora - lout) / 1000);
@@ -363,18 +385,25 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       });
     }
     respTimes.sort((a, b) => a - b);
-    // SLA de um grupo de tempos de resposta (dentro/fora do expediente).
-    const grupoSla = (arr) => {
+    // D1 — universo único do SLA: respondidos + esperando-nós-sem-resposta (fora-da-meta).
+    const slaDenom = respTimes.length + slaBacklog;
+    // SLA de um grupo de tempos de resposta. `backlog` = sem-resposta esperando nós no
+    // mesmo recorte (D1) — entra no DENOMINADOR pra comercial × global serem comparáveis
+    // (mesma natureza). tempo_medio/p90 seguem só sobre respondidos (são "dos respondidos").
+    const grupoSla = (arr, backlog = 0) => {
       const s = [...arr].sort((a, b) => a - b);
       const em30 = s.filter((v) => v <= 30 * 60).length;
+      const denom = s.length + backlog;
       return {
-        n: s.length,
-        pct_em_30min: s.length ? round((em30 / s.length) * 100) : null,
+        n: denom,
+        respondidos: s.length,
+        sem_resposta: backlog,
+        pct_em_30min: denom ? round((em30 / denom) * 100) : null,
         tempo_medio_seg: s.length ? round(s.reduce((a, b) => a + b, 0) / s.length, 0) : null,
         p90_seg: round(percentile(s, 0.9), 0),
       };
     };
-    const porHorario = { comercial: grupoSla(respComercial), fora: grupoSla(respFora) };
+    const porHorario = { comercial: grupoSla(respComercial, backlogComercial), fora: grupoSla(respFora, backlogFora) };
     const horarioInfo = { inicio: fmtHM(horario.inicio), fim: fmtHM(horario.fim), dias: horario.dias };
     const ranking = [...porRecep.entries()]
       .map(([sender, r]) => ({ sender, volume: r.n, tempo_medio_seg: round(r.somaSeg / r.comTempo, 0) }))
@@ -472,15 +501,19 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       )
     ).rows;
     const nowSec = agora / 1000;
-    let engComOut = 0, engResp = 0, engAtiva = 0, engSil = 0;
+    let engComOut = 0, engResp = 0, engAtiva = 0, engSil = 0, engOutros = 0;
     const engDist = { alto: 0, normal: 0, baixo: 0, silenciou: 0 };
     const engGaps = [];
     for (const r of engRows) {
       const e = classificarEngajamento(r.inb_ts, r.out_ts, nowSec);
       if (e.tem_outbound) engComOut++;
       if (e.respondeu) engResp++;
-      if (e.trocas >= 3) engAtiva++;
+      // D3 — buckets MUTUAMENTE EXCLUSIVOS sobre o universo do período (engRows):
+      // silenciado tem precedência (estado atual mais acionável); senão conversa ativa
+      // (3+ trocas e não silenciou); senão "outros". Soma = engRows.length (≤ total).
       if (e.silenciou) engSil++;
+      else if (e.trocas >= 3) engAtiva++;
+      else engOutros++;
       if (e.engajamento) engDist[e.engajamento]++;
       for (const g of e.gaps) engGaps.push(g);
     }
@@ -488,8 +521,10 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const engajamento = {
       taxa_retorno_pct: engComOut ? round((engResp / engComOut) * 100) : 0,
       tempo_medio_cliente_seg: engGaps.length ? Math.round(percentile(engGaps, 0.5)) : null,
+      universo: engRows.length,                 // D3 — base do período (exclui CONVERTED/desfecho)
       leads_conversa_ativa: engAtiva,
       leads_silenciosos_apos_resposta: engSil,
+      leads_outros: engOutros,                  // D3 — explícito; soma dos três = universo
       distribuicao: engDist,
     };
 
@@ -509,10 +544,13 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
           p90: round(percentile(respTimes, 0.9), 0),
         },
         respondidos: respTimes.length,
+        // D1 — denominador HONESTO = respondidos + esperando-nós-sem-resposta (AGUARDANDO_RECEPCAO).
+        sla_universo: slaDenom,
+        sla_backlog_sem_resposta: slaBacklog,
         sla_meta_min: 30,
-        pct_em_30min: respTimes.length ? round((em30 / respTimes.length) * 100) : null,         // verde
-        pct_30min_2h: respTimes.length ? round(((em2h - em30) / respTimes.length) * 100) : null, // amarelo
-        pct_acima_2h: respTimes.length ? round(((respTimes.length - em2h) / respTimes.length) * 100) : null, // vermelho
+        pct_em_30min: slaDenom ? round((em30 / slaDenom) * 100) : null,         // verde
+        pct_30min_2h: slaDenom ? round(((em2h - em30) / slaDenom) * 100) : null, // amarelo
+        pct_acima_2h: slaDenom ? round(((slaDenom - em2h) / slaDenom) * 100) : null, // vermelho (inclui sem-resposta)
         pct_sem_resposta: comInbound ? round((semResposta / comInbound) * 100) : null,
         sem_resposta_n: semResposta,
         sem_resposta_leads: semRespostaLeads,
