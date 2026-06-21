@@ -711,7 +711,7 @@ router.get(
           await c.query(
             `SELECT l.id, l.name, l.phone, l.status, l.intent, l.meta_psid, l.temperatura_manual,
                     l.created_at, l.updated_at,
-                    l.desfecho, l.desfecho_notas, l.desfecho_em,
+                    l.desfecho, l.desfecho_notas, l.desfecho_em, l.desfecho_source, l.desfecho_motivo,
                     l.suggested_stage, l.stage_reasoning, l.stage_suggested_at,
                     q.name AS qual_name, q.instrument, q.availability,
                     COALESCE(q.qualification_complete, false) AS qualification_complete,
@@ -834,7 +834,8 @@ router.get(
           )
         ).rows[0].n;
 
-        return { lead, messages, timeline, pending, pendingTotal };
+        const desfechoCatalog = await _catalogoDesfecho(c, req.tenantId);
+        return { lead, messages, timeline, pending, pendingTotal, desfechoCatalog };
       });
 
       if (!data.lead) return res.status(404).json({ error: 'lead not found' });
@@ -864,6 +865,9 @@ router.get(
           desfecho: l.desfecho,
           desfecho_notas: l.desfecho_notas,
           desfecho_em: l.desfecho_em,
+          desfecho_source: l.desfecho_source,
+          desfecho_motivo: l.desfecho_motivo,
+          desfecho_catalog: data.desfechoCatalog,
           // ADR sugestão-de-etapa: chip "IA sugere → etapa" no card de detalhe.
           suggested_stage: l.suggested_stage || null,
           stage_reasoning: l.stage_reasoning || null,
@@ -1576,6 +1580,38 @@ const DESFECHOS_VALIDOS = [
   'outro',
 ];
 
+// Catálogo de desfecho GENÉRICO (won/lost/open) — default em código (mesma forma do
+// seed por-tenant em tenant_lead_config.desfecho_catalog, migr. 042). Sem conceito ADR
+// cravado: 'matriculado'/'nao_matriculado_*' são só os valores LEGADOS mapeados.
+const DESFECHO_CATALOG_DEFAULT = {
+  outcomes: [
+    { key: 'won',  label: 'Ganhou',    desfecho: 'matriculado', status: 'CONVERTED' },
+    { key: 'lost', label: 'Não fechou', motivos: [
+      { key: 'preco',         label: 'Preço',          desfecho: 'nao_matriculado_preco' },
+      { key: 'sem_retorno',   label: 'Sem retorno',    desfecho: 'nao_matriculado_desistiu' },
+      { key: 'outro_curso',   label: 'Escolheu outro', desfecho: 'nao_matriculado_concorrente' },
+      { key: 'sem_interesse', label: 'Sem interesse',  desfecho: 'outro' },
+    ] },
+    { key: 'open', label: 'Em aberto', desfecho: null },
+  ],
+};
+async function _catalogoDesfecho(c, tenantId) {
+  const r = await c.query('SELECT desfecho_catalog FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]);
+  const cat = r.rows[0] && r.rows[0].desfecho_catalog;
+  return (cat && Array.isArray(cat.outcomes) && cat.outcomes.length) ? cat : DESFECHO_CATALOG_DEFAULT;
+}
+// outcome(+motivo) -> { desfecho legado, status, ground_truth, motivo, label } via catálogo.
+function _resolverDesfecho(catalog, outcome, motivoKey) {
+  const o = (catalog.outcomes || []).find((x) => x.key === outcome);
+  if (!o) return null;
+  if (outcome === 'open') return { desfecho: null, status: null, ground_truth: null, motivo: null, label: o.label };
+  if (outcome === 'won')  return { desfecho: o.desfecho || 'matriculado', status: o.status || 'CONVERTED', ground_truth: 'won', motivo: null, label: o.label };
+  // lost: precisa de um motivo do catálogo
+  const m = (o.motivos || []).find((x) => x.key === motivoKey) || (o.motivos || [])[0];
+  if (!m) return null;
+  return { desfecho: m.desfecho || 'outro', status: null, ground_truth: 'lost', motivo: m.key, label: `${o.label} · ${m.label}` };
+}
+
 // POST /tenant/:tid/leads/:id/desfecho — registra o resultado final do lead.
 // body { desfecho, notas? }. Auth igual a approve/reject (WRITE_ROLES).
 router.post(
@@ -1585,32 +1621,64 @@ router.post(
   async (req, res) => {
     const { id } = req.params;
     if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
-    const desfecho = typeof req.body?.desfecho === 'string' ? req.body.desfecho.trim() : '';
-    if (!DESFECHOS_VALIDOS.includes(desfecho)) {
-      return res.status(400).json({ error: 'invalid desfecho' });
-    }
     const notas = typeof req.body?.notas === 'string' ? req.body.notas.trim() || null : null;
+    const autor = (typeof req.body?.by_name === 'string' && req.body.by_name.trim())
+      ? req.body.by_name.trim() : (req.tenantRole || 'recepção');
+    // API genérica (preferida): { outcome: won|lost|open, motivo? } — mapeada pelo
+    // catálogo por-tenant. Back-compat: aceita o { desfecho } legado direto.
+    const outcome = typeof req.body?.outcome === 'string' ? req.body.outcome.trim() : '';
+    const legado = typeof req.body?.desfecho === 'string' ? req.body.desfecho.trim() : '';
     try {
-      const row = await withTenant(req.tenantId, async (c) => {
+      const out = await withTenant(req.tenantId, async (c) => {
+        let desfecho, status = null, ground_truth = null, motivo = null, label;
+        if (outcome) {
+          const cat = await _catalogoDesfecho(c, req.tenantId);
+          const res2 = _resolverDesfecho(cat, outcome, typeof req.body?.motivo === 'string' ? req.body.motivo.trim() : null);
+          if (!res2) return { bad: true };
+          ({ desfecho, status, ground_truth, motivo, label } = res2);
+        } else {
+          if (!DESFECHOS_VALIDOS.includes(legado)) return { bad: true };
+          desfecho = legado;
+          status = legado === 'nao_e_lead' ? 'NOT_LEAD' : null;
+          ground_truth = legado === 'matriculado' ? 'won' : (legado === 'nao_e_lead' ? null : 'lost');
+          label = legado;
+        }
+        // D2 — humano tem PRIORIDADE: grava desfecho + source='recepcao' + motivo + em.
         const r = await c.query(
           `UPDATE leads
-              SET desfecho = $2, desfecho_notas = $3, desfecho_em = now(),
-                  status = CASE WHEN $2 = 'nao_e_lead' THEN 'NOT_LEAD' ELSE status END
+              SET desfecho = $2, desfecho_notas = COALESCE($3, desfecho_notas),
+                  desfecho_motivo = $4, desfecho_source = 'recepcao', desfecho_em = now(),
+                  -- won -> CONVERTED; mudar PRA fora de 'matriculado' des-converte (lost/open
+                  -- não pode deixar o lead como convertido). nao_e_lead -> NOT_LEAD.
+                  status = CASE
+                             WHEN $5::text IS NOT NULL THEN $5::text
+                             WHEN status = 'CONVERTED' AND $2 IS DISTINCT FROM 'matriculado' THEN 'QUALIFIED'
+                             ELSE status END,
+                  updated_at = now()
             WHERE id = $1
-            RETURNING desfecho, desfecho_notas, desfecho_em, status`,
-          [id, desfecho, notas]
+            RETURNING desfecho, desfecho_notas, desfecho_motivo, desfecho_source, desfecho_em, status`,
+          [id, desfecho, notas, motivo, status]
         );
-        // Feedback de aprendizado: "não é lead" marcado pela recepção (ADR-011 Fase 2).
-        if (r.rows[0] && desfecho === 'nao_e_lead') {
-          await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole);
-        }
-        return r.rows[0] || null;
+        if (!r.rows[0]) return null;
+        // Auditoria (append) — lead_eventos.
+        await c.query(
+          `INSERT INTO lead_eventos (tenant_id, lead_id, tipo, autor, conteudo)
+           VALUES ($1, $2, 'desfecho', $3, $4)`,
+          [req.tenantId, id, autor, `Desfecho: ${label}${notas ? ` — ${notas}` : ''}`]
+        );
+        // Ground-truth de conversão (destrava o classifier_shadow): UPDATE idempotente.
+        await c.query('UPDATE classifier_shadow SET ground_truth = $2 WHERE lead_id = $1', [id, ground_truth]);
+        // "não é lead" legado segue alimentando o few-shot do classificador.
+        if (desfecho === 'nao_e_lead') await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole);
+        return { row: r.rows[0], ground_truth, outcome: outcome || null };
       });
-      if (!row) return res.status(404).json({ error: 'lead not found' });
+      if (out && out.bad) return res.status(400).json({ error: 'invalid desfecho/outcome' });
+      if (!out || !out.row) return res.status(404).json({ error: 'lead not found' });
       logger.info('tenant.lead.desfecho', {
-        tenant_id: req.tenantId, lead_id: id, desfecho, by: req.tenantRole,
+        tenant_id: req.tenantId, lead_id: id, desfecho: out.row.desfecho, source: 'recepcao',
+        ground_truth: out.ground_truth, by: autor,
       });
-      res.json({ ok: true, ...row });
+      res.json({ ok: true, ...out.row, ground_truth: out.ground_truth });
     } catch (err) {
       logger.error('tenant.lead.desfecho_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
       res.status(500).json({ error: 'internal error' });
