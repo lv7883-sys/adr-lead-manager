@@ -18,6 +18,7 @@ const DEFAULT_FIELD_MAP = {
   name_keys: ['full_name', 'name'],
   name_compose_keys: ['first_name', 'last_name'],
   phone_keys: ['phone_number', 'phone'],
+  email_keys: ['email', 'email_address', 'e-mail'],
   interest_key_pattern: 'instrument|instrumento',
   welcome: {
     prefix: 'Olá! Vim pelo anúncio e tenho interesse',
@@ -66,9 +67,10 @@ function applyFieldMap(values, cfg) {
   const c = cfg || DEFAULT_FIELD_MAP;
   const name = firstByKeys(values, c.name_keys) || composeByKeys(values, c.name_compose_keys) || null;
   const phone = firstByKeys(values, c.phone_keys) || null;
+  const email = firstByKeys(values, c.email_keys) || null;
   const interest = findInterest(values, c.interest_key_pattern);
   const body = buildLeadgenMessage(c.welcome, name, interest);
-  return { name, phone, interest, body };
+  return { name, phone, email, interest, body };
 }
 
 async function ingestLeadgen(value, isUpdate) {
@@ -87,12 +89,13 @@ async function ingestLeadgen(value, isUpdate) {
   const f = meta.fieldDataToMap(lead.field_data);
   // field_map por-tenant (externalizado); fallback ao DEFAULT (paridade c/ o hardcode).
   const cfg = (await meta.leadSourceFieldMap(tenantId, pageId)) || DEFAULT_FIELD_MAP;
-  const { name, phone, interest, body } = applyFieldMap(f, cfg);
+  const { name, phone, email, interest, body } = applyFieldMap(f, cfg);
 
   const msg = {
     channel: 'meta_lead_ads',
     externalId: phone || leadgenId,
     phone,
+    email,
     sender: name,
     body,
     skipTriage: true,
