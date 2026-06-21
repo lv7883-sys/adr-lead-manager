@@ -71,10 +71,15 @@ const mkLimiter = (limit, keyGenerator) => rateLimit({
 const webhookLimiter = mkLimiter(Number(process.env.RL_WEBHOOK || 100), tenantUrlKey(/\/webhook\/[^/]+\/([0-9a-f-]{36})/i));
 const tenantLimiter  = mkLimiter(Number(process.env.RL_TENANT  || 500), tenantUrlKey(/\/tenant\/([0-9a-f-]{36})/i));
 const adminLimiter   = mkLimiter(Number(process.env.RL_ADMIN   || 200), (req) => ipKeyGenerator(req.ip));
+// Onboarding Meta: por IP (o /start é autenticado; o callback é protegido pelo state HMAC).
+const onboardingLimiter = mkLimiter(Number(process.env.RL_ONBOARDING || 60), (req) => ipKeyGenerator(req.ip));
 
 // Webhook da Meta (Lead Ads / IG DM / Messenger) — fora do limiter keyed-por-tenant
 // (a URL /webhook/meta não tem tenant na path). Verificação + log por enquanto.
 app.use('/webhook', require('./routes/webhook-meta'));
+
+// Onboarding de Página do Facebook por-tenant (Item 2 do arco Meta).
+app.use('/onboarding', onboardingLimiter, require('./routes/onboarding-meta'));
 
 // Webhooks de provedores externos (Z-API / Evolution API).
 app.use('/webhook', webhookLimiter, webhookRouter);

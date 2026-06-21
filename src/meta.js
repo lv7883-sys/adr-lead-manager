@@ -8,7 +8,8 @@ const { pool, withTenant } = require('./db');
 const { decrypt } = require('./crypto');
 const logger = require('./logger');
 
-const GRAPH = 'https://graph.facebook.com/' + (process.env.META_GRAPH_VERSION || 'v21.0');
+// Versão confirmada contra a doc do Meta (v25.0, 2026-02-18). O env só sobrescreve.
+const GRAPH = 'https://graph.facebook.com/' + (process.env.META_GRAPH_VERSION || 'v25.0');
 
 // GET na Graph API com timeout. Lança em HTTP !ok (corpo de erro anexado).
 async function graphGet(path, params) {
