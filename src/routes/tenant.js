@@ -603,6 +603,7 @@ router.get(
             `SELECT l.id, l.name, l.phone, l.status, l.intent, l.temperatura_manual,
                     l.created_at, l.updated_at,
                     l.suggested_stage, l.stage_reasoning, l.stage_suggested_at,
+                    l.classification_reasoning AS reasoning,
                     q.instrument,
                     q.availability,
                     COALESCE(q.qualification_complete, false) AS qualification_complete,
@@ -713,6 +714,7 @@ router.get(
                     l.created_at, l.updated_at,
                     l.desfecho, l.desfecho_notas, l.desfecho_em, l.desfecho_source, l.desfecho_motivo,
                     l.suggested_stage, l.stage_reasoning, l.stage_suggested_at,
+                    l.classification_reasoning AS reasoning,
                     q.name AS qual_name, q.instrument, q.availability,
                     COALESCE(q.qualification_complete, false) AS qualification_complete,
                     q.reasked,
@@ -872,6 +874,8 @@ router.get(
           suggested_stage: l.suggested_stage || null,
           stage_reasoning: l.stage_reasoning || null,
           stage_suggested_at: l.stage_suggested_at || null,
+          // classification_reasoning ("por que é/não é lead") — distinto de stage_reasoning.
+          reasoning: l.reasoning || null,
           extracted: {
             name: l.qual_name,
             instrument: l.instrument,

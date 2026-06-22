@@ -974,7 +974,7 @@ async function computeKanban(tenantId, { period = '30d' } = {}) {
             WHERE tenant_id = $1 AND status = 'PENDING' GROUP BY 1
          )
          SELECT l.id, l.name, l.phone, l.status, l.intent, l.desfecho, l.desfecho_em, l.created_at, l.temperatura_manual,
-                l.suggested_stage, l.stage_reasoning,
+                l.suggested_stage, l.stage_reasoning, l.classification_reasoning AS reasoning,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
                 i.last_in, o.first_out, o.last_out, c.channel, COALESCE(d.n, 0) AS drafts
            FROM leads l
@@ -1015,6 +1015,8 @@ async function computeKanban(tenantId, { period = '30d' } = {}) {
         tempo_coluna_seg: Math.max(0, Math.round((agora - new Date(ref).getTime()) / 1000)),
         // ADR sugestão-de-etapa: chip "IA sugere → etapa" no card do kanban.
         suggested_stage: l.suggested_stage || null, stage_reasoning: l.stage_reasoning || null,
+        // classification_reasoning ("por que é/não é lead") — distinto de stage_reasoning.
+        reasoning: l.reasoning || null,
       });
     }
     // ordena: urgentes primeiro, depois mais recentes.
