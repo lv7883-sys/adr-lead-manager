@@ -93,6 +93,10 @@ app.use('/tenant', tenantLimiter, tenantRouter);
 // ADR-016 — arquivos de mídia recebidos (autenticado por tenant).
 app.use('/media', require('./routes/media'));
 
+// Surface A (ADR-022) — ingestão do evento canônico de progressão (serviço-a-serviço,
+// tenant resolvido via extranet_unit_map). Tenant-ignorante por design.
+app.use('/', require('./routes/eventos'));
+
 // Só sobe o listener quando executado diretamente (não nos testes que
 // importam o app).
 if (require.main === module) {
