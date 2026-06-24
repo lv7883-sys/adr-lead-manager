@@ -21,13 +21,24 @@ const AUTO_THRESHOLD = 0.85;
 const REVIEW_THRESHOLD = 0.40;
 
 // Few-shot dinâmico: últimas correções da recepção pra calibrar o classificador.
+// BALANCEADO por rótulo (Frente 2): a base é fortemente negativa (ex.: 105 not_lead
+// vs 7 lead em Valinhos). Pegar "os 10 mais recentes" cru espreme os exemplos
+// POSITIVOS pra fora — o gate aprende só "não é lead" e passa a rebaixar lead óbvio.
+// Buscamos os N mais recentes de CADA rótulo (o _fewShot do gemini já corta em 5+5),
+// garantindo que o exemplo positivo apareça sempre que existir.
+const FEWSHOT_PER_LABEL = 5;
 async function _fewShotExamples(tenantId) {
   try {
     const res = await withTenant(tenantId, (c) => c.query(
-      `SELECT correct_label, original_reasoning, correction_context, corrected_temperature
-         FROM classification_feedback WHERE tenant_id = $1
-        ORDER BY feedback_at DESC LIMIT 10`,
-      [tenantId]
+      `(SELECT correct_label, original_reasoning, correction_context, corrected_temperature, feedback_at
+          FROM classification_feedback WHERE tenant_id = $1 AND correct_label = 'lead'
+         ORDER BY feedback_at DESC LIMIT $2)
+       UNION ALL
+       (SELECT correct_label, original_reasoning, correction_context, corrected_temperature, feedback_at
+          FROM classification_feedback WHERE tenant_id = $1 AND correct_label = 'not_lead'
+         ORDER BY feedback_at DESC LIMIT $2)
+       ORDER BY feedback_at DESC`,
+      [tenantId, FEWSHOT_PER_LABEL]
     ));
     return res.rows.map((r) => ({
       label: r.correct_label, reasoning: r.original_reasoning,
@@ -327,6 +338,273 @@ async function _classifyConversaRetry(classifyConversa, args) {
   throw last;
 }
 
+// ============================================================================
+// RESILIÊNCIA A 503/timeout NO PORTÃO 1 (contato novo) — buffer "aguardando
+// classificação". Causa confirmada (Gabriel/Osvaldo): a falha de IA no Portão 1
+// (single-message, SEM retry nem rede) engolia a mensagem-chave. Aqui o contato
+// novo ganha a MESMA resiliência da conversa estabelecida: retry imediato →
+// buffer visível e reprocessável pela CONVERSA INTEIRA → Revisar+alerta no
+// esgotamento. NUNCA reclassifica single-message (foi o thread completo que
+// classificou o Osvaldo certo; single-message recriaria o erro do Gabriel).
+// ============================================================================
+const PENDING_CLASSIFICATION_WINDOW_MS = 15 * 60 * 1000;   // janela do buffer (decisão: 15min)
+
+// Erro TRANSITÓRIO de IA (vale retry/buffer): 503/429/5xx, "high demand"/overloaded,
+// timeout e falhas de rede. Erro de CONTRATO (JSON malformado etc.) NÃO entra — não
+// adianta reprocessar a mesma falha determinística; segue o caminho antigo (captura).
+function _isTransientAIError(err) {
+  return /\b(429|500|502|503|504)\b|service unavailable|high demand|overloaded|unavailable|timeout|timed out|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up|network/i.test(
+    String(err?.message || err || '')
+  );
+}
+
+// Retry imediato com backoff p/ o Portão 1 single-message (espelha _classifyConversaRetry).
+// Resolve o spike curto (maioria dos 503). Só re-tenta erro transitório; o resto sobe na hora.
+async function _classifyRetry(classify, args) {
+  let last;
+  for (let i = 0; i < 3; i += 1) {
+    try { return await classify(args); }
+    catch (e) {
+      last = e;
+      if (!_isTransientAIError(e)) throw e;
+      await new Promise((s) => setTimeout(s, 800 * (i + 1)));
+    }
+  }
+  throw last;
+}
+
+// Janela de 15min esgotada? (since nulo → trata como esgotada: vai pra Revisar.)
+function _pendingWindowExpired(since) {
+  if (!since) return true;
+  return Date.now() - new Date(since).getTime() >= PENDING_CLASSIFICATION_WINDOW_MS;
+}
+
+// Lead deste contato que está no buffer "aguardando classificação" (por dígitos).
+async function _loadPendingState(tenantId, ident) {
+  if (!ident) return null;
+  try {
+    const r = await withTenant(tenantId, (c) => c.query(
+      `SELECT id, classification_pending_since FROM leads
+        WHERE tenant_id = $1 AND status = 'PENDING_CLASSIFICATION'
+          AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+        LIMIT 1`,
+      [tenantId, ident]
+    ));
+    return r.rows[0] ? { leadId: r.rows[0].id, pendingSince: r.rows[0].classification_pending_since } : null;
+  } catch { return null; }
+}
+
+// Coloca/mantém o lead no buffer "aguardando classificação" (status VISÍVEL, não
+// NOT_LEAD nem limbo) e captura conversa+mensagem (mesmo padrão de captureForReview).
+// GUARDA a decisão humana (review_result/desfecho) e NÃO rebaixa lead ATIVO do funil:
+// só entra/permanece a partir de estados automáticos. pending_since só na 1ª vez
+// (COALESCE) — a janela de 15min conta do PRIMEIRO erro, não de cada retentativa.
+async function captureForPendingClassification(tenantId, channel, externalId, msg, rawBody, errMessage) {
+  if (!externalId || !msg.body) return null;
+  const psid = msg.psid || null;
+  const phone = psid ? null : externalId;
+  const guard =
+    `leads.review_result IS NULL AND leads.desfecho IS NULL
+     AND leads.status IN ('NEW','NOT_LEAD','REVIEW_QUEUE','PENDING_CLASSIFICATION')`;
+  // Em conflito ($4 = errMessage nas duas variantes): transiciona pra PENDING só sob a
+  // guarda; senão preserva o status atual (não rebaixa funil/decisão humana).
+  const onConflictSet =
+    `status = CASE WHEN ${guard} THEN 'PENDING_CLASSIFICATION' ELSE leads.status END,
+     classification_pending_since = CASE WHEN ${guard}
+        THEN COALESCE(leads.classification_pending_since, now()) ELSE leads.classification_pending_since END,
+     classification_attempts = leads.classification_attempts + 1,
+     classification_last_error = $4,
+     updated_at = now()`;
+  try {
+    return await withTenant(tenantId, async (c) => {
+      let lead;
+      if (psid) {
+        lead = await c.query(
+          `INSERT INTO leads (tenant_id, name, status, meta_psid,
+                              classification_pending_since, classification_attempts, classification_last_error)
+           VALUES ($1, $2, 'PENDING_CLASSIFICATION', $3, now(), 1, $4)
+           ON CONFLICT (tenant_id, meta_psid) WHERE meta_psid IS NOT NULL
+           DO UPDATE SET ${onConflictSet}
+           RETURNING id`,
+          [tenantId, msg.sender || externalId, externalId, errMessage || null]
+        );
+      } else {
+        lead = await c.query(
+          `INSERT INTO leads (tenant_id, name, phone, status,
+                              classification_pending_since, classification_attempts, classification_last_error)
+           VALUES ($1, $2, $3, 'PENDING_CLASSIFICATION', now(), 1, $4)
+           ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
+           DO UPDATE SET ${onConflictSet}
+           RETURNING id`,
+          [tenantId, msg.sender || phone, phone, errMessage || null]
+        );
+      }
+      const conv = (
+        await c.query(
+          `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
+           ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
+           RETURNING id`,
+          [tenantId, channel, externalId]
+        )
+      ).rows[0];
+      await c.query(
+        `INSERT INTO messages
+           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw,
+            media_url, media_type, media_filename, media_transcription)
+         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (tenant_id, external_message_id)
+           WHERE external_message_id IS NOT NULL DO NOTHING`,
+        [tenantId, conv.id, msg.externalMessageId, msg.sender, msg.body, rawBody, ..._mediaCols(msg)]
+      );
+      return lead.rows[0].id;
+    });
+  } catch (e) {
+    logger.warn('gate1.capture_pending_failed', { tenant_id: tenantId, error: e.message });
+    return null;
+  }
+}
+
+// Decisão de roteamento a partir do resultado do classifyConversa (conversa inteira).
+// PURA (não toca DB). Retorna { cls } (cai no funil/Portão 2, com rascunho) ou { route }
+// (roteia pra fora do funil). Compartilhada pelo caminho VIVO (conversa estabelecida) e
+// pela RECLASSIFICAÇÃO do buffer (job/evento) — uma única lógica, provada pelo Osvaldo.
+function _decideConversaRoute(r, isRelationship) {
+  const estado = { conversation_state: r.conversation_state, state_reasoning: r.state_reasoning };
+  const sugEtapa = r.is_lead ? r.suggested_stage : null;
+  const sugMotivo = r.is_lead ? r.stage_reasoning : null;
+  if (r.intent === 'NOVA_OPORTUNIDADE') {
+    if (isRelationship) {
+      // contato de relacionamento NUNCA auto-funil: oportunidade aparente → confirmação humana.
+      return { route: { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'RELACIONAMENTO_OPORTUNIDADE',
+        reasoning: '[vivo] contato de relacionamento com sinal de oportunidade — Revisar', confidence: r.confidence, ...estado } };
+    }
+    if (r.conversation_state === 'RESOLVIDO' || r.conversation_state === 'AGUARDANDO_CLIENTE') {
+      // RESOLVIDO/AGUARDANDO_CLIENTE não precisam de resposta agora: funil SEM rascunho.
+      return { route: { status: 'QUALIFYING', reviewQueue: false, intent: r.intent,
+        reasoning: `[vivo] ${r.reasoning || (r.conversation_state === 'RESOLVIDO' ? 'oportunidade resolvida' : 'aguardando cliente')}`,
+        confidence: r.confidence, suggested_stage: sugEtapa, stage_reasoning: sugMotivo, ...estado } };
+    }
+    // funil: cai no Portão 2 (auto-promove + rascunho).
+    return { cls: { confidence: r.confidence, reasoning: `[vivo] ${r.reasoning || 'nova oportunidade'}`,
+      profile_signals: [r.intent], is_lead: true, suggested_stage: sugEtapa, stage_reasoning: sugMotivo, ...estado } };
+  }
+  if (r.intent === 'ROTINA_CLIENTE' || r.intent === 'INTERNO') {
+    // não-lead CLARO → não-classificadas (rede reviewável).
+    return { route: { status: 'NOT_LEAD', reviewQueue: true, intent: r.intent,
+      reasoning: `[vivo] ${r.reasoning || r.intent}`, confidence: r.confidence, ...estado } };
+  }
+  // INDEFINIDO → Revisar.
+  return { route: { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'INDEFINIDO',
+    reasoning: `[vivo] ${r.reasoning || 'indefinido'}`, confidence: r.confidence, ...estado } };
+}
+
+// Resolve um lead que está no buffer para o status decidido (funil/NOT_LEAD/Revisar),
+// limpando o buffer. Guarda a decisão humana e SÓ age sobre lead ainda PENDING
+// (idempotente vs. o caminho por evento). Retorna true se efetivou. NÃO insere
+// mensagem (o job não tem mensagem nova — só reclassifica o thread acumulado).
+async function _resolvePendingTo(tenantId, leadId, route) {
+  try {
+    const r = await withTenant(tenantId, (c) => c.query(
+      `UPDATE leads SET
+         status = CASE WHEN review_result IS NULL AND desfecho IS NULL THEN $2 ELSE status END,
+         review_queue = CASE WHEN review_result IS NULL AND desfecho IS NULL THEN $3 ELSE review_queue END,
+         classification_confidence = $4,
+         classification_reasoning = $5,
+         classification_signals = $6,
+         conversation_state = COALESCE($7, conversation_state),
+         state_reasoning = COALESCE($8, state_reasoning),
+         state_computed_at = CASE WHEN $7 IS NOT NULL THEN now() ELSE state_computed_at END,
+         classification_pending_since = NULL,
+         classification_attempts = 0,
+         classification_last_error = NULL,
+         updated_at = now()
+       WHERE id = $1 AND status = 'PENDING_CLASSIFICATION'
+       RETURNING id`,
+      [leadId, route.status, route.reviewQueue, route.confidence,
+       route.reasoning, JSON.stringify([route.intent].filter(Boolean)),
+       route.conversation_state || null, route.state_reasoning || null]
+    ));
+    return r.rowCount > 0;
+  } catch (e) {
+    logger.warn('pending.resolve_failed', { tenant_id: tenantId, lead_id: leadId, error: e.message });
+    return false;
+  }
+}
+
+// Reprocessa UM lead do buffer pela CONVERSA INTEIRA (gatilho por TEMPO, via job).
+// O gatilho por EVENTO (nova mensagem) é tratado no processInbound (bloco da conversa
+// estabelecida, que o pendingState passa a alcançar). Sucesso → resolve. Falha dentro
+// da janela → permanece (silencioso). Falha com janela esgotada → Revisar + ALERTA ativo.
+async function reprocessPendingLead(tenant, leadRow, deps = {}) {
+  const classifyConversa = deps.classifyConversa || gemini.classifyConversa;
+  const notificar = deps.notificar || notificacao.notificarRecepcao;
+  const tenantId = tenant.id;
+  const ident = String(leadRow.phone || leadRow.meta_psid || '').replace(/\D/g, '');
+  const log = logger.child({ tenant_id: tenantId, lead_id: leadRow.id, fn: 'reprocessPendingLead' });
+
+  // Conversa inteira acumulada (o que classificou o Osvaldo certo) — SEM mensagem isolada.
+  let conversation = [];
+  try {
+    const conv = await withTenant(tenantId, (c) => c.query(
+      `SELECT id FROM conversations WHERE tenant_id = $1
+         AND regexp_replace(external_id, '[^0-9]', '', 'g') = $2
+       ORDER BY updated_at DESC LIMIT 1`,
+      [tenantId, ident]
+    ).then((rr) => rr.rows[0]));
+    if (conv) conversation = await loadRealHistory(tenantId, { conversationId: conv.id, ident, leadId: leadRow.id });
+  } catch (e) {
+    log.warn('pending.history_error', { error: e.message });
+  }
+
+  const examples = await _fewShotExamples(tenantId);
+  const { leadDefinition, stageDefinitions } = await _classifierConfig(tenantId);
+  const isRelationship = await _isRelationshipContact(ident);
+
+  let decision;
+  try {
+    const r = await _classifyConversaRetry(classifyConversa, {
+      conversation, examples, stageDefinitions, leadDefinition, tenant: tenantId,
+    });
+    log.info('pending.classified', { intent: r.intent, is_lead: r.is_lead, state: r.conversation_state });
+    decision = _decideConversaRoute(r, isRelationship);
+  } catch (err) {
+    if (!_pendingWindowExpired(leadRow.classification_pending_since)) {
+      // ainda dentro da janela: registra a tentativa e permanece no buffer (silencioso).
+      await withTenant(tenantId, (c) => c.query(
+        `UPDATE leads SET classification_attempts = classification_attempts + 1,
+                          classification_last_error = $2, updated_at = now()
+          WHERE id = $1 AND status = 'PENDING_CLASSIFICATION'`,
+        [leadRow.id, err.message]
+      )).catch(() => {});
+      log.info('pending.retained', { error: err.message });
+      return { status: 'retained' };
+    }
+    // janela de 15min esgotada → Revisar + alerta ATIVO (classificação automática indisponível).
+    const moved = await _resolvePendingTo(tenantId, leadRow.id, {
+      status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'ERRO',
+      reasoning: '[buffer] classificação automática indisponível (15min) — enviado para Revisar', confidence: null,
+    });
+    if (moved) await notificar(tenantId, 'classificacao_indisponivel', { leadId: leadRow.id });
+    log.warn('pending.expired_to_review', { error: err.message });
+    return { status: 'expired_to_review' };
+  }
+
+  // Sucesso → materializa a decisão (sem rascunho; o draft sai no próximo inbound/fluxo vivo).
+  const route = decision.route || {
+    status: 'QUALIFYING', reviewQueue: false, intent: 'NOVA_OPORTUNIDADE',
+    reasoning: decision.cls.reasoning, confidence: decision.cls.confidence,
+    suggested_stage: decision.cls.suggested_stage, stage_reasoning: decision.cls.stage_reasoning,
+    conversation_state: decision.cls.conversation_state, state_reasoning: decision.cls.state_reasoning,
+  };
+  const moved = await _resolvePendingTo(tenantId, leadRow.id, route);
+  if (moved && route.status === 'QUALIFYING' && route.suggested_stage) {
+    await persistStageSuggestion(tenantId, leadRow.id, route.suggested_stage, route.stage_reasoning);
+  }
+  if (moved && route.status === 'REVIEW_QUEUE') await notificar(tenantId, 'revisao', { leadId: leadRow.id });
+  log.info('pending.resolved', { to: route.status });
+  return { status: 'resolved', to: route.status };
+}
+
 // ROTEAMENTO VIVO — captura a mensagem e roteia um lead de conversa ESTABELECIDA para
 // FORA do funil (NOT_LEAD = não-classificadas reviewável | REVIEW_QUEUE = Revisar), SEM
 // gerar resposta nem promover. Em lead já existente, só muda o status quando NÃO há
@@ -348,6 +626,9 @@ async function captureRoutedEstablished(tenantId, channel, externalId, msg, rawB
      conversation_state = EXCLUDED.conversation_state,
      state_reasoning = EXCLUDED.state_reasoning,
      state_computed_at = now(),
+     classification_pending_since = NULL,
+     classification_attempts = 0,
+     classification_last_error = NULL,
      updated_at = now()`;
   try {
     return await withTenant(tenantId, async (c) => {
@@ -506,6 +787,19 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
 
   let cls = null;
 
+  // ---- Buffer "aguardando classificação" (resiliência a 503 no Portão 1) ----
+  // Este contato já tem um lead no buffer (uma triagem anterior falhou por 503/timeout)?
+  // Se sim, a mensagem NOVA dispara reclassificação pela CONVERSA INTEIRA (o mesmo bloco
+  // da conversa estabelecida) — NUNCA o Portão 1 single-message, que recriaria o erro do
+  // Gabriel. Só consultamos quando NÃO é estabelecida (estabelecida já passa pelo bloco).
+  const identGate = String(phone || psid || '').replace(/\D/g, '');
+  const pendingState = (conversaEstabelecida || msg.skipTriage) ? null : await _loadPendingState(tenantId, identGate);
+  // Caminho de CONVERSA INTEIRA = estabelecida OU pendente. Quem passa por aqui NÃO
+  // pode cair no Portão 1 single-message depois.
+  const viaConversaBlock = conversaEstabelecida || !!pendingState;
+  // Sinaliza alerta ATIVO: só quando um lead do buffer estoura os 15min e vai pra Revisar.
+  let pendingWindowExpired = false;
+
   // ============================================================================
   // ROTEAMENTO VIVO em conversa ESTABELECIDA (substitui o auto-promote do skip).
   // Antes: established → pulava o Portão 1 e auto-promovia NEW→QUALIFYING. Agora o
@@ -514,7 +808,9 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   // → não-classificadas (rede reviewável, não inunda a Revisar); dúvida/erro/contato de
   // relacionamento → Revisar; nova oportunidade → funil. Staff já saiu no gate de internal_contacts.
   // ============================================================================
-  if (conversaEstabelecida && !msg.skipTriage) {
+  // Entra também quando há lead no buffer (pendingState): a reclassificação por EVENTO
+  // (nova mensagem) reusa exatamente este caminho — conversa INTEIRA, retry, decisão.
+  if (viaConversaBlock && !msg.skipTriage) {
     const identEstab = String(phone || psid || '').replace(/\D/g, '');
     // Monta a conversa: histórico real + a mensagem ATUAL (ainda não persistida).
     let conversation = [];
@@ -554,43 +850,26 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
         conversation, examples: examplesEstab, stageDefinitions: stageDefs, leadDefinition, tenant: tenantId,
       });
       log.info('gate1.estab.classified', { intent: r.intent, is_lead: r.is_lead, state: r.conversation_state, stage: r.suggested_stage });
-      const estado = { conversation_state: r.conversation_state, state_reasoning: r.state_reasoning };
-      // Sugestão de etapa: só carrega quando É lead (independente de intent/estado).
-      const sugEtapa = r.is_lead ? r.suggested_stage : null;
-      const sugMotivo = r.is_lead ? r.stage_reasoning : null;
-      if (r.intent === 'NOVA_OPORTUNIDADE') {
-        if (isRelationship) {
-          // contato de relacionamento NUNCA auto-funil: oportunidade aparente → confirmação humana.
-          route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'RELACIONAMENTO_OPORTUNIDADE',
-                    reasoning: '[vivo] contato de relacionamento com sinal de oportunidade — Revisar', confidence: r.confidence, ...estado };
-        } else if (r.conversation_state === 'RESOLVIDO' || r.conversation_state === 'AGUARDANDO_CLIENTE') {
-          // CONSUMIDOR 2 (estendido) — rascunho pendente só faz sentido pra AGUARDANDO_RECEPCAO
-          // (a bola está com a escola). RESOLVIDO (encerrou) e AGUARDANDO_CLIENTE (a escola já
-          // respondeu, espera o cliente) NÃO precisam de resposta agora: mantém no funil, SEM
-          // gerar rascunho "aguardando aprovação" (não infla a fila com conversa que não devemos).
-          route = { status: 'QUALIFYING', reviewQueue: false, intent: r.intent,
-                    reasoning: `[vivo] ${r.reasoning || (r.conversation_state === 'RESOLVIDO' ? 'oportunidade resolvida' : 'aguardando cliente')}`,
-                    confidence: r.confidence, suggested_stage: sugEtapa, stage_reasoning: sugMotivo, ...estado };
-        } else {
-          // funil: deixa cair no Portão 2 (auto-promove + rascunho). Registra a classificação + estado.
-          cls = { confidence: r.confidence, reasoning: `[vivo] ${r.reasoning || 'nova oportunidade'}`,
-                  profile_signals: [r.intent], is_lead: true,
-                  suggested_stage: sugEtapa, stage_reasoning: sugMotivo, ...estado };
-        }
-      } else if (r.intent === 'ROTINA_CLIENTE' || r.intent === 'INTERNO') {
-        // não-lead CLARO → não-classificadas (rede reviewável).
-        route = { status: 'NOT_LEAD', reviewQueue: true, intent: r.intent,
-                  reasoning: `[vivo] ${r.reasoning || r.intent}`, confidence: r.confidence, ...estado };
-      } else {
-        // INDEFINIDO → Revisar.
-        route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'INDEFINIDO',
-                  reasoning: `[vivo] ${r.reasoning || 'indefinido'}`, confidence: r.confidence, ...estado };
-      }
+      // Decisão única (compartilhada com a reclassificação do buffer): { cls } → funil
+      // (cai no Portão 2 com rascunho); { route } → roteia pra fora do funil.
+      const decision = _decideConversaRoute(r, isRelationship);
+      if (decision.cls) cls = decision.cls;
+      else route = decision.route;
     } catch (err) {
-      // falha/429 esgotado → Revisar (default seguro). Nunca quebra o ingest.
       log.warn('gate1.estab.classify_error', { error: err.message });
+      // Buffer de classificação (resiliência 503): se este contato está AGUARDANDO e a
+      // janela de 15min ainda NÃO estourou, mantém no buffer (silencioso) e sai — o
+      // reprocessamento (job/próxima mensagem) volta a tentar. NUNCA cai no Portão 1
+      // single-message (o erro do Gabriel). Janela estourada → Revisar + alerta ativo.
+      if (pendingState && !_pendingWindowExpired(pendingState.pendingSince)) {
+        await captureForPendingClassification(tenantId, channel, phone || psid, msg, rawBody, err.message);
+        log.info('gate1.pending.retained', { lead_id: pendingState.leadId });
+        return;
+      }
+      // estabelecida (default seguro) OU buffer com janela esgotada → Revisar.
       route = { status: 'REVIEW_QUEUE', reviewQueue: true, intent: 'ERRO',
                 reasoning: '[vivo] erro no classificador — enviado para Revisar', confidence: null };
+      pendingWindowExpired = !!pendingState;   // pendente + esgotou → alerta ATIVO abaixo
     }
 
     if (route) {
@@ -603,7 +882,9 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       }
       // Só Revisar notifica; não-classificadas segue silencioso (igual ao Portão 1).
       if (route.status === 'REVIEW_QUEUE' && routedLeadId) {
-        await notificar(tenantId, 'revisao', { leadId: routedLeadId });
+        // Buffer estourou os 15min → alerta ATIVO ("classificação indisponível"); senão,
+        // a notificação padrão de revisão.
+        await notificar(tenantId, pendingWindowExpired ? 'classificacao_indisponivel' : 'revisao', { leadId: routedLeadId });
       }
       return;
     }
@@ -613,14 +894,23 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   // ---------------- PORTÃO 1: classificador leve -------------------
   // skipTriage: um lead vindo de Lead Ads (leadgen) já É um lead por definição —
   // pula o classificador (não há mensagem conversacional pra triar).
-  // conversaEstabelecida (BUG2-2): recepção já respondeu → roteamento vivo acima.
-  if (!msg.skipTriage && !conversaEstabelecida) {
+  // viaConversaBlock: conversa estabelecida OU buffer pendente já foram tratados pela
+  // CONVERSA INTEIRA acima — não reclassificar single-message aqui.
+  if (!msg.skipTriage && !viaConversaBlock) {
     const examples = await _fewShotExamples(tenantId);   // few-shot dinâmico (PARTE 3)
     try {
-      cls = await classify({ message: msg.body, examples });
+      cls = await _classifyRetry(classify, { message: msg.body, examples });   // retry imediato (503 spike)
     } catch (err) {
-      log.error('gate1.error', { gate: 1, error: err.message });
-      await captureInboundOnly(tenantId, channel, phone || psid, msg, rawBody); // F: thread completo
+      // RESILIÊNCIA 503: falha TRANSITÓRIA esgotou o retry → NÃO joga no limbo. Entra no
+      // buffer "aguardando classificação" (visível, reprocessável pela conversa inteira via
+      // job/evento). Erro NÃO-transitório (ex.: contrato JSON) → captura o inbound como antes.
+      if (_isTransientAIError(err)) {
+        log.warn('gate1.pending.enqueued', { gate: 1, error: err.message });
+        await captureForPendingClassification(tenantId, channel, phone || psid, msg, rawBody, err.message);
+      } else {
+        log.error('gate1.error', { gate: 1, error: err.message });
+        await captureInboundOnly(tenantId, channel, phone || psid, msg, rawBody); // F: thread completo
+      }
       return; // não trava: webhook já retornou 200
     }
     log.info('gate1.classified', { gate: 1, is_lead: cls.is_lead, confidence: cls.confidence });
@@ -890,12 +1180,16 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     // BUG2(1) — resgate do latch: chegar ao Portão 2 = lead confirmado (confidence
     // >= 0.85, ou leadgen/conversa estabelecida). Promove também NOT_LEAD/REVIEW_QUEUE
     // que tinham sido travados por uma triagem anterior, e limpa a flag de revisão.
-    // review_result IS NULL preserva decisões HUMANAS explícitas (não ressuscita o que
-    // a recepção marcou como não-lead).
+    // PENDING_CLASSIFICATION: lead recuperado do buffer 503 também promove e SAI do buffer
+    // (limpa pending_since/attempts/last_error). review_result IS NULL preserva decisões
+    // HUMANAS explícitas (não ressuscita o que a recepção marcou como não-lead).
     await c.query(
-      `UPDATE leads SET status = 'QUALIFYING', review_queue = false, updated_at = now()
+      `UPDATE leads SET status = 'QUALIFYING', review_queue = false, updated_at = now(),
+                        classification_pending_since = NULL,
+                        classification_attempts = 0,
+                        classification_last_error = NULL
         WHERE id = $1
-          AND status IN ('NEW', 'NOT_LEAD', 'REVIEW_QUEUE')
+          AND status IN ('NEW', 'NOT_LEAD', 'REVIEW_QUEUE', 'PENDING_CLASSIFICATION')
           AND review_result IS NULL`,
       [ctx.leadId]
     );
@@ -1053,4 +1347,9 @@ async function generateDraftForLead(tenantId, leadId, deps = {}) {
   return { ok: true, approvalId: out.id };
 }
 
-module.exports = { processInbound, generateDraftForLead, mergeQualification, loadRealHistory, CONFIDENCE_THRESHOLD };
+module.exports = {
+  processInbound, generateDraftForLead, mergeQualification, loadRealHistory, reprocessPendingLead,
+  CONFIDENCE_THRESHOLD,
+  // Helpers puros expostos p/ teste (resiliência 503).
+  _isTransientAIError, _pendingWindowExpired, _decideConversaRoute, PENDING_CLASSIFICATION_WINDOW_MS,
+};

@@ -24,6 +24,11 @@ function _mensagem(tipo, dados, base) {
   if (tipo === 'revisao') {
     return `🔎 Mensagem para revisar — pode ser um lead. Acesse: ${b}/leads/revisar`;
   }
+  if (tipo === 'classificacao_indisponivel') {
+    // Buffer de resiliência 503 esgotou os 15min: a classificação automática ficou
+    // indisponível e o lead foi pra Revisar — recepção precisa olhar manualmente.
+    return `⚠️ Lead novo precisa de atenção: a classificação automática está indisponível no momento. Confira na fila de revisão: ${b}/leads/revisar`;
+  }
   if (tipo === 'automacao_alterada') {
     const quem = dados.byName || 'Alguém';
     const linhas = (dados.mudancas || []).map((m) => `${m.label}: ${m.de} → ${m.para}`).join('\n');

@@ -138,6 +138,16 @@ if (require.main === module) {
     { timezone: 'America/Sao_Paulo' }
   );
 
+  // Resiliência a 503 — reprocessa o buffer "aguardando classificação" a cada 2 min.
+  // Gatilho por TEMPO (o por EVENTO está no ingest). Reclassifica pela conversa inteira
+  // e, esgotada a janela de 15min, manda pra Revisar com alerta ativo.
+  const { runReprocessarPendentes } = require('./jobs/reprocessar-pendentes');
+  cron.schedule('*/2 * * * *', () => {
+    runReprocessarPendentes()
+      .then((s) => { if (s.total) logger.info('cron.reprocessar_pendentes.done', s); })
+      .catch((e) => logger.error('cron.reprocessar_pendentes.error', { error: e.message }));
+  });
+
   // Encerramento gracioso para deploys/rolling restarts.
   const shutdown = (signal) => {
     logger.info('server.shutdown', { signal });
