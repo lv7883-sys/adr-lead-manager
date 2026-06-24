@@ -136,7 +136,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       await c.query(
         `WITH base AS (
            SELECT l.id, l.name, l.status, l.intent, l.created_at, l.desfecho, l.desfecho_em, l.temperatura_manual,
-                  l.conversation_state,
+                  l.conversation_state, l.origem,
                   regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g') AS ident,
                   q.instrument, COALESCE(q.qualification_complete, false) AS qualif
              FROM leads l
@@ -168,7 +168,9 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
          SELECT b.id, b.name, b.status, b.intent, b.created_at, b.desfecho, b.desfecho_em, b.temperatura_manual,
                 b.instrument, b.qualif, b.conversation_state,
                 i.first_in, i.last_in, o.first_out, o.last_out, o.first_sender,
-                c.channel
+                -- FONTE estável: origem (first-touch, imutável) vence o canal da conversa
+                -- mais recente (que migra pra WhatsApp no 1º reply). Fallback p/ leads legados.
+                COALESCE(b.origem, c.channel) AS channel
            FROM base b
            LEFT JOIN inb  i ON i.ident = b.ident AND b.ident <> ''
            LEFT JOIN outb o ON o.ident = b.ident AND b.ident <> ''
@@ -235,7 +237,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
                   (array_agg(channel ORDER BY updated_at DESC))[1] AS channel
              FROM conversations WHERE tenant_id = $1 GROUP BY 1
          )
-         SELECT l.created_at, c.channel
+         SELECT l.created_at, COALESCE(l.origem, c.channel) AS channel
            FROM leads l
            LEFT JOIN chan c ON c.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
           WHERE l.created_at >= now() - interval '90 days'
@@ -972,7 +974,7 @@ async function computeKanban(tenantId, { period = '30d' } = {}) {
             WHERE tenant_id = $1 AND status = 'PENDING' GROUP BY 1
          )
          SELECT l.id, l.name, l.phone, l.status, l.intent, l.desfecho, l.desfecho_em, l.created_at, l.temperatura_manual,
-                l.suggested_stage, l.stage_reasoning,
+                l.suggested_stage, l.stage_reasoning, l.classification_reasoning AS reasoning,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
                 i.last_in, o.first_out, o.last_out, c.channel, COALESCE(d.n, 0) AS drafts
            FROM leads l
@@ -1013,6 +1015,8 @@ async function computeKanban(tenantId, { period = '30d' } = {}) {
         tempo_coluna_seg: Math.max(0, Math.round((agora - new Date(ref).getTime()) / 1000)),
         // ADR sugestão-de-etapa: chip "IA sugere → etapa" no card do kanban.
         suggested_stage: l.suggested_stage || null, stage_reasoning: l.stage_reasoning || null,
+        // classification_reasoning ("por que é/não é lead") — distinto de stage_reasoning.
+        reasoning: l.reasoning || null,
       });
     }
     // ordena: urgentes primeiro, depois mais recentes.

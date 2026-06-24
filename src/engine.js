@@ -3,6 +3,7 @@
 const { withTenant, pool } = require('./db');
 const logger = require('./logger');
 const { toE164 } = require('./validation');
+const telBR = require('./telefoneBR');
 const { resolveSystemPrompt } = require('./templates');
 const gemini = require('./gemini');
 const notifyModule = require('./notify');
@@ -424,7 +425,9 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   // original do WhatsApp (channel 'whatsapp', sem psid).
   const channel = msg.channel || 'whatsapp';
   const psid = msg.psid || null;
-  const phone = psid ? null : toE164(msg.phone || msg.externalId);
+  // Escrita BR-aware (garante DDI 55) — o envio via Evolution e o fallback de 9º dígito
+  // dependem do 55. Para número não-BR, comporta-se como o toE164 ingênuo.
+  const phone = psid ? null : telBR.toE164BR(msg.phone || msg.externalId);
   const log = logger.child({ tenant_id: tenantId, channel, phone, psid });
 
   // -------- GATING DE ASSINATURA (E9-05): antes de qualquer custo --------
@@ -468,9 +471,16 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     }
   }
   // ---- LGPD: lead que pediu opt-out NUNCA mais é processado/respondido ----
-  const optedOut = await withTenant(tenantId, (c) =>
-    c.query("SELECT 1 FROM leads WHERE tenant_id = $1 AND phone = $2 AND status = 'OPTED_OUT'", [tenantId, phone])
-  );
+  // Casa por DÍGITOS BR-aware (matchKeys): um OPTED_OUT gravado em formato antigo
+  // (pré-normalização) não pode escapar do bloqueio só por divergência de formato.
+  const optKeys = phone ? telBR.matchKeys(phone) : [];
+  const optedOut = optKeys.length ? await withTenant(tenantId, (c) =>
+    c.query(
+      `SELECT 1 FROM leads WHERE tenant_id = $1 AND status = 'OPTED_OUT'
+         AND regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') = ANY($2::text[])`,
+      [tenantId, optKeys]
+    )
+  ) : { rowCount: 0 };
   if (optedOut.rowCount > 0) {
     log.info('gate0.opted_out', { gate: 0 });
     return;
@@ -642,36 +652,86 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     //  - leadgen (Lead Ads): dedup por meta_leadgen_id (mantém/atualiza nome+telefone).
     //  - DM (Messenger/IG):  dedup por meta_psid (sem telefone).
     //  - WhatsApp:           dedup por phone (comportamento original).
+    // Lookup de lead pré-existente por TELEFONE (dígitos BR-aware). Faz formatos
+    // divergentes (com/sem 55, com/sem 9º dígito) convergirem no MESMO lead — sem
+    // depender só do índice exato uq_leads_tenant_phone.
+    const phoneKeys = phone ? telBR.matchKeys(phone) : [];
+    const findByPhone = async () => {
+      if (!phoneKeys.length) return null;
+      const r = await c.query(
+        `SELECT id, status, meta_leadgen_id FROM leads
+          WHERE tenant_id = $1
+            AND regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') = ANY($2::text[])
+          LIMIT 1`,
+        [tenantId, phoneKeys]
+      );
+      return r.rows[0] || null;
+    };
+
     let lead;
     if (msg.leadgenId) {
-      lead = await c.query(
-        `INSERT INTO leads (tenant_id, name, phone, status, meta_leadgen_id)
-         VALUES ($1, $2, $3, 'NEW', $4)
-         ON CONFLICT (tenant_id, meta_leadgen_id) WHERE meta_leadgen_id IS NOT NULL
-         DO UPDATE SET name = COALESCE(EXCLUDED.name, leads.name),
-                       phone = COALESCE(EXCLUDED.phone, leads.phone),
-                       updated_at = now()
-         RETURNING id, status, (xmax = 0) AS inserted`,
-        [tenantId, msg.sender || phone, phone, msg.leadgenId]
-      );
+      // CENÁRIO B (WhatsApp antes, Meta depois): se já existe lead por telefone, MERGE
+      // no existente — seta meta_leadgen_id se NULL, completa nome/email, registra o
+      // evento. origem fica a do first-touch (não atualiza). Sem duplicata, sem evento
+      // perdido, sem unique_violation no índice de phone (que o ON CONFLICT não cobre).
+      const existing = await findByPhone();
+      if (existing) {
+        await c.query(
+          `UPDATE leads SET meta_leadgen_id = COALESCE(meta_leadgen_id, $2),
+                            name  = COALESCE(name, $3),
+                            email = COALESCE(email, $4),
+                            updated_at = now()
+            WHERE id = $1`,
+          [existing.id, msg.leadgenId, msg.sender || phone, msg.email || null]
+        );
+        await c.query(
+          `INSERT INTO lead_eventos (tenant_id, lead_id, tipo, autor, conteudo)
+           VALUES ($1, $2, 'meta_form_recebido', 'meta', $3)`,
+          [tenantId, existing.id, 'Formulário Lead Ads recebido (vínculo por telefone)']
+        );
+        lead = { rows: [{ id: existing.id, status: existing.status, inserted: false }] };
+      } else {
+        // Não achou: cria com origem=meta_lead_ads (first-touch). ON CONFLICT cobre
+        // reentrega do MESMO leadgen (idempotência); origem fora do DO UPDATE = imutável.
+        lead = await c.query(
+          `INSERT INTO leads (tenant_id, name, phone, email, status, meta_leadgen_id, origem)
+           VALUES ($1, $2, $3, $4, 'NEW', $5, 'meta_lead_ads')
+           ON CONFLICT (tenant_id, meta_leadgen_id) WHERE meta_leadgen_id IS NOT NULL
+           DO UPDATE SET name = COALESCE(EXCLUDED.name, leads.name),
+                         phone = COALESCE(EXCLUDED.phone, leads.phone),
+                         email = COALESCE(EXCLUDED.email, leads.email),
+                         updated_at = now()
+           RETURNING id, status, (xmax = 0) AS inserted`,
+          [tenantId, msg.sender || phone, phone, msg.email || null, msg.leadgenId]
+        );
+      }
     } else if (psid) {
       lead = await c.query(
-        `INSERT INTO leads (tenant_id, name, status, meta_psid)
-         VALUES ($1, $2, 'NEW', $3)
+        `INSERT INTO leads (tenant_id, name, status, meta_psid, origem)
+         VALUES ($1, $2, 'NEW', $3, $4)
          ON CONFLICT (tenant_id, meta_psid) WHERE meta_psid IS NOT NULL
          DO UPDATE SET name = COALESCE(EXCLUDED.name, leads.name), updated_at = now()
          RETURNING id, status, (xmax = 0) AS inserted`,
-        [tenantId, msg.sender || psid, psid]
+        [tenantId, msg.sender || psid, psid, channel]
       );
     } else {
-      lead = await c.query(
-        `INSERT INTO leads (tenant_id, name, phone, status)
-         VALUES ($1, $2, $3, 'NEW')
-         ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
-         DO UPDATE SET updated_at = now()
-         RETURNING id, status, (xmax = 0) AS inserted`,
-        [tenantId, msg.sender || phone, phone]
-      );
+      // WhatsApp: BLINDAGEM contra duplicata na mudança de formato — pré-lookup por
+      // matchKeys casa um lead em formato ANTIGO (pré-normalização) quando o mesmo
+      // cliente volta já normalizado. ON CONFLICT(phone) fica de fallback (race/exato).
+      const existing = await findByPhone();
+      if (existing) {
+        await c.query('UPDATE leads SET updated_at = now() WHERE id = $1', [existing.id]);
+        lead = { rows: [{ id: existing.id, status: existing.status, inserted: false }] };
+      } else {
+        lead = await c.query(
+          `INSERT INTO leads (tenant_id, name, phone, status, origem)
+           VALUES ($1, $2, $3, 'NEW', 'whatsapp')
+           ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
+           DO UPDATE SET updated_at = now()
+           RETURNING id, status, (xmax = 0) AS inserted`,
+          [tenantId, msg.sender || phone, phone]
+        );
+      }
     }
 
     // Bloco 2 — grava o score/diagnóstico da classificação no lead do funil.
