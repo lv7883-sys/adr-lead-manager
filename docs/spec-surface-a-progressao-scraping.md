@@ -51,12 +51,16 @@
   bool). Tag de origem `walk_in` no enum/coluna de origem (distinta de canal).
 - Próximo número livre (≥ 044; 043 = lead-origem-dedup já em prod).
 
-### S7 — (investigação) onde a Extranet expõe a matrícula (M2)
-- Mapear a página/endpoint da Extranet com matrícula/contrato e os campos que casam
-  com o lead (telefone/nome/responsável) + um **id estável do registro** (→
-  `source_record_id`) e a **situação** (→ `situacao`). Confirmar raspagem read-only
-  dentro do budget/cooldown.
-- Repo: scheduler. Read-only. Guard `_assertValinhos` mantido.
+### S7 — ❌ MORTA (superseded pela decisão M0, ADR §3.2)
+A matrícula **não será raspada da Extranet**. Substituída pelo **adapter de matrícula
+que lê o Postgres do ADR-BI em READ-ONLY** (serviço no Coolify), emitindo
+`matricula_confirmada`. Não há mais investigação de página/scraping de matrícula.
+- **Detecção por watermark/diff, NUNCA `User.createdAt`** (re-import do legado reescreve
+  `createdAt` → matrícula em massa). `source_record_id` = id estável do registro no BI;
+  `situacao` = estado do contrato/matrícula.
+- Fonte-legado temporária atrás do adapter; morre na absorção do legado (cross-ref
+  **ADR-023**). O consumidor (S5) **não muda** — evento canônico agnóstico de fonte.
+- Repo: serviço novo (BI-reader). Read-only no Postgres do BI; **não toca a Extranet**.
 
 ### S8 — (investigação) marcador de origem/campanha na Extranet
 - Catalogar **tela + seletor + formato** do módulo de captação/leads da Extranet (se
@@ -64,10 +68,12 @@
   experimental e **não** é raspado hoje. **Não bloqueia a progressão** (match é por
   telefone/nome); destrava apenas a dedupe Meta↔Extranet pelo lado da Extranet.
 
-### S4 — adapter Extranet → evento canônico (scheduler)
-- A cada ciclo, difere o estado atual contra o anterior e **emite evento canônico**:
-  - experimental nova (aluno/responsável resolvido) → `experimental_realizada`.
-  - matrícula nova (M2, via S7) → `matricula_confirmada`.
+### S4 — adapters → evento canônico (produtores)
+- **Experimental (scheduler/Extranet):** a cada ciclo, difere o estado atual contra o
+  anterior e emite `experimental_realizada` (aluno/responsável resolvido).
+- **Matrícula (BI-reader, M0):** serviço no Coolify lê o Postgres do ADR-BI em
+  read-only, detecta novas matrículas por **watermark/diff (NUNCA `createdAt`)** e emite
+  `matricula_confirmada`. Não toca a Extranet. (Ver S7, agora morta.)
 - POST ao LM (Bearer `SERVICE_TOKEN`) com: `id_unidade_extranet`, `source_adapter`
   (`'extranet'`), `source_record_id` (aula_id / id matrícula), `situacao`,
   `student_name`/`responsavel`, telefone (se S1), data/hora, `evento_hash`.

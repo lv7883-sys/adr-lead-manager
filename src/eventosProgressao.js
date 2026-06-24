@@ -17,6 +17,8 @@
 // }
 // ============================================================================
 
+const telBR = require('./telefoneBR'); // ÚNICA fonte de verdade de telefone (043)
+
 const TIPOS = ['experimental_realizada', 'matricula_confirmada'];
 
 // Rank das etapas — avanço é SÓ "para frente" (não regride, não dupla-progride).
@@ -28,18 +30,20 @@ function normName(s) {
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 }
-function digits(s) { return String(s || '').replace(/\D/g, ''); }
 
-// Matcher ESCOPADO POR tenant (explícito) e AGNÓSTICO DE CHAVE: telefone exato
+// Matcher ESCOPADO POR tenant (explícito) e AGNÓSTICO DE CHAVE: telefone canônico
 // quando o evento traz → senão nome do aluno + janela temporal → senão sem-match.
 async function _match(c, tenantId, { telefone, studentName }) {
   const rows = (await c.query(
     `SELECT id, name, student_name, phone, status, auto_progress_locked, created_at
        FROM leads WHERE tenant_id = $1`, [tenantId])).rows;
 
-  const tel = digits(telefone).slice(-8);
-  if (tel.length >= 8) {
-    const hits = rows.filter((r) => digits(r.phone).slice(-8) === tel);
+  // 1) Telefone — canonicalização BR-aware via telefoneBR (única fonte de verdade):
+  //    casa AMBOS os lados por chaves canônicas (resolve 9º dígito, DDD, +55 e o
+  //    casamento Meta↔WhatsApp). Sem normalização caseira/últimos-8.
+  const evKeys = new Set(telBR.matchKeys(telefone));
+  if (evKeys.size) {
+    const hits = rows.filter((r) => telBR.matchKeys(r.phone).some((k) => evKeys.has(k)));
     if (hits.length === 1) return { lead: hits[0], how: 'phone' };
     if (hits.length > 1) return { ambiguous: true, how: 'phone' };
   }
@@ -77,10 +81,24 @@ async function _nota(c, tenantId, leadId, texto) {
      VALUES ($1, $2, 'nota', 'system', $3)`, [tenantId, leadId, texto]);
 }
 
+// ENRIQUECE um lead sem telefone com o telefone canônico do evento (NÃO sobrescreve
+// telefone já existente). É o que evita o walk-in duplicado entre adapters: o walk-in
+// criado pelo experimental (só nome) ganha o telefone quando a matrícula chega depois.
+async function _enriquecerTelefone(c, leadId, telefone) {
+  const phone = telBR.toE164BR(telefone);
+  if (!phone) return;
+  await c.query(
+    `UPDATE leads SET phone = $2, updated_at = now()
+      WHERE id = $1 AND (phone IS NULL OR phone = '')`, [leadId, phone]);
+}
+
 async function _criarWalkIn(c, tenantId, { studentName, telefone, tipo }) {
   const status = tipo === 'matricula_confirmada' ? 'CONVERTED' : 'EXPERIMENTAL_AGENDADA';
   const desfecho = tipo === 'matricula_confirmada' ? 'matriculado' : null;
-  const phone = digits(telefone) || null;
+  // CONSISTÊNCIA CRÍTICA: grava o telefone NO MESMO formato canônico (telefoneBR.toE164BR)
+  // que o matcher usa pra comparar. Se gravasse cru, o ON CONFLICT (tenant, phone) não
+  // bateria com o lookup canônico → dedupe falharia em silêncio.
+  const phone = telBR.toE164BR(telefone); // null se sem dígito
   // Dedupe por (tenant, phone) quando há telefone; sem telefone, insere direto.
   const r = await c.query(
     `INSERT INTO leads (tenant_id, name, student_name, phone, status, desfecho, desfecho_em, origem, progressao_source, progressao_adapter)
@@ -136,6 +154,10 @@ async function processarEvento(c, { tenantId, evento }) {
     resultado = 'review';
   } else if (m.lead) {
     leadId = m.lead.id;
+    // Enriquecimento: casou um lead SEM telefone (tipicamente walk-in criado pelo
+    // experimental só com nome) e o evento trouxe telefone → completa o cadastro NO
+    // PRÓPRIO registro, em vez de criar um segundo. (ADR-022 — walk-in entre adapters.)
+    if (ev.telefone && !m.lead.phone) await _enriquecerTelefone(c, leadId, ev.telefone);
     const aiRoutedTo = m.lead.status || null;   // snapshot do que a IA decidira (recall não-circular)
     const curRank = RANK[m.lead.status] ?? 0;
 
@@ -180,4 +202,4 @@ async function processarEvento(c, { tenantId, evento }) {
   return { status: 'ok', resultado, lead_id: leadId, match: m.how || (m.ambiguous ? 'ambiguous' : 'none'), alerta };
 }
 
-module.exports = { processarEvento, normName, digits, TIPOS };
+module.exports = { processarEvento, normName, TIPOS };

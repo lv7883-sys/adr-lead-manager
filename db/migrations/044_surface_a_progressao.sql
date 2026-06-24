@@ -37,8 +37,19 @@ CREATE TABLE IF NOT EXISTS lead_manager.progressao_event_ledger (
     resultado        text,                       -- advanced|concluded|walk_in|walk_in_concluded|review|locked_skip
     created_at       timestamptz NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS progressao_ledger_uq
-    ON lead_manager.progressao_event_ledger (tenant_id, source_adapter, source_record_id, situacao);
+-- Idempotência como UNIQUE CONSTRAINT (não só índice): a chave (tenant, adapter,
+-- registro, situação) é garantida no banco — reprocessar o mesmo evento não duplica
+-- nem re-progride. Idempotente e auto-migra um índice homônimo pré-existente.
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'progressao_ledger_uq'
+    ) THEN
+        DROP INDEX IF EXISTS lead_manager.progressao_ledger_uq;
+        ALTER TABLE lead_manager.progressao_event_ledger
+            ADD CONSTRAINT progressao_ledger_uq
+            UNIQUE (tenant_id, source_adapter, source_record_id, situacao);
+    END IF;
+END $$;
 ALTER TABLE lead_manager.progressao_event_ledger ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lead_manager.progressao_event_ledger FORCE  ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation ON lead_manager.progressao_event_ledger;

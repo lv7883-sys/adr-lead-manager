@@ -88,16 +88,31 @@ e sem aluno na grade, busca `detalhar_aula.php?id=` e parseia
 > se `detalhar_aula.php` traz um campo de telefone não parseado (se sim, estender o
 > parser destrava o match por telefone, bem mais confiável). Ver spec, tarefa S1.
 
-### 3.2 Matrícula — ❌ NÃO raspável hoje → **decidido raspar (M2)**
+### 3.2 Matrícula — ✅ **decisão final (M0): ler o Postgres do ADR-BI (read-only)**
 A grade semanal só vê aula (experimental/cancelada/reposição). **Não há scraping de
-matrícula/cadastro hoje.**
+matrícula/cadastro** — e **não haverá**.
 
-**Decisão (§6.2): M2 — nova view read-only.** Raspar a tela de cadastro/matrículas da
-Extranet dá o **sinal direto e imediato** (sem o atraso de ~1 semana da inferência).
-Custo: exige um alvo de scraping novo, dentro das mesmas regras read-only/budget/
-cooldown. Pré-requisito: **investigar QUAL página/endpoint da Extranet expõe a
-matrícula** e que campos casam com o lead (telefone/nome) — tarefa S7 no spec.
-A inferência pela grade (ex-M1) fica como *fallback* opcional, não no caminho inicial.
+**Decisão M0 (supersede o ex-M2/scraping e mata a tarefa S7):** o adapter de matrícula
+**NÃO raspa a Extranet**. Ele lê, em **READ-ONLY**, o **Postgres do ADR-BI** (o BI já
+ingere contrato/matrícula a partir do legado), rodando como um serviço próprio no
+**Coolify**. Emite `matricula_confirmada` (mesmo evento canônico). Vantagens sobre o
+scraping: sinal estruturado e estável, sem nova superfície de scraping, sem custo de
+budget/cooldown na Extranet.
+
+- **Detecção por WATERMARK/DIFF, NUNCA por `User.createdAt`.** O adapter avança um
+  marcador (watermark) sobre um carimbo monotônico de mudança / faz diff do estado
+  anterior. Usar `createdAt` é **proibido**: um re-import do legado reescreve
+  `createdAt` de todos os registros → dispararia **matrícula em massa** (avanço/
+  conclusão de centenas de cards de uma vez). A idempotência por
+  `(tenant, adapter, source_record_id, situacao)` é a 2ª linha de defesa, mas a
+  **detecção** não pode depender de `createdAt`.
+- **Fonte-legado é TEMPORÁRIA, atrás do adapter.** Enquanto o BI ainda reflete o
+  legado, o adapter encapsula essa origem; quando a absorção do legado concluir, a
+  fonte morre **sem tocar o consumidor** (evento canônico agnóstico). Cross-ref
+  **ADR-023** (absorção do legado).
+
+A **experimental** segue pelo **scraper da Extranet** (caminho-legado de Valinhos, §3.1)
+— só a matrícula migra para o BI. A inferência de matrícula pela grade fica descartada.
 
 ---
 
@@ -140,9 +155,11 @@ Princípio: **falso match é pior que não-match**. Na dúvida, Revisar.
 
 1. **Canal de junção:** ✅ **(A) push por API** — o scraper faz POST num endpoint
    service-token do LM. Cross-schema preterido.
-2. **Matrícula:** ✅ **(M2) raspar tela nova** (read-only) — sinal direto, sem o
-   atraso da inferência. Pré-requisito: investigação S7 (qual página expõe a
-   matrícula). Inferência pela grade fica como fallback opcional.
+2. **Matrícula:** ✅ **(M0) ler o Postgres do ADR-BI (read-only), no Coolify** —
+   supersede o ex-M2/scraping e **mata a S7**. Detecção por **watermark/diff, NUNCA
+   `User.createdAt`** (re-import reescreve → matrícula em massa). Fonte-legado
+   temporária atrás do adapter, morre na absorção (cross-ref **ADR-023**). Detalhe
+   em §3.2.
 3. **Telefone na experimental:** ✅ **investigar (S1)** — parsear `detalhar_aula.php`
    atrás de telefone; se existir, destrava o match forte por telefone.
 4. **Conclusão automática:** ✅ **auto-concluir + alertar a recepção.** Ao detectar
