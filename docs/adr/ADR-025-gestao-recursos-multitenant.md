@@ -68,20 +68,48 @@ Todos os itens abaixo são **configuração por tenant**, semeados para Valinhos
 - catálogo de **salas** + suas **vocações**;
 - catálogo de **instrumentos**;
 - catálogo de **professores**;
-- **granularidade de slot** (Valinhos = **1 hora**);
+- **granularidade / representação de slot** (Valinhos = grade discreta de **1 hora** —
+  ver §2.3);
 - **dias de funcionamento** (Valinhos = **seg–sáb**);
 - **regra de compatibilidade sala↔instrumento** (ex.: "bateria só em estúdio").
 
 > **Valinhos = seed**, não default embutido. Outro tenant pode ter granularidade
 > de 30 min, funcionar dom–dom, e ter tipos de recurso diferentes.
 
-### 2.3 Três vínculos (os cruzamentos)
+### 2.3 Granularidade de slot é por-tenant — NUNCA 1h cravado
+
+**Decisão explícita** (levantada ao pensar em outras franquias e outras empresas):
+o **1 hora discreto é uma propriedade do tenant Valinhos e da fonte Extranet**, não
+do modelo canônico. Assumir 1h no schema/motor seria um erro arquitetural que
+travaria a multi-tenancy.
+
+- O modelo canônico trata a **duração/granularidade do slot como configuração do
+  tenant**, não constante. Outras unidades franqueadas podem usar 30 min, 45 min, 50
+  min; **outras empresas** (fora de academia de música) podem ter durações próprias.
+- Não assumir sequer que o slot é uma **grade fixa alinhada**. O modelo deve
+  comportar, no mínimo:
+  - **grade discreta** com passo configurável (Valinhos: passo 1h) — caso atual; **e**
+  - **intervalos contínuos** `[início, fim)` de **duração variável** por reserva
+    (alguns negócios marcam "das 14:10 às 15:40"), sem encaixar numa grade.
+- Consequência prática: representar disponibilidade/ocupação como **intervalos
+  temporais** (`início`/`fim`/`duração`) é o canônico; a **grade de 1h da Extranet é
+  só uma projeção** que o **adapter de scraping** produz a partir da fonte. O motor
+  de interseção (§3) opera sobre **sobreposição de intervalos**, não sobre "células
+  de 1h".
+- A **granularidade de apresentação** (de quanto em quanto a recepção vê/oferece
+  horários) também é config de tenant, e pode diferir da granularidade real da
+  reserva.
+
+> Regra de ouro: **nenhuma constante de duração de slot no código**. Tudo deriva da
+> config do tenant; Valinhos apenas a preenche com 1h.
+
+### 2.4 Três vínculos (os cruzamentos)
 O poder do modelo está em três relações de cruzamento:
 1. **professor ↔ instrumento** (quem leciona o quê);
 2. **sala ↔ instrumento** (onde cada instrumento pode ser tocado);
 3. **recurso ↔ disponibilidade** (quando cada recurso está livre).
 
-### 2.4 Distinção temporal crítica
+### 2.5 Distinção temporal crítica
 A disponibilidade **não é um único conceito**. Há três camadas, e a confusão
 entre elas é a principal fonte de erro:
 
@@ -114,7 +142,7 @@ naquele slot. **É exatamente a consulta que responde a pergunta da recepção.*
 
 - Entrada: instrumento, dia/data, faixa de horário.
 - Saída: pares viáveis (ou vazio, com o motivo — sem professor / sem sala).
-- Usa a fórmula temporal de §2.4 para resolver "livre" numa data concreta.
+- Usa a fórmula temporal de §2.5 para resolver "livre" numa data concreta.
 
 ---
 
@@ -219,6 +247,10 @@ implementação:
 1. **Modelagem exata das tabelas** — `recurso`, `slot`, `ocupação`, `exceção`,
    `vínculo` (professor↔instrumento, sala↔instrumento, recurso↔disponibilidade).
    Estrutura concreta, chaves, índices, RLS por tenant — tudo a definir.
+   **Decidir a representação temporal canônica** que honre §2.3: intervalo
+   `[início, fim)` de duração variável vs. grade discreta com passo por-tenant
+   (ou ambos), de forma que o motor opere por **sobreposição de intervalos** sem
+   nenhuma constante de 1h.
 2. **Scraping vs. grade recorrente × datas** — investigar como o adapter de
    scraping lida com **grade recorrente** vs. **datas concretas**. A Extranet tem
    uma visão **"Agenda por dia/mês"**: descobrir se ela dá **datas reais**
@@ -241,6 +273,6 @@ implementação:
   (só consulta). Gestão ganha visão de ociosidade/saturação para decisão de
   investimento (tier de consultoria).
 - **Custos / riscos:** scraping é **frágil** (depende do HTML da Extranet) e
-  **read-only obrigatório**; a distinção temporal (§2.4) é sutil e fácil de errar;
+  **read-only obrigatório**; a distinção temporal (§2.5) é sutil e fácil de errar;
   escrita autônoma só é segura no Momento 1. A flexibilidade do modelo (atributos
   por tipo, vínculos) tem custo de modelagem — daí estar em **pendência** (§8.1).
