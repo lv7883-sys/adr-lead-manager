@@ -334,11 +334,24 @@ implementação:
 
   O catálogo é o **CONTRATO** entre o configurador e o futuro **motor de
   agendamento**: o motor (**ADR-008**) **LÊ** este catálogo e **ESCREVE** ocupação.
-  `resource_source_binding` é a conexão por tenant e é a **projeção, no domínio de
-  recursos, do painel de Conexões/Integrações** já previsto (Meta/WhatsApp/Conta
-  Azul/banco) — **não uma ilha**. A **unificação física** com uma
-  `tenant_connection` única fica **DEFERIDA** para quando o painel de Conexões for
-  construído (§8.4); o **conceito está travado agora**.
+
+  **Proveniência é uma propriedade POR INFORMAÇÃO, controlada por um TOGGLE — não
+  "interno OU externo cravado por tabela isolada".** Cada informação do catálogo
+  carrega o toggle **"esta informação vem de fonte externa?"**:
+  - **LIGADO:** os campos de **configuração da fonte externa** (qual conexão, quais
+    credenciais, quais parâmetros) ficam **ativos** para preenchimento e ativação; a
+    informação passa a ser **espelho** da fonte.
+  - **DESLIGADO:** a informação é **interna do Regente** (fonte da verdade nativa,
+    editável na UI).
+
+  Esse toggle é a **forma granular do painel de Conexões/Integrações canônico**
+  (Meta/WhatsApp/Conta Azul/banco): o **binding externo só se materializa quando o
+  toggle está ligado**. Isto **substitui a noção anterior** de
+  `resource_source_binding` como **tabela-ilha** / tela separada: o binding
+  **continua existindo como dado** (consequência do toggle), mas **não** é uma
+  configuração à parte — é a projeção, no domínio de recursos, do painel de Conexões.
+  A **unificação física** com uma `tenant_connection` única segue **DEFERIDA** para
+  quando o painel de Conexões for construído (§8.4); o **conceito está travado agora**.
 
 ### E.2 Modelo de tabelas (schema `resources` — prosa, não DDL)
 
@@ -386,6 +399,15 @@ implementação:
   **não faz isso** (valida **UM** par, não **varre** o espaço).
 - `resource` **reconcilia** com **Provider/Asset (ADR-007)** por `external_ref` no
   **M2**.
+
+> ⚠️ **Aviso de nomenclatura — `OccupationSource` NÃO é tabela.**
+> `OccupationSource` é um **contrato de código** (abstração interna de **como a
+> aplicação lê ocupação**, agnóstica de fonte), **não** uma tabela nem uma entidade
+> de banco. **NÃO criar tabela `occupation_source` na migration.** A ocupação **é
+> persistida** em `occupation_snapshot` (M0 — alimentada por scraping/API/fonte
+> interna) e, no **M2**, em `service_booking` (ADR-008). O **dashboard** e as
+> **consultas leem dessas TABELAS**. `OccupationSource` é só a **regra interna** que
+> faz o código **não se importar de qual das duas** a resposta veio.
 
 ### E.4 Fórmula de disponibilidade
 
