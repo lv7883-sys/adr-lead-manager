@@ -241,27 +241,29 @@ tarde?"). A IA:
 
 ## 8. Pendências (abertas — NÃO decididas aqui)
 
+> **Nota:** a modelagem de tabelas e a proveniência do catálogo (antes itens 1 e 2
+> desta lista) foram **resolvidas pela Emenda** ao final deste ADR. As pendências
+> abaixo são as que **permanecem abertas**.
+
 Marcadas explicitamente como **abertas**; serão resolvidas nas fatias de
 implementação:
 
-1. **Modelagem exata das tabelas** — `recurso`, `slot`, `ocupação`, `exceção`,
-   `vínculo` (professor↔instrumento, sala↔instrumento, recurso↔disponibilidade).
-   Estrutura concreta, chaves, índices, RLS por tenant — tudo a definir.
-   **Decidir a representação temporal canônica** que honre §2.3: intervalo
-   `[início, fim)` de duração variável vs. grade discreta com passo por-tenant
-   (ou ambos), de forma que o motor opere por **sobreposição de intervalos** sem
-   nenhuma constante de 1h.
-2. **Scraping vs. grade recorrente × datas** — investigar como o adapter de
-   scraping lida com **grade recorrente** vs. **datas concretas**. A Extranet tem
-   uma visão **"Agenda por dia/mês"**: descobrir se ela dá **datas reais**
-   (ocupações/exceções pontuais) **além do padrão recorrente**, ou só o padrão.
-3. **Spec da API da franquia** (Momento 1) — formato, autenticação, semântica de
-   escrita; projeto à parte, conduzido com a franquia.
-4. **Janela de validação** (~3 semanas, §4) — confirmar se é parâmetro por tenant
+1. **Spec da API da franquia** (Momento 1) — formato, autenticação, semântica de
+   escrita; projeto à parte, conduzido com a franquia. O adapter está **previsto**,
+   não detalhado.
+2. **Conteúdo real de `api-salas-grade.php`** (grade preenchida) — **detalhe de
+   implementação do adapter scraper**, não bloqueia o modelo. Confirmado que a
+   Extranet expõe ocupação datada + exceção (ver [[extranet-agenda-datada-confirmada]]);
+   falta só capturar o HTML preenchido quando for construir o scraper.
+3. **Janela de validação** (~3 semanas, §4) — confirmar se é parâmetro por tenant
    e seu default.
-5. **Ordem de implementação das fatias** — qual fatia entrega valor primeiro
-   (provável: modelo canônico + adapter scraping read-only + motor de interseção +
-   dashboard de recepção em modo CONSULTA, antes de qualquer escrita).
+4. **Unificação física de `resource_source_binding` com o painel de Conexões** —
+   **deferida** para quando o painel de Conexões/Integrações for construído; o
+   **conceito** já está travado (ver Emenda, DP-D). Hoje vive como tabela própria
+   no domínio de recursos.
+5. **Ordem de construção das fatias** — `recorrente → ocupação → exceção → engine`
+   de interseção, com o adapter de scraping read-only e o dashboard de recepção em
+   modo CONSULTA antes de qualquer escrita.
 
 ---
 
@@ -275,4 +277,124 @@ implementação:
 - **Custos / riscos:** scraping é **frágil** (depende do HTML da Extranet) e
   **read-only obrigatório**; a distinção temporal (§2.5) é sutil e fácil de errar;
   escrita autônoma só é segura no Momento 1. A flexibilidade do modelo (atributos
-  por tipo, vínculos) tem custo de modelagem — daí estar em **pendência** (§8.1).
+  por tipo, vínculos) tem custo de modelagem — agora **endereçado na Emenda**
+  (modelo de tabelas + proveniência do catálogo).
+
+---
+
+## Emenda — modelagem de tabelas e proveniência do catálogo (resolve §8)
+
+- **Status:** 🧭 **DECISÃO DE DESENHO — NÃO IMPLEMENTADO.** Nenhuma tabela,
+  migration ou código de aplicação existe. Encoda o schema e a proveniência em
+  prosa; a implementação será fatiada depois.
+- **Data:** 2026-06-26
+- **Autor:** sessão Claude Code (decisões de produto/arquitetura do Leo)
+- **Relacionados:** ADR-007 (Provider/Asset; reconciliação no M2), ADR-008
+  (`ServiceBooking` / motor de agendamento nativo — fronteira de não-duplicação),
+  [[extranet-agenda-datada-confirmada]] (a Extranet expõe ocupação datada + exceção),
+  [[adr-025-gestao-recursos]].
+
+> ⚠️ Esta emenda **resolve** o que antes era pendência §8.1 (modelagem de tabelas)
+> e a parte estrutural da proveniência do catálogo. **Continua sendo desenho**, não
+> comportamento implementado.
+
+### E.1 Decisões resolvidas
+
+- **DP-A — Junção com a fonte.** `resource` é chaveado por **`external_ref`** (a
+  junção com a fonte). Campos **`provider_id` / `asset_id` NULLABLE** ficam
+  **reservados** para reconciliar com `regente_core` (Provider/Asset do **ADR-007**)
+  no **Momento 2**.
+- **DP-B — Nenhuma granularidade no core.** Toda disponibilidade, ocupação e
+  exceção é **intervalo meio-aberto `[início, fim)`**. "Slot de 1h" é propriedade do
+  **adapter da fonte** (Valinhos emite 1h) e da **config de oferta** (passo de
+  varredura), **jamais do schema**. Outro tenant com 45/50/90 min **não exige
+  migração**. (Consolida §2.3.)
+- **DP-C — Mapa de status é config.** O mapa `status_bruto → (status_canônico,
+  ocupa?)` é **configuração por adapter/tenant**. A engine de disponibilidade lê
+  **só o booleano `ocupa?`**. Fontes futuras têm códigos próprios — multi-tenant,
+  nada cravado. (Os códigos 200/210/220/300/310/320 da Extranet são **um** mapa,
+  não **o** mapa.)
+- **DP-E — Isolamento.** Schema **`resources`**, com **RLS por `tenant_id` em todas
+  as tabelas** (alinha [[lead-manager-rls-tenant-context]]).
+- **DP-F — `capability` é genérico.** `capability` = **instrumento** para Valinhos;
+  **modalidade / especialidade** para outros nichos. Valinhos **semeia** as
+  capabilities a partir dos **cursos da Extranet**.
+- **DP-G — Duração é da capability; passo ≠ duração.** **Duração** é propriedade da
+  **capability**: **default no tenant** (`tenant_resource_config`), **override por
+  capability** (nullable, herda do tenant se vazio). O **passo de varredura ≠
+  duração da reserva**. Prova concreta: Valinhos tem **projeto de BANDA = 1,5h**
+  (reserva professor + sala) ao lado da **aula individual de 1h**.
+- **DP-D — O catálogo INTEIRO é sourced (estrutural).** Não só a ocupação: o
+  catálogo inteiro tem **proveniência por linha**. **Dois escritores desde o
+  design:**
+  1. **adapter de scraping** (unidades ADR, **M0**): catálogo é **espelho
+     read-only** — a **Extranet é dona da verdade**;
+  2. **configurador nativo do Regente** (outras empresas): catálogo é a **fonte da
+     verdade**, **editável na UI**.
+
+  O catálogo é o **CONTRATO** entre o configurador e o futuro **motor de
+  agendamento**: o motor (**ADR-008**) **LÊ** este catálogo e **ESCREVE** ocupação.
+  `resource_source_binding` é a conexão por tenant e é a **projeção, no domínio de
+  recursos, do painel de Conexões/Integrações** já previsto (Meta/WhatsApp/Conta
+  Azul/banco) — **não uma ilha**. A **unificação física** com uma
+  `tenant_connection` única fica **DEFERIDA** para quando o painel de Conexões for
+  construído (§8.4); o **conceito está travado agora**.
+
+### E.2 Modelo de tabelas (schema `resources` — prosa, não DDL)
+
+1. **`resource`** — `tenant_id`, `type` (enum **extensível** `ROOM`/`TEACHER`/…),
+   `external_ref`, `name`, `attributes` **JSONB** (vocação etc.), `provider_id` /
+   `asset_id` **nullable** (reserva M2 — DP-A), `source_binding_id`, `active`.
+2. **`capability`** — `tenant_id`, `external_ref` (curso), `name`,
+   `source_binding_id`. Genérica (DP-F).
+3. **`resource_capability`** — `resource_id`, `capability_id`. **UMA tabela resolve
+   dois cruzamentos**: **competência** (professor↔capability) **e vocação**
+   (sala↔capability).
+4. **`resource_availability`** — `resource_id`, `weekday` (1–6, seg–sáb),
+   `start_time`, `end_time`, `source_binding_id`. Termo **RECORRENTE**. **Intervalos,
+   sem slot** (DP-B).
+5. **`occupation_snapshot`** — `tenant_id`, `resource_id`, `occupied_on`,
+   `starts_at`, `ends_at`, `external_ref` (id da aula), `raw_status`,
+   `canonical_status`, `occupies` (bool **derivado do mapa de config** — DP-C), `raw`
+   **JSONB**, `scraped_at`, `source_binding_id`. Termo **OCUPAÇÃO no M0** —
+   **projeção read-only, NÃO é sistema de registro**. No **M2** a ocupação é
+   `service_booking` (**ADR-008**), via o contrato `OccupationSource` (**interface no
+   código, NÃO tabela nova**).
+6. **`resource_exception`** — `resource_id` **NULLABLE** (null = **tenant-wide**, p/
+   feriado), `starts_at`, `ends_at`, `type`
+   (`HOLIDAY`/`VACATION`/`MAINTENANCE`/`CLOSURE`), `reason`, `source_binding_id`.
+   Termo **EXCEÇÃO**. **Distinto de booking cancelado:** cancelado **libera** o slot;
+   exceção **BLOQUEIA**.
+7. **`tenant_resource_config`** — `tenant_id`, default `slot_step_minutes`,
+   `default_duration_minutes`, `working_days`, `working_hours`, `week_start`. **Borda
+   de oferta.** Override por capability (campos nullable que herdam se vazios — DP-G).
+8. **`resource_source_binding`** — `tenant_id`, `kind`
+   (`SCRAPE_EXTRANET`/`NATIVE`/`API`), `config` (**credenciais cifradas — MESMO
+   modelo do token Meta existente**), `status`. **Projeção do painel de Conexões** no
+   domínio de recursos (DP-D).
+
+### E.3 Fronteira com o ADR-008 (ponto de não-duplicação)
+
+- O **`ServiceBooking` do ADR-008 É** o termo ocupação no mundo nativo (**M2**).
+  **NÃO duplicar.** `occupation_snapshot` é a **projeção M0**; a engine consome o
+  contrato **`OccupationSource`**, **agnóstico de fonte** (snapshot no M0,
+  `ServiceBooking` no M2).
+- **ADR-008 = VALIDADOR write-time** de um booking concreto (tríplice colisão,
+  `SELECT FOR UPDATE`). Só vale ao **ESCREVER** (M1/M2). No **M0 não há escrita**.
+- **Engine de interseção do ADR-025 = DESCOBERTA read-time**: `(capability, dia,
+  slot) → professores compatíveis livres ∩ salas compatíveis livres`. O ADR-008
+  **não faz isso** (valida **UM** par, não **varre** o espaço).
+- `resource` **reconcilia** com **Provider/Asset (ADR-007)** por `external_ref` no
+  **M2**.
+
+### E.4 Fórmula de disponibilidade
+
+```
+livre(recurso, data, slot) ⇔
+      ∃ availability cobrindo weekday(data) + slot
+  ∧ ¬∃ occupation com occupies = true em data + slot
+  ∧ ¬∃ exception cobrindo data + slot
+```
+
+(É a fórmula RECORRENTE − OCUPAÇÃO − EXCEÇÃO de §2.5, agora ancorada nas tabelas 4,
+5 e 6.)
