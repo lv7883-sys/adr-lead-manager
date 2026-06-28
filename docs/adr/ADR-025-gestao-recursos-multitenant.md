@@ -501,3 +501,73 @@ Vira tabela: **`resource_exception`** + **`occupation_history`**. A **ocupação
   `api-salas-grade.php` datada) — **detalhe de implementação** da 048.
 - **Painel de gestão** e o **eixo DEMANDA** (cruza ocupação com leads/experimentais) ficam
   para **ADR próprio**.
+
+## Emenda — fronteira de tenant-awareness da camada de recursos+vocação (tela de atribuição sala↔capability)
+
+- **Status:** 🧭 **FRONTEIRA REGISTRADA.** O **backend** desta camada (Unit 1 — schema
+  `resources`, rotas `GET/PUT /tenant/:t/resources/salas[/...]`) **já está implementado** e
+  nasce tenant-agnóstico; a **view** (Unit 2) ainda será desenhada sob esta fronteira. Esta
+  emenda fixa o **princípio**, não comportamento novo.
+- **Data:** 2026-06-28
+- **Frente:** gestão de recursos / tela de atribuição sala↔capability ("Regente sugere,
+  recepção atribui").
+- **Relacionados:** ADR-026 (sincronizador — quem hoje provisiona o catálogo de Valinhos),
+  [[scraping-valinhos-only-principio]] (infra genérica, fronteira anti-vazamento),
+  [[adr-025-gestao-recursos]].
+
+> ⚠️ Princípio de fronteira. O backend já o respeita (Unit 1); a view (Unit 2) é desenhada a partir daqui.
+
+### Contexto
+
+A tela **"Regente sugere, recepção atribui"** é a **primeira UI** da camada de recursos.
+Toda unidade franqueada ou empresa nova entra no produto **como tenant**, pelo **fluxo de
+introdução do Regente** (já mapeado para breve — o produto é multi-tenant por desenho).
+Logo, **nenhuma parte desta camada pode nascer** com vocabulário ou fonte de dados de
+**Valinhos cravados no código**: o que for específico do Valinhos hoje vira, amanhã, o
+caso particular de um entre muitos tenants.
+
+### Decisão
+
+**DP-H — Fronteira de tenant-awareness da camada de recursos+vocação.** A camada de
+recursos+vocação — schema **`resources`**, rotas **`GET/PUT /tenant/:t/resources/salas[/...]`**
+e a **tela de atribuição** — é **TENANT-AGNÓSTICA POR CONSTRUÇÃO**. Ela opera sobre
+`resource` / `capability` / `resource_capability` **sem conhecer nicho nem fonte de dados**.
+Os pontos abaixo delimitam onde o específico pode morar.
+
+- **O específico de Valinhos vive SÓ no adapter.** O de-para de vocação (ex.: `"Cordas"` →
+  Violão/Guitarra/Baixo/Ukulele), a leitura da Extranet e o `attributes.vocacao` são
+  **particularidades do Valinhos** — ficam **dentro do adapter**, ativados por
+  `resource_source_binding.kind` (`SCRAPE_EXTRANET`). A **rota resolve pelo registry** (despacho
+  por `kind`) e **nunca importa o adapter de Valinhos diretamente**. *(Já implementado na Unit 1.)*
+
+- **Sugestão é a EXCEÇÃO, não a regra.** A sugestão de vocação só existe porque a Extranet
+  expõe `attributes.vocacao` — particularidade do **scraping de Valinhos (M0, exceção
+  legada)**. Um **tenant nativo do Regente não tem Extranet**, **não tem essa coluna** e
+  portanto **não tem palpite**: todas as salas nascem **`EM_BRANCO`** e a humana atribui do
+  zero (adapter sem o método → **`[]`**). A **mesma tela** serve os dois casos — a **coluna de
+  sugestão vazia é o estado PADRÃO DO FUTURO**, não um caso de erro. A view deve renderizar
+  **"este tenant não sugere nada" como caminho limpo**, jamais um `if (Valinhos)`.
+
+- **Rótulos de nicho são vocabulário de domínio.** `Sala` / `Instrumento` / `Professor` são
+  termos de **escola de música**. Academia diria `Sala` / `Modalidade` / `Instrutor`; clínica
+  diria `Consultório` / `Especialidade` / `Profissional`. **Decisão pragmática** (reafirma a já
+  registrada): na **Unit 2** o vocabulário fica **hardcoded-Valinhos**, mas **concentrado em
+  UMA constante** `VOCAB` no **topo da view** (ponto único), preferindo termos
+  **naturalmente genéricos** onde couber (ex.: **"Disponibilidade"**). Vira **config-como-dado
+  por tenant quando o 2º tenant chegar** — junto de estágios / DRE / `tenant_resource_config`.
+  É **dívida explícita e localizada**, não retrabalho.
+
+### Dependência registrada (fora do escopo desta frente)
+
+O **fluxo de introdução de unidade** — provisionar recursos + capabilities de um **tenant
+nativo SEM Extranet** (o que hoje o **sincronizador faz por baixo, só para Valinhos**) — é
+**frente própria**. **Não bloqueia** a tela do Valinhos, mas a tela é **desenhada sabendo que
+ele vem**.
+
+### Consequências
+
+- **Unit 1 (backend):** **nenhuma** — já tenant-agnóstico (rota via registry, adapter sem o
+  método → `[]`, RLS por `tenant_id`).
+- **Unit 2 (view):** nasce com **(a)** a sugestão como **estado OPCIONAL** da sala, com
+  **render limpo** do caso "sem sugestão"; **(b)** os rótulos numa **única constante `VOCAB`**;
+  **(c)** ciência da **dependência do fluxo de introdução de unidade**.
