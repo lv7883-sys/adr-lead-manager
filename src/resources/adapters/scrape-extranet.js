@@ -123,4 +123,7 @@ async function captureHistory({ tenantId, binding }) {
   return { ...stats, slotsOcupados: occSet.size, mudancasGravadas: changes.length };
 }
 
-module.exports = { kind: 'SCRAPE_EXTRANET', produce, captureHistory };
+// suggestRoomCaps — sugestão de capabilities por vocação da sala (pura, sem rede).
+// Delega ao de-para específico da fonte (valinhos); a rota acessa via registry (index.js),
+// nunca importa valinhos direto.
+module.exports = { kind: 'SCRAPE_EXTRANET', produce, captureHistory, suggestRoomCaps: valinhos.suggestRoomCaps };

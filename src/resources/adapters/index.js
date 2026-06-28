@@ -22,4 +22,18 @@ function forKind(kind) {
   return REGISTRY[kind] || null;
 }
 
-module.exports = { forKind, REGISTRY };
+/**
+ * Sugestão GENÉRICA de capabilities por vocação de sala, despachada por kind.
+ * O de-para vocação→caps é específico da fonte (mora no adapter); aqui só roteamos.
+ * Adapter inexistente ou sem o método → [] (default seguro: sem sugestão).
+ * @returns {string[]} refs de capability (cap:*) — a rota resolve p/ caps do tenant.
+ */
+function suggestRoomCaps(kind, vocacao) {
+  const adapter = forKind(kind);
+  if (adapter && typeof adapter.suggestRoomCaps === 'function') {
+    return adapter.suggestRoomCaps(vocacao) || [];
+  }
+  return [];
+}
+
+module.exports = { forKind, REGISTRY, suggestRoomCaps };

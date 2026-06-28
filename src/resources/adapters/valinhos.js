@@ -81,6 +81,24 @@ function parseSala(html, idSala) {
   return { ref: String(idSala), type: 'ROOM', name: nomeFull, attributes: { apelido, vocacao } };
 }
 
+// ---------------------------------------------------------------------------
+// SUGESTÃO de capabilities por VOCAÇÃO da sala (de-para ESPECÍFICO de Valinhos —
+// fica SÓ aqui, anti-vazamento ADR-026 §2.1). Pura, sem rede. A tela usa isso para
+// pré-marcar chips quando a sala ainda não tem vínculo confirmado (estado SUGERIDA).
+// Devolve REFS de capability (cap:*) — a rota resolve p/ as caps reais do tenant e
+// ignora ref que não exista. Vocação sem mapa (inclui 'Estúdio') → [] (sem sugestão).
+const ROOM_CAP_SUGGESTIONS = {
+  'canto e teclas': ['cap:canto', 'cap:teclado', 'cap:piano'],
+  'cordas': ['cap:violao', 'cap:guitarra', 'cap:baixo', 'cap:ukulele'],
+  'musicalizacao infantil': ['cap:musicalizacao', 'cap:inicializacao-musical'],
+};
+function suggestRoomCaps(vocacao) {
+  if (!vocacao || typeof vocacao !== 'string') return []; // null/undefined/não-string → sem sugestão
+  const key = norm(vocacao); // case-insensitive + trim + sem acento (robusto)
+  const refs = ROOM_CAP_SUGGESTIONS[key];
+  return refs ? [...refs] : [];
+}
+
 // ---- parse de um CADASTRO de professor (update.php) → id, nome, status, disciplinas ----
 function parseCadastro(html, idCad) {
   const nome = dec((html.match(/<input[^>]*name=["']?nome["']?[^>]*value=["']([^"']*)["']/i) || [])[1] || '');
@@ -367,4 +385,4 @@ async function readSlot3Weeks({ anchorDate, time, sala = null }, { getGradeHtml,
   return { anchorDate, time, weekday, sala, occurrences };
 }
 
-module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks, matchTeacher, nextOccurrenceDate };
+module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks, matchTeacher, nextOccurrenceDate, suggestRoomCaps };
