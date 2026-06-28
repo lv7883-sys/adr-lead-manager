@@ -260,7 +260,9 @@ async function fetch(transport, { destDir, onProgress = () => {} } = {}) {
 // p/ ocupação só importa sala×horário×status.
 function parseGradeOcupacao(html) {
   const out = [];
-  const re = /<a\b[^>]*aula_edit\(\s*['"]?(\d+)['"]?\s*\)[^>]*\btitle\s*=\s*"([^"]*)"/gi;
+  // captura também o conteúdo VISÍVEL da âncora (m[3]) — é de lá que sai "Prof. <nome>"
+  // (o title NÃO traz o professor nesta tela).
+  const re = /<a\b[^>]*aula_edit\(\s*['"]?(\d+)['"]?\s*\)[^>]*\btitle\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(html)) !== null) {
     const aulaId = m[1];
@@ -274,9 +276,44 @@ function parseGradeOcupacao(html) {
     }
     // status = última linha; normaliza o sufixo "- " vazio ("Prevista - " → "Prevista").
     const status = dec(lines[lines.length - 1] || '').replace(/\s*-\s*$/, '').trim();
-    out.push({ aula_id: aulaId, hora_inicio, hora_fim, sala, curso, status, ocupado: true });
+    // prof: do texto visível, após a ÚLTIMA "Prof." (até 3 tokens de nome).
+    let prof = null;
+    const vis = dec(m[3] || '');
+    const pidx = vis.toLowerCase().lastIndexOf('prof.');
+    if (pidx >= 0) {
+      const after = vis.slice(pidx + 5).trim();
+      const w = after.match(/^([\p{L}][\p{L}-]*(?:\s+[\p{L}][\p{L}-]*){0,3})/u);
+      if (w) prof = w[1].trim();
+    }
+    out.push({ aula_id: aulaId, hora_inicio, hora_fim, sala, curso, status, prof, ocupado: true });
   }
   return out;
+}
+
+// matchTeacher — casa o "Prof." (nome CURTO da grade) ↔ professor do catálogo por PREFIXO
+// ANCORADO: o nome da grade tem que ser prefixo do nome completo, token a token do 1º em
+// diante. Resolve a colisão de nome-do-meio: "César" é nome do meio de "Augusto César ..."
+// E de "Ricardo ... César ..." → não casa por prefixo com NENHUM (1º token é Augusto/Ricardo)
+// → fica NÃO-RESOLVIDO (melhor faltar que atribuir errado). "Augusto"→Augusto César,
+// "Ricardo"→Ricardo, ambos ÚNICOS.
+// APROXIMAÇÃO p/ métrica de TENDÊNCIA (gestão), NÃO exatidão — o nome da grade é curto/"de
+// guerra"; a via exata (api-salas-grade?professor=<id> por professor, ~138 fetches/dia)
+// estoura o throttle. Retorna { resource_id } se ÚNICO; senão { ambiguous:true, n } (0 ou >1).
+function matchTeacher(prof, teachers) {
+  const pt = norm(prof).split(/\s+/).filter(Boolean);
+  if (!pt.length) return { ambiguous: true, n: 0 };
+  const cand = teachers.filter((t) => {
+    const tt = norm(t.name).split(/\s+/).filter(Boolean);
+    return pt.every((p, i) => tt[i] && (tt[i] === p || tt[i].startsWith(p)));
+  });
+  return cand.length === 1 ? { resource_id: cand[0].resource_id } : { ambiguous: true, n: cand.length };
+}
+
+// Próxima data (>= fromYmd, inclui hoje) cujo weekday ISO bate. Usado p/ a janela do
+// snapshot diário: a próxima ocorrência de cada weekday de trabalho.
+function nextOccurrenceDate(fromYmd, weekdayIso) {
+  for (let i = 0; i < 7; i++) { const d = _ymdAddDays(fromYmd, i); if (_weekdayIso(d) === weekdayIso) return d; }
+  return fromYmd;
 }
 
 const _salaMatch = (a, b) => String(a || '').toLowerCase().replace(/\s+/g, '') === String(b || '').toLowerCase().replace(/\s+/g, '');
@@ -330,4 +367,4 @@ async function readSlot3Weeks({ anchorDate, time, sala = null }, { getGradeHtml,
   return { anchorDate, time, weekday, sala, occurrences };
 }
 
-module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks };
+module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks, matchTeacher, nextOccurrenceDate };

@@ -144,9 +144,23 @@ async function processBinding(tenantId, binding) {
         syncResources(c, { tenantId, sourceBindingId: binding.id, snapshot }));
     }, { timeoutMs: LOCK_TIMEOUT_MS });
 
-    await registrarExecucao(tenantId, binding, { status: 'OK', startedAt, stats });
-    logger.info('resources_sync.ok', { tenant_id: tenantId, binding_id: binding.id, kind: binding.kind, stats });
-    return { binding: binding.id, status: 'OK', stats };
+    // SNAPSHOT do occupation_history — DEPOIS do catálogo, FORA do lock do catálogo (usa
+    // seus próprios locks por fetch). Secundário: se falhar, NÃO derruba o binding (o catálogo
+    // já sincronizou) — vira aviso. Opcional por adapter (só SCRAPE_EXTRANET tem hoje).
+    let history = null, historyError = null;
+    if (typeof adapter.captureHistory === 'function') {
+      try {
+        history = await adapter.captureHistory({ tenantId, binding });
+        logger.info('resources_sync.history_ok', { tenant_id: tenantId, binding_id: binding.id, ...history });
+      } catch (e) {
+        historyError = e.message;
+        logger.warn('resources_sync.history_error', { tenant_id: tenantId, binding_id: binding.id, error: e.message });
+      }
+    }
+
+    await registrarExecucao(tenantId, binding, { status: 'OK', startedAt, stats: { ...stats, history, historyError } });
+    logger.info('resources_sync.ok', { tenant_id: tenantId, binding_id: binding.id, kind: binding.kind, stats, history });
+    return { binding: binding.id, status: 'OK', stats, history, historyError };
   } catch (e) {
     const errorKind = classifyError(e);
     await registrarExecucao(tenantId, binding, { status: 'ERROR', startedAt, error: e.message, errorKind });
