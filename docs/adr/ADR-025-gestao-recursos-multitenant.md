@@ -420,3 +420,84 @@ livre(recurso, data, slot) ⇔
 
 (É a fórmula RECORRENTE − OCUPAÇÃO − EXCEÇÃO de §2.5, agora ancorada nas tabelas 4,
 5 e 6.)
+
+---
+
+## Emenda — fatia datada (migration 048): exceção, ocupação ao vivo e histórico de ocupação
+
+- **Status:** 🧭 **DECISÃO DE DESENHO — NÃO IMPLEMENTADO.** Nenhuma tabela, migration
+  ou código descrito aqui existe ainda. Registra a decisão; a implementação é a
+  migration **048** (fatiada à parte).
+- **Data:** 2026-06-28
+- **Relacionados:** ADR-026 (sincronizador — esta emenda **reusa o `pg_advisory_lock`
+  e o cron da Parte 3**, ver [[sincronizador-recursos-parte3-deploy]]),
+  [[extranet-agenda-datada-confirmada]] (a Extranet expõe ocupação datada + exceção via
+  `api-salas-grade.php`), [[scraping-valinhos-only-principio]] (infra genérica, fronteira
+  anti-vazamento), [[adr-025-gestao-recursos]].
+
+> ⚠️ Decisão de desenho, não comportamento implementado.
+
+### Contexto
+
+O ADR-025 modelou os **três termos** da disponibilidade: `RECORRENTE − OCUPAÇÃO −
+EXCEÇÃO`. A migration **046** implementou o **RECORRENTE** (catálogo). Esta emenda fecha a
+**fatia DATADA** — **exceção** e **ocupação** — com uma decisão central que **reposiciona a
+ocupação**: ela deixa de ser projeção cacheada (o `occupation_snapshot` da §E.2) e passa a
+ser **lida ao vivo**.
+
+### Decisões
+
+**1. Ocupação é LIDA AO VIVO, não cacheada.** Reposiciona o que o ADR-025 chamava de
+`occupation_snapshot` (projeção do scrape, §E.2 item 5). **Motivo:** a recepção agenda
+experimentais ao longo do dia e os agendamentos **concorrem** — um cache (mesmo diário)
+faria a recepcionista oferecer um slot que **já não existe** (cliente fantasma). Logo, a
+ocupação **NÃO vira tabela**: é consultada **ao vivo na Extranet** (`api-salas-grade.php`)
+**no momento da pergunta**, **sob o `pg_advisory_lock` da Parte 3** (ADR-026), e
+**descartada** em seguida. A disponibilidade mostrada =
+**recorrente** (catálogo no banco, cron das 3h) **−** **ocupação** (ao vivo) **−** **exceção**.
+
+**2. `resource_exception` (PERSISTE — termo exceção, dado estável).** Colunas:
+`tenant_id`, `resource_id` **NULLABLE** (nulo = escola toda / feriado; preenchido =
+professor/sala específico), `starts_at`/`ends_at` (intervalo), `type`
+(`HOLIDAY`/`VACATION`/`MAINTENANCE`/`CLOSURE`), `reason`, `source_binding_id`, **RLS por
+tenant**. Distinção **exceção × ocupação**: ocupação = "tomado por aula" (libera se a aula
+cancela); **exceção = "bloqueado, nenhuma aula possível"** (feriado/férias/manutenção). O
+feriado é **pontual**: **remarca** a aula, não recusa a matrícula — a tela mostra
+honestamente e a **humana decide**.
+
+**3. `occupation_history` (PERSISTE — histórico para GESTÃO, append-only, DIFF-BASED).**
+Colunas: `tenant_id`, `resource_id`, `capability_id`, **slot recorrente** (`weekday` +
+horário), **novo estado** (ocupado/livre), `changed_at`. A **captura diária** (junto do
+cron das 3h) compara cada slot com o **último registro** e **só insere linha quando MUDA**
+— o que continua igual **não reescreve** (mesmo princípio diff-based do sincronizador que
+corrigiu o `updated_at` mentindo). **Genérico e fino:** guarda no nível
+**capability × recurso × slot**, **NÃO crava "instrumento"**; cada painel **agrega na
+LEITURA** como o nicho pede (música→instrumento, ginástica→modalidade,
+clínica→especialidade) — coerente com a **fronteira anti-vazamento**. Como cada mudança é
+uma linha nova, o gestor vê a **evolução** (ex.: violão 60%→94% em 3 meses) e **prevê**.
+
+**4. Regra das 3 SEMANAS** (dá sentido ao que estava solto no ADR-025). A consulta ao vivo
+de um slot verifica o **mesmo slot semanal em 3 ocorrências consecutivas** (terça 15h em X,
+X+1, X+2). **Razão:** valida que o horário se sustenta como **aula fixa recorrente**, não só
+a experimental avulsa — se não está livre nas semanas seguintes, o aluno faz a experimental
+mas **não tem onde continuar a matrícula**. Cada ocorrência passa por
+`recorrente − ocupação − exceção`. A janela **ancora na DATA clicada, não em hoje**.
+
+**5. DOIS dashboards distintos, MESMA base, frescor diferente** (registrar a distinção; o
+painel de **GESTÃO** terá ADR próprio quando construído). **RECEPÇÃO** = operacional,
+ocupação **ao vivo no clique**, pontual. **GESTÃO** = estratégico, **tendência de meses**,
+lê do **`occupation_history`** (snapshot diário). **Não confundir** os dois. (Refina a
+Decisão 5 / §6 — os dois dashboards agora têm **frescor de dado** explicitamente distinto.)
+
+### Escopo da migration 048
+
+Vira tabela: **`resource_exception`** + **`occupation_history`**. A **ocupação ao vivo NÃO
+é tabela**. **NÃO** criar `occupation_snapshot` — o nome proposto na §E.2 (item 5) fica
+**OBSOLETO**, **substituído pela leitura ao vivo** (Decisão 1).
+
+### Pendências (registrar — não decididas aqui)
+
+- **Como a captura diária lê a ocupação** para alimentar o `occupation_history` (fonte =
+  `api-salas-grade.php` datada) — **detalhe de implementação** da 048.
+- **Painel de gestão** e o **eixo DEMANDA** (cruza ocupação com leads/experimentais) ficam
+  para **ADR próprio**.
