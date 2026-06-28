@@ -248,4 +248,86 @@ async function fetch(transport, { destDir, onProgress = () => {} } = {}) {
   return { salasDir: rawDir, cursosDir: rawDir, cadastroDirs: [cadDir] };
 }
 
-module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef };
+// ---------------------------------------------------------------------------
+// OCUPAÇÃO DATADA (ADR-025 emenda / fatia 048) — leitura AO VIVO, NÃO cacheada.
+// Tudo aqui é do adapter (conhece a Extranet); o core não importa nada disto.
+// ---------------------------------------------------------------------------
+
+// parseGradeOcupacao(html) — HTML de api-salas-grade.php?hoje=DATA → slots OCUPADOS do dia.
+// Ocupação = PRESENÇA da âncora (aula_edit). Sem âncora = livre. Cancelado some da grade.
+// Status é textual (Prevista/Confirmada/Realizada/Falta/experimental); o sufixo "- " (vazio,
+// visto em "Prevista - "/"Realizada - ") é decoração → normalizado fora. NÃO devolve aluno (PII):
+// p/ ocupação só importa sala×horário×status.
+function parseGradeOcupacao(html) {
+  const out = [];
+  const re = /<a\b[^>]*aula_edit\(\s*['"]?(\d+)['"]?\s*\)[^>]*\btitle\s*=\s*"([^"]*)"/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const aulaId = m[1];
+    const lines = m[2].replace(/&#10;|&#xA;/gi, '\n').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    let hora_inicio = null, hora_fim = null, sala = null, curso = null;
+    for (const line of lines) {
+      let mt;
+      if ((mt = line.match(/^(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})$/))) { hora_inicio = mt[1]; hora_fim = mt[2]; continue; }
+      if (/^Sala\b/i.test(line)) { sala = dec(line); continue; }
+      if (/^Curso\b/i.test(line) || /^Aula experimental/i.test(line)) { curso = dec(line); continue; }
+    }
+    // status = última linha; normaliza o sufixo "- " vazio ("Prevista - " → "Prevista").
+    const status = dec(lines[lines.length - 1] || '').replace(/\s*-\s*$/, '').trim();
+    out.push({ aula_id: aulaId, hora_inicio, hora_fim, sala, curso, status, ocupado: true });
+  }
+  return out;
+}
+
+const _salaMatch = (a, b) => String(a || '').toLowerCase().replace(/\s+/g, '') === String(b || '').toLowerCase().replace(/\s+/g, '');
+function _ymdAddDays(ymd, n) {
+  const [y, mo, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  const p = (x) => String(x).padStart(2, '0');
+  return `${dt.getUTCFullYear()}-${p(dt.getUTCMonth() + 1)}-${p(dt.getUTCDate())}`;
+}
+function _weekdayIso(ymd) {
+  const [y, mo, d] = ymd.split('-').map(Number);
+  const wd = new Date(Date.UTC(y, mo - 1, d)).getUTCDay(); // 0=Dom..6=Sáb
+  return wd === 0 ? 7 : wd;                                // ISO 1=Seg..7=Dom
+}
+
+// readSlot3Weeks — REGRA DAS 3 SEMANAS (ADR-025 emenda decisão 4). Lê AO VIVO o mesmo
+// weekday+horário em 3 datas consecutivas (a clicada + 2 seguintes). IO é INJETADO
+// (mantém este módulo puro / sem db/lock/transport):
+//   getGradeHtml(dateYmd) -> Promise<html>   // o chamador embrulha com lock SÓ no GET
+//   isException(dateYmd)  -> Promise<bool>    // o chamador consulta resource_exception
+//   throttle?()          -> Promise<void>    // espera o gap ENTRE datas, FORA do lock
+//   onOccurrence?(occ)   -> Promise<void>    // STREAMING: chamado quando CADA data resolve
+// O gap fica FORA do lock (chamado aqui, entre as datas) → o lock é retido só durante o
+// GET (~0,5s), não monopoliza a Extranet durante a espera do throttle.
+// Estados por ocorrência: livre / ocupada_por_aula / bloqueada_por_excecao / indisponivel.
+// Falha numa data (ex.: lock timeout = sistema ocupado) NÃO derruba as outras — vira
+// 'indisponivel' só naquela data. NÃO decide "vale ou não" — a tela mostra e a humana decide.
+async function readSlot3Weeks({ anchorDate, time, sala = null }, { getGradeHtml, isException, throttle, onOccurrence }) {
+  const weekday = _weekdayIso(anchorDate);
+  const occurrences = [];
+  for (let i = 0; i < 3; i++) {
+    const date = _ymdAddDays(anchorDate, i * 7);
+    let occ;
+    try {
+      if (await isException(date)) {
+        occ = { occurrence: i + 1, date, weekday, state: 'bloqueada_por_excecao', ocupadas: [] }; // não bate na Extranet
+      } else {
+        if (i > 0 && typeof throttle === 'function') await throttle();   // gap FORA do lock, antes do GET
+        const slots = parseGradeOcupacao(await getGradeHtml(date));
+        const ocupadas = slots.filter((s) => s.hora_inicio === time && (!sala || _salaMatch(s.sala, sala)));
+        occ = { occurrence: i + 1, date, weekday, state: ocupadas.length ? 'ocupada_por_aula' : 'livre', ocupadas: ocupadas.map((s) => ({ sala: s.sala, curso: s.curso, status: s.status })) };
+      }
+    } catch (e) {
+      const lockBusy = /lock timeout|canceling statement due to lock/i.test(e && e.message || '');
+      occ = { occurrence: i + 1, date, weekday, state: 'indisponivel', reason: lockBusy ? 'sistema_ocupado' : 'erro_consulta', ocupadas: [] };
+    }
+    occurrences.push(occ);
+    if (typeof onOccurrence === 'function') { try { await onOccurrence(occ); } catch (_e) { /* stream best-effort */ } }
+  }
+  return { anchorDate, time, weekday, sala, occurrences };
+}
+
+module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks };

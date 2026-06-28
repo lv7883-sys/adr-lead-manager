@@ -90,6 +90,9 @@ app.use('/admin', adminLimiter, adminRouter);
 // Self-service da unidade (protegido por JWT + requireTenantRole).
 app.use('/tenant', tenantLimiter, tenantRouter);
 
+// Recursos (ADR-025/026) — ocupação ao vivo etc. Mesmo namespace/escopo de tenant.
+app.use('/tenant', tenantLimiter, require('./routes/resources'));
+
 // ADR-016 — arquivos de mídia recebidos (autenticado por tenant).
 app.use('/media', require('./routes/media'));
 

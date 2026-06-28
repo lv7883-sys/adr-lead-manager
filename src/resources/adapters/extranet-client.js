@@ -87,12 +87,24 @@ function detectBlock(status, body, { expectCap = false } = {}) {
   return false;
 }
 
-async function _request(url, opts = {}, { expectCap = false } = {}) {
-  const restante = emCooldown();
-  if (restante) throw tag(new Error(`extranet: em cooldown de rate-limit (~${restante}s) — pulando requisição`), 'BLOCK');
+// throttleGap() — espera o gap serial DESDE a última requisição, SEM disparar requisição
+// e SEM segurar nada. Usado pela leitura ao vivo (recepção) p/ espaçar as chamadas com o
+// gap FORA do pg_advisory_lock — o lock fica retido só durante o GET (~0,5s), não durante
+// a espera. A varredura diária segue com o gap embutido no _request (noGap=false).
+async function throttleGap() {
   const gap = MIN_GAP_MS + Math.floor(Math.random() * GAP_JITTER_MS);
   const espera = _lastReqAt + gap - Date.now();
   if (espera > 0) await _sleep(espera);
+}
+
+async function _request(url, opts = {}, { expectCap = false, noGap = false } = {}) {
+  const restante = emCooldown();
+  if (restante) throw tag(new Error(`extranet: em cooldown de rate-limit (~${restante}s) — pulando requisição`), 'BLOCK');
+  if (!noGap) {                                   // noGap: o chamador já espaçou (throttleGap) FORA do lock
+    const gap = MIN_GAP_MS + Math.floor(Math.random() * GAP_JITTER_MS);
+    const espera = _lastReqAt + gap - Date.now();
+    if (espera > 0) await _sleep(espera);
+  }
   _lastReqAt = Date.now();
   _stats.reqs++;
   const r = await _fetchComTimeout(url, opts);
@@ -182,11 +194,11 @@ function invalidateSession(creds) {
 }
 
 // ---- fetch autenticado: detecta sessão caída (redirect/conteúdo de login) ----
-async function fetchAuthed(p, session) {
+async function fetchAuthed(p, session, { noGap = false } = {}) {
   const r = await _request(`${EXTRANET}${p}`, {
     headers: { 'User-Agent': UA, 'Cookie': session.cookie, 'X-Requested-With': 'fetch' },
     redirect: 'follow',
-  });
+  }, { noGap });
   const urlLogin = /\/(index|logon)\.php(\?|$)/.test(r.url) && !/api-salas-grade|monta_lista/.test(p);
   if (urlLogin || /send_login\.php/.test(r.body)) throw tag(new Error('fetchAuthed: sessão expirada (redirect/conteúdo de login)'), 'SESSION_EXPIRED');
   return r.body;
@@ -211,6 +223,6 @@ function transportFor(creds) {
 function stats() { return { ..._stats, cooldownSec: emCooldown(), sessionFile: SESSION_FILE }; }
 
 module.exports = {
-  login, getSession, invalidateSession, fetchAuthed, transportFor,
+  login, getSession, invalidateSession, fetchAuthed, transportFor, throttleGap,
   EXTRANET, UA, VALINHOS_ID_UNIDADE, SESSION_FILE, stats,
 };
