@@ -1,0 +1,16 @@
+# ADR-026 §2.4 — Sincronizador de Recursos: run DIÁRIO às 03:00 (America/Sao_Paulo).
+#
+# Madrugada = FORA da janela do scheduler (checagem 07h–22h) → sem contenção na Extranet.
+# Ainda assim, o pg_advisory_lock(2037495811) serializa contra QUALQUER acesso concorrente
+# (runs manuais, etc.). Runner genérico: despacha por kind; hoje só SCRAPE_EXTRANET (Valinhos).
+#
+# Instalar no HOST (crontab do root) — idempotente:
+#   ( crontab -l 2>/dev/null | grep -v 'resources-sync'; \
+#     grep -vE '^\s*#' /apps/lead-manager/deploy/crontab.resources-sync.txt ) | crontab -
+#
+# Conferir:  crontab -l | grep resources-sync
+# Log:       /var/log/resources-sync.log
+#
+# CRON_TZ garante 03:00 horário de Brasília independente do TZ do host.
+CRON_TZ=America/Sao_Paulo
+0 3 * * * docker exec adr-lead-manager node /app/src/resources/daily-sync.js >> /var/log/resources-sync.log 2>&1

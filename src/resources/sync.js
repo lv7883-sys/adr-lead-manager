@@ -13,6 +13,15 @@
 
 const { validateSnapshot } = require('./snapshot');
 
+// Canonicaliza p/ comparar jsonb de forma estável (jsonb NÃO preserva ordem de chave):
+// ordena chaves recursivamente antes de serializar. Evita falso-positivo de "mudou".
+const canon = (v) => {
+  if (Array.isArray(v)) return v.map(canon);
+  if (v && typeof v === 'object') return Object.keys(v).sort().reduce((a, k) => { a[k] = canon(v[k]); return a; }, {});
+  return v;
+};
+const canonStr = (v) => JSON.stringify(canon(v || {}));
+
 /**
  * Sincroniza o schema `resources` com um snapshot genérico da fonte.
  * Idempotente: rodar 2x com o mesmo snapshot não duplica nem altera nada na 2ª.
@@ -30,28 +39,45 @@ async function syncResources(client, { tenantId, sourceBindingId, snapshot }) {
     availability: { inserted: 0, deleted: 0 },
   };
 
-  // ----- 1) capabilities: upsert por external_ref -----
+  // ----- 1) capabilities: DIFF-BASED por external_ref -----
+  // existe e mudou (nome) → UPDATE; existe e idêntico → pula (updated_at intacto); não existe → INSERT.
   const capId = new Map();
+  const prevCaps = await client.query(
+    `SELECT id, external_ref, name FROM resources.capability
+      WHERE tenant_id = $1 AND external_ref IS NOT NULL`,
+    [tenantId],
+  );
+  const prevCapByRef = new Map(prevCaps.rows.map((x) => [x.external_ref, x]));
   for (const cap of snapshot.capabilities) {
-    const r = await client.query(
-      `INSERT INTO resources.capability (tenant_id, external_ref, name, source_binding_id)
-            VALUES ($1, $2, $3, $4)
-       ON CONFLICT (tenant_id, external_ref) WHERE external_ref IS NOT NULL
-       DO UPDATE SET name = EXCLUDED.name, updated_at = now()
-       RETURNING id, (xmax = 0) AS inserted`,
-      [tenantId, cap.ref, cap.name, sourceBindingId],
-    );
-    capId.set(cap.ref, r.rows[0].id);
-    r.rows[0].inserted ? stats.capabilities.inserted++ : stats.capabilities.updated++;
+    const before = prevCapByRef.get(cap.ref);
+    if (!before) {
+      const r = await client.query(
+        `INSERT INTO resources.capability (tenant_id, external_ref, name, source_binding_id)
+              VALUES ($1, $2, $3, $4) RETURNING id`,
+        [tenantId, cap.ref, cap.name, sourceBindingId],
+      );
+      capId.set(cap.ref, r.rows[0].id);
+      stats.capabilities.inserted++;
+    } else {
+      capId.set(cap.ref, before.id);
+      if (before.name !== cap.name) {
+        await client.query(
+          `UPDATE resources.capability SET name = $2, updated_at = now() WHERE id = $1`,
+          [before.id, cap.name],
+        );
+        stats.capabilities.updated++;
+      }
+    }
   }
 
-  // ----- 2) resources: upsert por (type, external_ref) + soft-delete dos ausentes -----
-  // Estado anterior (mesmo binding) p/ detectar reativação e soft-delete.
+  // ----- 2) resources: DIFF-BASED por (type, external_ref) + soft-delete dos ausentes -----
+  // Estado anterior do TENANT (a unicidade é por tenant, não por binding) p/ detectar
+  // mudança/reativação; o soft-delete abaixo restringe ao binding corrente.
   const prev = await client.query(
-    `SELECT id, type, external_ref, active
+    `SELECT id, type, external_ref, name, attributes, active, source_binding_id
        FROM resources.resource
-      WHERE tenant_id = $1 AND source_binding_id = $2`,
-    [tenantId, sourceBindingId],
+      WHERE tenant_id = $1`,
+    [tenantId],
   );
   const prevByKey = new Map(prev.rows.map((x) => [`${x.type}|${x.external_ref}`, x]));
 
@@ -61,24 +87,34 @@ async function syncResources(client, { tenantId, sourceBindingId, snapshot }) {
     const key = `${res.type}|${res.ref}`;
     presentKeys.add(key);
     const before = prevByKey.get(key);
-    const r = await client.query(
-      `INSERT INTO resources.resource
-              (tenant_id, type, external_ref, name, attributes, source_binding_id, active)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6, true)
-       ON CONFLICT (tenant_id, type, external_ref) WHERE external_ref IS NOT NULL
-       DO UPDATE SET name = EXCLUDED.name,
-                     attributes = EXCLUDED.attributes,
-                     source_binding_id = EXCLUDED.source_binding_id,
-                     active = true,
-                     updated_at = now()
-       RETURNING id, (xmax = 0) AS inserted`,
-      [tenantId, res.type, res.ref, res.name, JSON.stringify(res.attributes || {}), sourceBindingId],
-    );
-    resId.set(key, r.rows[0].id);
-    if (r.rows[0].inserted) stats.resources.inserted++;
-    else {
-      stats.resources.updated++;
-      if (before && before.active === false) stats.resources.reactivated++;
+    const attrsJson = JSON.stringify(res.attributes || {});
+    if (!before) {
+      const r = await client.query(
+        `INSERT INTO resources.resource
+                (tenant_id, type, external_ref, name, attributes, source_binding_id, active)
+              VALUES ($1, $2, $3, $4, $5::jsonb, $6, true)
+         RETURNING id`,
+        [tenantId, res.type, res.ref, res.name, attrsJson, sourceBindingId],
+      );
+      resId.set(key, r.rows[0].id);
+      stats.resources.inserted++;
+    } else {
+      resId.set(key, before.id);
+      const changed =
+        before.name !== res.name ||
+        canonStr(before.attributes) !== canonStr(res.attributes) ||
+        before.active !== true ||
+        before.source_binding_id !== sourceBindingId;
+      if (changed) {                                  // só toca a linha se algo mudou de fato
+        await client.query(
+          `UPDATE resources.resource
+              SET name = $2, attributes = $3::jsonb, source_binding_id = $4, active = true, updated_at = now()
+            WHERE id = $1`,
+          [before.id, res.name, attrsJson, sourceBindingId],
+        );
+        stats.resources.updated++;
+        if (before.active === false) stats.resources.reactivated++;
+      }
     }
   }
 
@@ -86,7 +122,7 @@ async function syncResources(client, { tenantId, sourceBindingId, snapshot }) {
   // NÃO deleta linha nem disponibilidade (histórico preservado §2.3). O recurso
   // desativado sai da busca de encaixe porque toda consulta filtra active=true.
   for (const [key, row] of prevByKey) {
-    if (!presentKeys.has(key) && row.active) {
+    if (row.source_binding_id === sourceBindingId && row.active && !presentKeys.has(key)) {
       await client.query(
         `UPDATE resources.resource SET active = false, updated_at = now() WHERE id = $1`,
         [row.id],

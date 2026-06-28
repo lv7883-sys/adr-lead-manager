@@ -82,11 +82,20 @@ test('3. IDEMPOTÊNCIA: 2ª execução com o mesmo snapshot não duplica nem alt
             (SELECT count(*) FROM resources.capability)           c,
             (SELECT count(*) FROM resources.resource_capability)  l,
             (SELECT count(*) FROM resources.resource_availability) a`);
+  // updated_at NÃO pode mudar numa re-run sem mudança de dado (upsert diff-based).
+  const maxTs = async () => (await q(
+    `SELECT greatest((SELECT max(updated_at) FROM resources.resource),
+                     (SELECT max(updated_at) FROM resources.capability)) m`))[0].m;
+  const tsAntes = await maxTs();
+
   const stats = await withTenant(TENANT_ID, (c) =>
     syncResources(c, { tenantId: TENANT_ID, sourceBindingId: bindingId, snapshot }));
 
+  // 0/0/0/0 DE VERDADE: nem insere, nem TOCA linha (updated=0).
   assert.equal(stats.resources.inserted, 0, 'nada inserido');
+  assert.equal(stats.resources.updated, 0, 'nenhum resource tocado (updated_at intacto)');
   assert.equal(stats.capabilities.inserted, 0);
+  assert.equal(stats.capabilities.updated, 0, 'nenhuma capability tocada');
   assert.equal(stats.links.inserted, 0);
   assert.equal(stats.links.deleted, 0);
   assert.equal(stats.availability.inserted, 0);
@@ -99,6 +108,7 @@ test('3. IDEMPOTÊNCIA: 2ª execução com o mesmo snapshot não duplica nem alt
             (SELECT count(*) FROM resources.resource_capability)  l,
             (SELECT count(*) FROM resources.resource_availability) a`);
   assert.deepEqual(after[0], before[0], 'contagens idênticas após 2ª rodada');
+  assert.equal(String(await maxTs()), String(tsAntes), 'updated_at inalterado (re-run não tocou linha)');
 });
 
 test('4. SOFT-DELETE: prof some do snapshot → active=false e sai da busca; reaparece → reativa', async () => {

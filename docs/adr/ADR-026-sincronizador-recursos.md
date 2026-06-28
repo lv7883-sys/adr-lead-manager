@@ -193,3 +193,41 @@ vínculo, fora de escopo até §3):
 Notas: **`16 Piano e Teclado` → DOIS vínculos** (Piano + Teclado). **JAM 42/43** têm nome
 idêntico na fonte (colapsados em "JAM"). **Banda/Projeto de Banda** não existe como disciplina
 (só o relatório `rel_professores/projeto_bandas.php`); a mais próxima é **Prática em Conjunto**.
+
+---
+
+## Implementação — Partes 1–3 (2026-06-28)
+
+**Runner genérico** (`src/resources/daily-sync.js`): enumera tenants via `tenants_active()`,
+lê `resource_source_binding` com `cadence=daily`/`status=ACTIVE`, e **despacha por `kind`** via
+registry (`src/resources/adapters/index.js`). Hoje só **`SCRAPE_EXTRANET`** (Valinhos, momento 0);
+**`API`** (momento 1) e **`NATIVE`** (momento 2) são pontos de extensão prontos, sem reescrever o
+runner. Por binding: `pega lock → produce(snapshot) → valida → salvaguarda → upsert idempotente →
+solta lock`; falha de um binding **não derruba** os outros.
+
+**Agendamento = CRON DO HOST** (não `node-cron` da app), às **03:00 America/Sao_Paulo** — fora da
+janela do scheduler (07h–22h), zero contenção. Linha versionada em **`deploy/crontab.resources-sync`**.
+
+**Serialização anti-429 entre apps** (§2.4): `pg_advisory_lock(hashtext('extranet-access'))` =
+**`2037495811`** no Postgres compartilhado. **Os DOIS apps** o tomam: o sincronizador por binding
+(timeout **180s**, `RESOURCES_LOCK_TIMEOUT_MS`) e o scheduler por requisição em `efetch` (timeout
+**60s**). Quem não pega no teto **desiste** (LM: erro TRANSIENT, retoma no próximo run; scheduler:
+carry-over no próximo tick). Kill-switch `EXTRANET_ADVISORY_LOCK=0` (sem redeploy). Módulos
+`src/resources/extranet-lock.js` (LM) e `dashboard/lib/extranet-lock.js` (scheduler).
+
+**Login/sessão** (`src/resources/adapters/extranet-client.js`): porta a disciplina do scheduler
+(UA, gap, cooldown), **autônoma** (Opção A) — arquivo de sessão próprio
+(`/app/uploads/.resources/extranet-session.json`, **0600**, não servido por URL) e credencial
+cifrada com `LM_ENCRYPTION_KEY`. Reusa a sessão de disco; só loga fresco quando ela cai.
+
+**Idempotência**: o core (`sync.js`) é **diff-based** — só dá `UPDATE` em linha que **mudou de
+fato** (`updated_at` só muda com mudança real). Re-run sem mudança = **0/0/0/0**.
+
+**Falha não-silenciosa** (§Passo 4): saúde no binding (`last_sync_status`/`last_error`/
+`last_error_kind`) + histórico em **`resources.resource_sync_log`** (RLS por tenant). Categorias:
+**`CREDENTIAL`** (humano resolve) vs **`TRANSIENT`** (auto-resolve) vs `SAFEGUARD`/`UNKNOWN`. Erro
+acionável dispara log de alta visibilidade (`event:"resources_sync.alert"`, `actionable:true`);
+gancho documentado pra plugar canal de ops futuro.
+
+**Migrations**: **047** = `resource_sync_log` + colunas de saúde no binding. A **fatia DATADA**
+(`occupation_snapshot`/`resource_exception`) passa a ser a **048**.
