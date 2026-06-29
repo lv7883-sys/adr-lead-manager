@@ -10,6 +10,7 @@ const { authenticate } = require('../auth');
 const { requireTenantRole, requireTenantAccess } = require('../rbac');
 const { patchLeadConfig } = require('../leadConfig');
 const { isUuid } = require('../validation');
+const { fromLegacy, canonicaliza, validaHorarioJson, normaliza, minToHm } = require('../horario'); // H1: horário por-dia
 const logger = require('../logger');
 const evolution = require('../evolution');   // E4: envio direto via Evolution
 const meta = require('../meta');              // E6: envio outbound via Messenger/IG
@@ -1345,43 +1346,79 @@ router.post('/:tenantId/leads/:id/ignorar-retomada', authenticate, requireTenant
   }
 });
 
+// Resumo legado {inicio,fim,dias} a partir da forma canônica por-dia — mantém
+// a tela ATUAL funcionando até a UI por-dia (H2). Single-faixa = exato.
+function _resumoLegado(porDia) {
+  const norm = normaliza(porDia) || {};
+  const dias = Object.keys(norm).map(Number).sort((a, b) => a - b);
+  let mi = null, ma = null;
+  for (const d of dias) for (const fx of norm[d]) {
+    mi = mi == null ? fx.ini : Math.min(mi, fx.ini);
+    ma = ma == null ? fx.fim : Math.max(ma, fx.fim);
+  }
+  return {
+    inicio: mi != null ? minToHm(mi) : '08:00',
+    fim: ma != null ? minToHm(ma) : '18:00',
+    dias: dias.length ? dias : [1, 2, 3, 4, 5],
+  };
+}
+
 // GET /tenant/:tid/horario-comercial — horário de atendimento atual.
+// Devolve o jsonb por-dia (`por_dia`) + um resumo legado {inicio,fim,dias} p/
+// a tela atual. Se só houver dado antigo (jsonb nulo), converte na resposta.
 router.get('/:tenantId/horario-comercial', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {
     const row = await withTenant(req.tenantId, (c) => c.query(
-      `SELECT to_char(horario_comercial_inicio, 'HH24:MI') AS inicio,
+      `SELECT horario_comercial AS jsonb,
+              to_char(horario_comercial_inicio, 'HH24:MI') AS inicio,
               to_char(horario_comercial_fim, 'HH24:MI') AS fim,
               horario_comercial_dias AS dias
          FROM tenants WHERE id = $1`, [req.tenantId]
     ).then((r) => r.rows[0] || {}));
-    res.json({
-      inicio: row.inicio || '08:00',
-      fim: row.fim || '18:00',
-      dias: Array.isArray(row.dias) && row.dias.length ? row.dias.map(Number) : [1, 2, 3, 4, 5],
-    });
+    const fonte = row.jsonb || fromLegacy(row.inicio, row.fim, row.dias);
+    const por_dia = canonicaliza(fonte);   // {} = nenhum dia configurado (fechado)
+    res.json({ por_dia, ..._resumoLegado(por_dia) });
   } catch (err) {
     logger.error('tenant.horario.get_error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
   }
 });
 
-// PUT /tenant/:tid/horario-comercial — body { inicio:'HH:MM', fim:'HH:MM', dias:[1..7] }.
-const _HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+// PUT /tenant/:tid/horario-comercial — grava no jsonb por-dia.
+// Aceita:
+//   - shape novo:   { por_dia: { "1":[{inicio,fim}], ... } }  ou o objeto bare { "1":[...] }
+//   - shape antigo: { inicio:'HH:MM', fim:'HH:MM', dias:[1..7] }  (convertido)
+// Valida HH:MM, inicio<fim por faixa, faixas sem sobreposição no mesmo dia.
+// NÃO toca as colunas antigas (ficam como snapshot pré-049 p/ rollback).
 router.put('/:tenantId/horario-comercial', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
-  const inicio = String(req.body?.inicio || '').trim();
-  const fim = String(req.body?.fim || '').trim();
-  let dias = Array.isArray(req.body?.dias) ? req.body.dias.map(Number) : [];
-  dias = [...new Set(dias.filter((d) => Number.isInteger(d) && d >= 1 && d <= 7))].sort((a, b) => a - b);
-  if (!_HM_RE.test(inicio) || !_HM_RE.test(fim)) return res.status(400).json({ error: 'horário inválido (use HH:MM)' });
-  if (inicio >= fim) return res.status(400).json({ error: 'o início deve ser antes do fim' });
-  if (!dias.length) return res.status(400).json({ error: 'selecione ao menos um dia' });
+  const body = req.body || {};
+  let porDia;
+  const isLegacy = Array.isArray(body.dias) || 'inicio' in body || 'fim' in body;
+  if (body.por_dia && typeof body.por_dia === 'object') {
+    porDia = body.por_dia;
+  } else if (isLegacy) {
+    const inicio = String(body.inicio || '').trim();
+    const fim = String(body.fim || '').trim();
+    const dias = [...new Set((Array.isArray(body.dias) ? body.dias.map(Number) : [])
+      .filter((d) => Number.isInteger(d) && d >= 1 && d <= 7))].sort((a, b) => a - b);
+    if (!dias.length) return res.status(400).json({ error: 'selecione ao menos um dia' });
+    porDia = fromLegacy(inicio, fim, dias);
+    if (!porDia) return res.status(400).json({ error: 'horário inválido (use HH:MM)' });
+  } else {
+    porDia = body;   // objeto bare { "1":[...] }
+  }
+
+  const v = validaHorarioJson(porDia);
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  const canon = canonicaliza(porDia);
+
   try {
     await withTenant(req.tenantId, (c) => c.query(
-      `UPDATE tenants SET horario_comercial_inicio = $2, horario_comercial_fim = $3, horario_comercial_dias = $4 WHERE id = $1`,
-      [req.tenantId, inicio, fim, dias]
+      `UPDATE tenants SET horario_comercial = $2 WHERE id = $1`,
+      [req.tenantId, JSON.stringify(canon)]
     ));
-    logger.info('tenant.horario.updated', { tenant_id: req.tenantId, inicio, fim, dias, by: req.tenantRole });
-    res.json({ ok: true, inicio, fim, dias });
+    logger.info('tenant.horario.updated', { tenant_id: req.tenantId, por_dia: canon, by: req.tenantRole });
+    res.json({ ok: true, por_dia: canon, ..._resumoLegado(canon) });
   } catch (err) {
     logger.error('tenant.horario.put_error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });

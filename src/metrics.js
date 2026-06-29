@@ -5,6 +5,7 @@
 // temperatura, heatmap) é feito em JS aqui, pra ficar testável.
 //
 const { withTenant } = require('./db');
+const { dentroDoExpediente, normaliza, minToHm } = require('./horario');
 
 const PERIODS = { '1d': 1, '7d': 7, '30d': 30, '90d': 90 };
 
@@ -37,27 +38,8 @@ function faixaSilencio(dias) {
   if (dias > 7) return 'd7_15';
   return 'd3_7';
 }
-// Horário comercial — minuto-do-dia + dia-da-semana ISO (1=Seg..7=Dom) em SP.
-function spMinDow(ts) {
-  const x = new Date(new Date(ts).getTime() - 3 * 3600 * 1000);
-  return { mins: x.getUTCHours() * 60 + x.getUTCMinutes(), isoDow: x.getUTCDay() === 0 ? 7 : x.getUTCDay() };
-}
-function parseHM(t, def) {
-  if (!t) return def;
-  const [h, m] = String(t).split(':').map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
-function fmtHM(mins) {
-  const h = Math.floor(mins / 60), m = mins % 60;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-}
-// true = ts caiu dentro do expediente; false = fora; null = sem ts.
-function dentroHorario(ts, horario) {
-  if (!ts || !horario) return null;
-  const { mins, isoDow } = spMinDow(ts);
-  if (!horario.dias.includes(isoDow)) return false;
-  return mins >= horario.inicio && mins < horario.fim;
-}
+// Horário de atendimento: a pergunta "está no expediente?" agora vive em
+// ./horario (dentroDoExpediente) — fonte única, faixas-por-dia, fuso SP.
 function temperatura(l) {
   if (l.temperatura_manual === 'quente' || l.temperatura_manual === 'morno' || l.temperatura_manual === 'frio') return l.temperatura_manual;
   const intent = String(l.intent || '').toUpperCase();
@@ -197,16 +179,15 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     // 2b) HORÁRIO COMERCIAL do tenant (separa SLA dentro/fora do expediente).
     const cfgH = (
       await c.query(
-        `SELECT horario_comercial_inicio AS inicio, horario_comercial_fim AS fim, horario_comercial_dias AS dias
+        `SELECT horario_comercial AS jsonb,
+                horario_comercial_inicio AS inicio, horario_comercial_fim AS fim, horario_comercial_dias AS dias
            FROM tenants WHERE id = $1`,
         [tenantId]
       )
     ).rows[0] || {};
-    const horario = {
-      inicio: parseHM(cfgH.inicio, 8 * 60),
-      fim: parseHM(cfgH.fim, 18 * 60),
-      dias: (Array.isArray(cfgH.dias) && cfgH.dias.length ? cfgH.dias : [1, 2, 3, 4, 5]).map(Number),
-    };
+    // Fonte do veredito: o jsonb por-dia se existir; senão, fallback no trio
+    // legado (colunas 029, sempre não-nulas por DEFAULT) — equivalente ao antigo.
+    const horario = cfgH.jsonb || { inicio: cfgH.inicio, fim: cfgH.fim, dias: cfgH.dias };
 
     // 3) MÊS A MÊS (últimos 6 meses): volume de leads + taxa de aceitação da IA.
     const porMes = (
@@ -335,7 +316,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         else ws.acima_2h++;
         slaSemana.set(wk, ws);
         // Split por horário comercial: classifica pela chegada da 1ª msg do lead.
-        if (dentroHorario(l.first_in, horario)) respComercial.push(respSeg);
+        if (dentroDoExpediente(horario, l.first_in)) respComercial.push(respSeg);
         else respFora.push(respSeg);
       }
       // "respondemos mas o lead parou": última palavra foi nossa.
@@ -356,7 +337,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       // como "fora da meta". Split por horário comercial (chegada da 1ª msg) p/ comparabilidade.
       if (esperandoNos && !respondido) {
         slaBacklog++;
-        if (dentroHorario(l.first_in, horario)) backlogComercial++; else backlogFora++;
+        if (dentroDoExpediente(horario, l.first_in)) backlogComercial++; else backlogFora++;
       }
       if (esperandoNos) {
         const ref = lin != null ? lin : new Date(l.created_at).getTime();
@@ -406,7 +387,23 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       };
     };
     const porHorario = { comercial: grupoSla(respComercial, backlogComercial), fora: grupoSla(respFora, backlogFora) };
-    const horarioInfo = { inicio: fmtHM(horario.inicio), fim: fmtHM(horario.fim), dias: horario.dias };
+    // Resumo legado p/ a tela atual (H2 troca a UI p/ por-dia): dias ativos +
+    // menor início / maior fim. Derivado da MESMA fonte do SLA, p/ consistência.
+    const normH = normaliza(horario) || {};
+    const diasAtivos = Object.keys(normH).map(Number).sort((a, b) => a - b);
+    let _mi = null, _ma = null;
+    for (const d of diasAtivos) for (const fx of normH[d]) {
+      _mi = _mi == null ? fx.ini : Math.min(_mi, fx.ini);
+      _ma = _ma == null ? fx.fim : Math.max(_ma, fx.fim);
+    }
+    const horarioInfo = {
+      inicio: _mi != null ? minToHm(_mi) : '08:00',
+      fim: _ma != null ? minToHm(_ma) : '18:00',
+      dias: diasAtivos.length ? diasAtivos : [1, 2, 3, 4, 5],
+      por_dia: normH && Object.keys(normH).length
+        ? Object.fromEntries(diasAtivos.map((d) => [d, normH[d].map((f) => ({ inicio: minToHm(f.ini), fim: minToHm(f.fim) }))]))
+        : null,
+    };
     const ranking = [...porRecep.entries()]
       .map(([sender, r]) => ({ sender, volume: r.n, tempo_medio_seg: round(r.somaSeg / r.comTempo, 0) }))
       .sort((a, b) => b.volume - a.volume);
