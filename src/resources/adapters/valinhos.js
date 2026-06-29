@@ -327,6 +327,43 @@ function matchTeacher(prof, teachers) {
   return cand.length === 1 ? { resource_id: cand[0].resource_id } : { ambiguous: true, n: cand.length };
 }
 
+// ---------------------------------------------------------------------------
+// DP-C (ADR-025) — MAPA status→ocupa? do slot, ESPECÍFICO DA FONTE (fica SÓ no adapter,
+// fronteira anti-vazamento). A grade datada (api-salas-grade) lista aulas com status textual;
+// nem todo status consome o slot: CANCELAMENTO libera o horário (a aula aparece na grade
+// futura, mas não é aula firme). Decisão CONSERVADORA: status desconhecido conta como OCUPADO
+// (não oferecer um slot que pode estar tomado) — e o chamador loga os desconhecidos p/ revisão.
+const STATUS_OCUPA = new Set(
+  ['Prevista', 'Confirmada pelo aluno', 'Confirmada', 'Realizada', 'Falta do aluno', 'Falta'].map((s) => norm(s)));
+
+// statusOcupa(status) → boolean. true = a aula OCUPA o slot; false = slot livre (cancelada).
+// PURA. Normaliza (trim/case/acento). Qualquer 'Cancelada*' → livre; conhecido-ocupa → true;
+// desconhecido/vazio → true (conservador).
+function statusOcupa(status) {
+  const s = norm(status);
+  if (s.startsWith('cancelada')) return false; // 'Cancelada pelo aluno/professor/período de ausência' …
+  if (STATUS_OCUPA.has(s)) return true;
+  return true;                                  // desconhecido/vazio → conservador (ocupado)
+}
+// O status é reconhecido pelo mapa DP-C? (p/ o chamador logar os desconhecidos e revisarmos o mapa.)
+function statusConhecido(status) {
+  const s = norm(status);
+  return s.startsWith('cancelada') || STATUS_OCUPA.has(s);
+}
+
+// DE-PARA SIGLA do curso da grade (api-salas-grade: "Curso DRUM") → ref de capability.
+// USO: SÓ VALIDAÇÃO INFORMATIVA (conferir se o instrumento da aula bate com a vocação da
+// sala). A linha de ocupação da SALA usa a VOCAÇÃO real (resource_capability), NÃO isto.
+// Específico da fonte (siglas observadas no recon ao vivo). Pura; null se a sigla não mapear.
+const CURSO_SIGLA_CAP = {
+  DRUM: 'cap:bateria', VOCAL: 'cap:canto', GUIT: 'cap:guitarra', BASS: 'cap:baixo', PIA: 'cap:piano',
+};
+function cursoCapRef(curso) {
+  const toks = String(curso || '').toUpperCase().match(/[A-Z]+/g) || [];
+  for (const t of toks) if (CURSO_SIGLA_CAP[t]) return CURSO_SIGLA_CAP[t];
+  return null;
+}
+
 // Próxima data (>= fromYmd, inclui hoje) cujo weekday ISO bate. Usado p/ a janela do
 // snapshot diário: a próxima ocorrência de cada weekday de trabalho.
 function nextOccurrenceDate(fromYmd, weekdayIso) {
@@ -497,4 +534,4 @@ async function readSlotsMulti({ slots, sala = null }, { getGradeHtml, isExceptio
   };
 }
 
-module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks, matchTeacher, nextOccurrenceDate, suggestRoomCaps, parseSlotsInput, distinctSlotDates, matchOcupacao, readSlotsMulti };
+module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks, matchTeacher, nextOccurrenceDate, suggestRoomCaps, parseSlotsInput, distinctSlotDates, matchOcupacao, readSlotsMulti, statusOcupa, statusConhecido, cursoCapRef };

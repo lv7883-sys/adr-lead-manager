@@ -6,6 +6,7 @@
 // kind='SCRAPE_EXTRANET'. ESPECÍFICO da fonte (camada de adapter) — o core não o conhece.
 
 const crypto = require('../../crypto');
+const logger = require('../../logger');
 const { withTenant } = require('../../db');
 const { withExtranetLock } = require('../extranet-lock');
 const client = require('./extranet-client');
@@ -38,57 +39,107 @@ async function produce(binding, { destDir } = {}) {
 // JANELA: a PRÓXIMA OCORRÊNCIA de cada weekday de trabalho (1..6) → 6 fetches/dia,
 // prospectivo. Gap FORA do lock (lock retido só no GET, ~0,5s).
 //
-// GRÃO: (professor) × (capability que ele OFERECE) × weekday × slot_time.
+// GRÃO: (recurso) × (capability) × weekday × slot_time — para PROFESSOR e para SALA.
 //
 // ⚠️ SEMÂNTICA P/ O PAINEL — LER COMO CAPACIDADE, NÃO DEMANDA: `occupied=true` significa que o
-//   PROFESSOR está OCUPADO naquele horário (capacidade consumida). Como ele não dá duas aulas
-//   ao mesmo tempo, marcamos occupied em TODAS as capabilities dele naquele slot. Logo
-//   "ocupação de violão" = CAPACIDADE de violão consumida (profs de violão indisponíveis),
-//   NÃO "nº de aulas de violão dadas". Demanda por instrumento é OUTRO eixo (ADR próprio).
+//   RECURSO está OCUPADO naquele horário (capacidade consumida). O PROFESSOR não dá duas aulas
+//   ao mesmo tempo → occupied em TODAS as capabilities dele naquele slot. A SALA (Opção D) está
+//   ocupada para TODAS as suas VOCAÇÕES (resource_capability do ROOM) naquele slot. Logo
+//   "ocupação de violão" = CAPACIDADE de violão consumida, NÃO "nº de aulas de violão dadas".
 //
-// ⚠️ APROXIMAÇÃO (decisão consciente): o professor da aula vem por NAME-MATCH (matchTeacher,
-//   prefixo ancorado) — métrica de TENDÊNCIA, não exatidão. A via exata (?professor=<id> por
-//   professor, ~138 fetches/dia) estoura o throttle. Nome ambíguo → NÃO atribui (melhor faltar
-//   que errar). Mesma honestidade do "origem não identificada".
+// ⚠️ STATUS (DP-C, valinhos.statusOcupa): cancelamento NÃO ocupa. Aula 'Cancelada*' aparece na
+//   grade futura mas libera o slot → não entra (nem prof nem sala). Status desconhecido =
+//   conservador (ocupado) + log. Isto corrige o bug anterior (tudo-que-aparece = ocupado).
 //
-// AMPLIAÇÃO FUTURA: salas não entram (sem disponibilidade recorrente no catálogo).
-async function captureHistory({ tenantId, binding }) {
-  const cfg = binding.config || {};
-  const senha = crypto.decrypt(cfg.credential_enc);
-  if (!senha) throw new Error('scrape-extranet.captureHistory: credencial vazia/indecifrável');
-  const creds = { email: cfg.email, senha, perfil: cfg.perfil, unidade: cfg.unidade };
-  const session = await client.getSession(creds);
-
-  // catálogo: professores ativos (id+nome) + capabilities OFERTADAS por professor.
-  const teachers = (await withTenant(tenantId, (c) => c.query(
-    `SELECT id AS resource_id, name FROM resources.resource WHERE tenant_id=$1 AND type='TEACHER' AND active`, [tenantId]))).rows;
-  const capsByResource = new Map();
-  for (const row of (await withTenant(tenantId, (c) => c.query(
-    `SELECT resource_id, capability_id FROM resources.resource_capability WHERE tenant_id=$1`, [tenantId]))).rows) {
-    if (!capsByResource.has(row.resource_id)) capsByResource.set(row.resource_id, []);
-    capsByResource.get(row.resource_id).push(row.capability_id);
+// ⚠️ APROXIMAÇÃO (decisão consciente): o professor vem por NAME-MATCH (matchTeacher, prefixo
+//   ancorado) — métrica de TENDÊNCIA. Nome ambíguo → NÃO atribui o prof, mas a SALA daquela aula
+//   AINDA é capturada (a ocupação física da sala independe de identificar o professor).
+//
+// IO INJETÁVEL: `getGradeHtml(date, idx)` permite testar sem Extranet. Default = fetch real
+// (sob pg_advisory_lock, gap FORA do lock). 6 fetches/rodada (1 por weekday); sala sai do MESMO
+// HTML — custo de rede ZERO em relação à captura de professor.
+async function captureHistory({ tenantId, binding, getGradeHtml }) {
+  if (!getGradeHtml) {
+    const cfg = binding.config || {};
+    const senha = crypto.decrypt(cfg.credential_enc);
+    if (!senha) throw new Error('scrape-extranet.captureHistory: credencial vazia/indecifrável');
+    const creds = { email: cfg.email, senha, perfil: cfg.perfil, unidade: cfg.unidade };
+    const session = await client.getSession(creds);
+    getGradeHtml = async (date, idx) => {
+      if (idx > 0) await client.throttleGap();                   // gap FORA do lock
+      return withExtranetLock(
+        () => client.fetchAuthed(`/mod_agenda/api-salas-grade.php?hoje=${date}&professor=`, session, { noGap: true }),
+        { timeoutMs: 60000 });
+    };
   }
 
-  // OCUPADO real, DIRETO da grade: próxima ocorrência de cada weekday (gap FORA do lock).
+  // catálogo: professores ativos (id+nome), salas ativas (id+external_ref) e o de-para
+  // resource→capabilities (serve prof E sala — resource_capability cobre os dois) + ref da cap.
+  const teachers = (await withTenant(tenantId, (c) => c.query(
+    `SELECT id AS resource_id, name FROM resources.resource WHERE tenant_id=$1 AND type='TEACHER' AND active`, [tenantId]))).rows;
+  const rooms = (await withTenant(tenantId, (c) => c.query(
+    `SELECT id AS resource_id, external_ref FROM resources.resource WHERE tenant_id=$1 AND type='ROOM' AND active`, [tenantId]))).rows;
+  const roomByNum = new Map();        // número da sala (external_ref) → roomResourceId
+  for (const r of rooms) { const n = Number(r.external_ref); if (Number.isInteger(n)) roomByNum.set(n, r.resource_id); }
+  const capsByResource = new Map();   // resourceId → [capabilityId]  (prof: competências; sala: vocações)
+  const capRefById = new Map();       // capabilityId → external_ref  (só p/ a validação informativa)
+  for (const row of (await withTenant(tenantId, (c) => c.query(
+    `SELECT rc.resource_id, rc.capability_id, cap.external_ref
+       FROM resources.resource_capability rc
+       JOIN resources.capability cap ON cap.id = rc.capability_id
+      WHERE rc.tenant_id=$1`, [tenantId]))).rows) {
+    if (!capsByResource.has(row.resource_id)) capsByResource.set(row.resource_id, []);
+    capsByResource.get(row.resource_id).push(row.capability_id);
+    capRefById.set(row.capability_id, row.external_ref);
+  }
+
+  // OCUPADO real, DIRETO da grade: próxima ocorrência de cada weekday.
   const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // YYYY-MM-DD BRT
-  const occSet = new Set(); // chave: resource|cap|weekday|slot — capacidade consumida
-  const stats = { fetched: 0, aulas: 0, resolvidas: 0, ambiguas: 0, semCapability: 0 };
+  const occSet = new Set(); // chave: resource|cap|weekday|slot — capacidade consumida (prof OU sala)
+  const stats = { fetched: 0, aulas: 0, resolvidas: 0, ambiguas: 0, semCapability: 0,
+    canceladas: 0, statusDesconhecido: 0, salasResolvidas: 0, salasNaoCasadas: 0, salasSemVocacao: 0, vocacaoInconsistente: 0 };
+  let idx = 0;
   for (const wd of [1, 2, 3, 4, 5, 6]) {
     const date = valinhos.nextOccurrenceDate(hoje, wd);
-    if (stats.fetched > 0) await client.throttleGap();           // gap FORA do lock
-    const html = await withExtranetLock(
-      () => client.fetchAuthed(`/mod_agenda/api-salas-grade.php?hoje=${date}&professor=`, session, { noGap: true }),
-      { timeoutMs: 60000 });
+    const html = await getGradeHtml(date, idx); idx++;
     stats.fetched++;
     for (const aula of valinhos.parseGradeOcupacao(html)) {
-      if (!aula.prof || !aula.hora_inicio) continue;
+      if (!aula.hora_inicio) continue;
       stats.aulas++;
-      const m = valinhos.matchTeacher(aula.prof, teachers);
-      if (!m.resource_id) { stats.ambiguas++; continue; }        // não atribui (melhor faltar)
-      stats.resolvidas++;
-      const caps = capsByResource.get(m.resource_id) || [];
-      if (!caps.length) { stats.semCapability++; continue; }
-      for (const capId of caps) occSet.add(`${m.resource_id}|${capId}|${wd}|${aula.hora_inicio}`); // capacidade: todas as caps do prof
+
+      // STATUS (DP-C): cancelada NÃO ocupa; desconhecido = conservador (ocupado) + log p/ revisão.
+      if (!valinhos.statusConhecido(aula.status)) {
+        stats.statusDesconhecido++;
+        logger.warn('capture.status_desconhecido', { tenant_id: tenantId, status: aula.status, sala: aula.sala });
+      }
+      if (!valinhos.statusOcupa(aula.status)) { stats.canceladas++; continue; } // cancelada → slot livre
+
+      // PROFESSOR — capacidade consumida em TODAS as caps dele (ambíguo: não atribui, mas a sala segue).
+      if (aula.prof) {
+        const m = valinhos.matchTeacher(aula.prof, teachers);
+        if (!m.resource_id) { stats.ambiguas++; } else {
+          stats.resolvidas++;
+          const caps = capsByResource.get(m.resource_id) || [];
+          if (!caps.length) stats.semCapability++;
+          for (const capId of caps) occSet.add(`${m.resource_id}|${capId}|${wd}|${aula.hora_inicio}`);
+        }
+      }
+
+      // SALA (Opção D) — UMA linha por VOCAÇÃO da sala. Número "Sala N" → ROOM por external_ref.
+      const num = Number((String(aula.sala).match(/\d+/) || [])[0]);
+      if (!Number.isInteger(num)) continue;
+      const roomId = roomByNum.get(num);
+      if (!roomId) { stats.salasNaoCasadas++; logger.warn('capture.sala_nao_casada', { tenant_id: tenantId, sala: aula.sala, num }); continue; }
+      const vocacoes = capsByResource.get(roomId) || [];
+      if (!vocacoes.length) { stats.salasSemVocacao++; logger.warn('capture.sala_sem_vocacao', { tenant_id: tenantId, sala: aula.sala }); continue; }
+      stats.salasResolvidas++;
+      // VALIDAÇÃO informativa (não bloqueia): o instrumento da aula está entre as vocações da sala?
+      const cursoRef = valinhos.cursoCapRef(aula.curso);
+      if (cursoRef && !vocacoes.some((id) => capRefById.get(id) === cursoRef)) {
+        stats.vocacaoInconsistente++;
+        logger.info('capture.vocacao_inconsistente', { tenant_id: tenantId, sala: aula.sala, curso: aula.curso, curso_cap: cursoRef });
+      }
+      for (const capId of vocacoes) occSet.add(`${roomId}|${capId}|${wd}|${aula.hora_inicio}`);
     }
   }
 
