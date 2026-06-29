@@ -306,7 +306,32 @@ router.get('/:tenantId/resources/grade-recorrente', authenticate, requireTenantA
         }
       }
 
-      // e. EXPEDIENTE do tenant (horário de atendimento por-dia) = agenda recorrente da sala.
+      // e. OCUPAÇÃO vigente (occupation_history) dos PROFESSORES e SALAS selecionados → desconto.
+      // Estado vigente por (resource_id, weekday, slot_time) = registro de MAIOR changed_at
+      // (DISTINCT ON ... changed_at DESC). occupied=true → intervalo ocupado [slot_time, slot_end).
+      // slot_end NULL (legado pré-050) → fallback [slot_time, slot_time+60min) (some na recaptura).
+      // capability_id colapsa: occupied/slot_end são do RECURSO (iguais entre as caps no mesmo slot).
+      const ocupByResource = new Map();
+      const allSelIds = [...profIdsSel, ...salaIdsSel];
+      if (allSelIds.length) {
+        const rows = (await c.query(
+          `SELECT DISTINCT ON (resource_id, weekday, slot_time)
+                  resource_id, weekday,
+                  to_char(slot_time,'HH24:MI') AS slot_time, to_char(slot_end,'HH24:MI') AS slot_end, occupied
+             FROM resources.occupation_history
+            WHERE resource_id = ANY($1::uuid[])
+            ORDER BY resource_id, weekday, slot_time, changed_at DESC`, [allSelIds])).rows;
+        for (const r of rows) {
+          if (!r.occupied) continue; // estado vigente LIVRE → não desconta
+          const start = grade.toMin(r.slot_time);
+          const end = r.slot_end ? grade.toMin(r.slot_end) : start + 60; // legado NULL → fallback 60min
+          if (!(end > start)) continue; // defensivo (slot_end <= slot_time)
+          if (!ocupByResource.has(r.resource_id)) ocupByResource.set(r.resource_id, []);
+          ocupByResource.get(r.resource_id).push({ weekday: r.weekday, start, end });
+        }
+      }
+
+      // f. EXPEDIENTE do tenant (horário de atendimento por-dia) = agenda recorrente da sala.
       // Multi-tenant: lê do tenant atual (jsonb novo OU colunas legadas como fallback). Nada hardcoded.
       const hrow = (await c.query(
         `SELECT horario_comercial AS jsonb,
@@ -316,21 +341,25 @@ router.get('/:tenantId/resources/grade-recorrente', authenticate, requireTenantA
            FROM tenants WHERE id = $1`, [req.tenantId])).rows[0] || {};
       const horario = hrow.jsonb || fromLegacy(hrow.inicio, hrow.fim, hrow.dias);
 
-      return { cap, profsCompat, salasCompat, profAvail, profIdsSel, salaIdsSel, horario };
+      return { cap, profsCompat, salasCompat, profAvail, ocupByResource, profIdsSel, salaIdsSel, horario };
     });
 
     if (out.notFound) return res.status(404).json({ error: 'capability não encontrada neste tenant' });
 
     const profSel = new Set(out.profIdsSel);
     const salaSel = new Set(out.salaIdsSel);
-    const professoresGrid = out.profIdsSel.map((id) => ({ id, avail: out.profAvail.get(id) || [] }));
+    // Professores: disponibilidade + ocupação vigente (desconto). Salas: lista + ocupação vigente.
+    const professoresGrid = out.profIdsSel.map((id) => ({
+      id, avail: out.profAvail.get(id) || [], ocup: out.ocupByResource.get(id) || [],
+    }));
+    const salasGrid = out.salaIdsSel.map((id) => ({ id, ocup: out.ocupByResource.get(id) || [] }));
     // Expediente por weekday (ISO 1=seg..7=dom) em minutos — mesma convenção do resource_availability.
     const expediente = new Map();
     for (let weekday = 1; weekday <= 7; weekday++) {
       const faixas = faixasDoDia(out.horario, weekday).map((f) => ({ start: grade.toMin(f.inicio), end: grade.toMin(f.fim) }));
       if (faixas.length) expediente.set(weekday, faixas);
     }
-    const { vaos, janela } = grade.computeVaos(professoresGrid, { salasCount: out.salaIdsSel.length, expediente });
+    const { vaos, janela } = grade.computeVaos(professoresGrid, salasGrid, expediente);
 
     res.json({
       capability: { id: out.cap.id, external_ref: out.cap.external_ref, name: out.cap.name },

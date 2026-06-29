@@ -5,17 +5,18 @@
 // capability e sua disponibilidade RECORRENTE (resource_availability) ↔ as salas (ROOM)
 // compatíveis com a capability.
 //
-// IMPORTANTE: a SALA não tem agenda própria. A Extranet só fornece horário de PROFESSOR;
-// salas nunca têm linhas em resource_availability. Por desenho, a disponibilidade recorrente
-// da sala = o EXPEDIENTE do tenant (horário de atendimento por-dia, de src/horario.js). A
-// sala compatível conta como livre em TODO o expediente do weekday; a ocupação real só aparece
-// no ao-vivo. Logo o lado "sala" aqui é: (1) quantas salas compatíveis existem (≥1 obrigatório,
-// senão não há lugar físico → 0 vãos) e (2) a moldura do expediente daquele dia.
+// FÓRMULA (Frente A): disponibilidade = expediente − ocupação. O vão livre, por weekday, é:
+//   professor compatível DISPONÍVEL e NÃO-ocupado  ∩  sala compatível NÃO-ocupada  ∩  expediente.
+//
+// SALA: não tem agenda própria (a Extranet só dá horário de PROFESSOR); por desenho ela conta
+// livre em TODO o expediente do weekday — MENOS onde occupation_history a marca ocupada. A
+// ocupação (de prof E de sala) entra como INTERVALOS [slot_time, slot_end) já resolvidos em
+// minutos (o legado slot_end NULL vira fallback de 60min na rota, não aqui). profs_livres /
+// salas_livres por subvão passam a descontar a ocupação real dos dois lados.
 //
 // Devolve INTERVALOS CONTÍNUOS crus [inicio,fim) — NÃO fatia em células de duração. O front
-// é quem fatia/arrasta (1h / 1,5h). O vão livre, por weekday, é a disponibilidade dos
-// professores INTERSECTADA com as faixas do expediente do tenant naquele dia (fora do
-// expediente nunca é vão, mesmo com professor livre). Nada de Extranet aqui.
+// é quem fatia/arrasta (1h / 1,5h). Fora do expediente nunca é vão, mesmo com professor livre.
+// Nada de Extranet aqui — o termo recorrente + a ocupação já estão no banco.
 
 // 'HH:MM[:SS]' → minutos do dia (node-pg devolve `time` como string).
 const toMin = (t) => {
@@ -54,46 +55,48 @@ function intersectLists(a, b) {
 }
 
 /**
- * computeVaos — vãos livres recorrentes por weekday. Função PURA (sem IO).
+ * computeVaos — vãos livres recorrentes por weekday, DESCONTANDO ocupação. Função PURA (sem IO).
  *
- * @param {Array<{id:string, avail:Array<{weekday:number,start:number,end:number}>}>} professores
- *   (start/end em MINUTOS do dia)
- * @param {{ salasCount:number,
- *           expediente:Map<number, Array<{start:number,end:number}>> }} opts
- *   - salasCount: nº de salas compatíveis SELECIONADAS (a sala não tem agenda própria; ver
- *     cabeçalho). < 1 → sem lugar físico → 0 vãos.
- *   - expediente: por weekday (ISO 1=seg..7=dom), as faixas do horário de atendimento do tenant
- *     em MINUTOS do dia. Weekday ausente / vazio = fechado. A sala conta livre em toda faixa.
+ * @param {Array<{id:string,
+ *                avail:Array<{weekday:number,start:number,end:number}>,
+ *                ocup?:Array<{weekday:number,start:number,end:number}>}>} professores
+ *   - avail: disponibilidade recorrente (resource_availability). ocup: ocupação vigente
+ *     (occupation_history), intervalos [start,end) em MINUTOS já resolvidos.
+ * @param {Array<{id:string, ocup?:Array<{weekday:number,start:number,end:number}>}>} salas
+ *   - salas compatíveis SELECIONADAS (lista, não contagem). Cada sala é livre em todo o
+ *     expediente MENOS onde sua ocup a cobre. < 1 sala → sem lugar físico → 0 vãos.
+ * @param {Map<number, Array<{start:number,end:number}>>} expediente
+ *   - por weekday (ISO 1=seg..7=dom), faixas do horário de atendimento em MINUTOS.
  * @returns {{ vaos: Array<{weekday:number,inicio:string,fim:string,profs_livres:number,salas_livres:number}>,
  *             janela: {weekday_min:number|null, weekday_max:number|null, hora_min:string|null, hora_max:string|null} }}
  *
- * FOLGA = CONCORRÊNCIA REAL dos professores. O dia é varrido (sweep line) nos pontos onde a
- * contagem de professores livres muda (start/end de cada resource_availability) OU onde o
- * expediente abre/fecha. Cada SUBVÃO entre dois pontos consecutivos tem profs_livres CONSTANTE;
- * só emitimos onde profs_livres >= 1 E o subvão está DENTRO do expediente (a sala cobre todo o
- * expediente, então salas_livres = salasCount, constante no recorrente). Fora do expediente
- * nunca é vão, mesmo com professor livre. NÃO re-fundimos subvãos adjacentes — o dado é fiel
- * ponto a ponto (o front decide a pintura).
+ * FOLGA = CONCORRÊNCIA REAL dos dois lados. Sweep line por weekday nos pontos onde QUALQUER
+ * contagem muda: start/end de disponibilidade de prof, de ocupação de prof, de ocupação de sala,
+ * e abre/fecha do expediente. Cada SUBVÃO entre dois pontos tem profs_livres / salas_livres
+ * CONSTANTES. profs_livres = profs DISPONÍVEIS e NÃO-ocupados ali; salas_livres = salas
+ * compatíveis NÃO-ocupadas ali. Só emitimos onde ambos >= 1 E o subvão está DENTRO do expediente.
  */
-function computeVaos(professores, opts = {}) {
-  const salasCount = Number(opts.salasCount) || 0;
-  const expediente = opts.expediente instanceof Map ? opts.expediente : new Map();
+function computeVaos(professores, salas = [], expediente = new Map()) {
+  if (!(expediente instanceof Map)) expediente = new Map();
   const emptyJanela = { weekday_min: null, weekday_max: null, hora_min: null, hora_max: null };
+  const salasCount = salas.length;
 
   // Sem sala compatível → sem lugar físico → nunca há vão (independe de professor).
   if (salasCount < 1) return { vaos: [], janela: emptyJanela };
 
-  // weekday → [{id,start,end}] só dos professores (a sala = moldura do expediente).
-  const profByDay = new Map();
-  for (const r of professores) {
-    for (const a of r.avail) {
-      if (!profByDay.has(a.weekday)) profByDay.set(a.weekday, []);
-      profByDay.get(a.weekday).push({ id: r.id, start: a.start, end: a.end });
-    }
+  // Índices por weekday → [{id,start,end}].
+  const byDay = (acc, weekday, item) => { if (!acc.has(weekday)) acc.set(weekday, []); acc.get(weekday).push(item); };
+  const profAvailByDay = new Map();  // disponibilidade de professor
+  const profOcupByDay = new Map();   // ocupação de professor
+  const salaOcupByDay = new Map();   // ocupação de sala
+  for (const p of professores) {
+    for (const a of (p.avail || [])) byDay(profAvailByDay, a.weekday, { id: p.id, start: a.start, end: a.end });
+    for (const o of (p.ocup || [])) byDay(profOcupByDay, o.weekday, { id: p.id, start: o.start, end: o.end });
   }
+  for (const s of salas) for (const o of (s.ocup || [])) byDay(salaOcupByDay, o.weekday, { id: s.id, start: o.start, end: o.end });
 
-  // janela (eixos) = moldura do EXPEDIENTE do tenant (a sala cobre todo o expediente). Independe
-  // de haver professor no dia: é o frame de horário comercial que o front desenha a semana.
+  // janela (eixos) = moldura do EXPEDIENTE do tenant. Independe de prof/ocupação: é o frame de
+  // horário comercial que o front desenha a semana.
   let wkMin = Infinity, wkMax = -Infinity, horaMin = Infinity, horaMax = -Infinity;
   for (const [weekday, faixas] of expediente) {
     for (const f of faixas) {
@@ -103,27 +106,42 @@ function computeVaos(professores, opts = {}) {
   }
 
   const vaos = [];
-  for (const weekday of [...profByDay.keys()].sort((a, b) => a - b)) {
-    const profIvs = profByDay.get(weekday);
+  // dias candidatos = onde há disponibilidade de professor (sem prof disponível, nunca há vão).
+  for (const weekday of [...profAvailByDay.keys()].sort((a, b) => a - b)) {
+    const avail = profAvailByDay.get(weekday) || [];
     const exp = expediente.get(weekday) || [];
-    if (!profIvs.length || !exp.length) continue; // dia fechado OU sem professor → sem vão
+    if (!avail.length || !exp.length) continue; // dia fechado OU sem professor → sem vão
+    const profOcup = profOcupByDay.get(weekday) || [];
+    const salaOcup = salaOcupByDay.get(weekday) || [];
 
-    // Sweep line: fronteiras = start/end dos professores ∪ start/end do expediente, ordenados e
-    // únicos. Entre duas fronteiras a cobertura é constante: cada intervalo cobre o subvão
-    // inteiro (start <= p0 && end >= p1) ou não o toca.
-    const bounds = [...new Set([...profIvs, ...exp].flatMap((iv) => [iv.start, iv.end]))].sort((a, b) => a - b);
+    // Sweep line: fronteiras = todos os start/end (avail ∪ ocup-prof ∪ ocup-sala ∪ expediente).
+    // Entre duas fronteiras a cobertura é constante: cada intervalo cobre o subvão inteiro
+    // (start <= p0 && end >= p1) ou não o toca.
+    const bounds = [...new Set(
+      [...avail, ...profOcup, ...salaOcup, ...exp].flatMap((iv) => [iv.start, iv.end]))].sort((a, b) => a - b);
     for (let k = 0; k + 1 < bounds.length; k++) {
       const p0 = bounds[k], p1 = bounds[k + 1];
       if (!exp.some((f) => f.start <= p0 && f.end >= p1)) continue; // fora do expediente → não é vão
-      const profs = new Set();
-      for (const iv of profIvs) if (iv.start <= p0 && iv.end >= p1) profs.add(iv.id);
-      if (profs.size === 0) continue;
+
+      // professores LIVRES = disponíveis aqui E não-ocupados aqui.
+      const profsLivres = new Set();
+      for (const iv of avail) if (iv.start <= p0 && iv.end >= p1) profsLivres.add(iv.id);
+      if (profsLivres.size === 0) continue;
+      for (const iv of profOcup) if (iv.start <= p0 && iv.end >= p1) profsLivres.delete(iv.id);
+      if (profsLivres.size === 0) continue;
+
+      // salas LIVRES = total selecionado − salas ocupadas aqui.
+      const salasOcupadas = new Set();
+      for (const iv of salaOcup) if (iv.start <= p0 && iv.end >= p1) salasOcupadas.add(iv.id);
+      const salasLivres = salasCount - salasOcupadas.size;
+      if (salasLivres < 1) continue;
+
       vaos.push({
         weekday,
         inicio: hhmm(p0),
         fim: hhmm(p1),
-        profs_livres: profs.size,
-        salas_livres: salasCount, // recorrente: toda sala compatível conta livre no expediente
+        profs_livres: profsLivres.size,
+        salas_livres: salasLivres,
       });
     }
   }
