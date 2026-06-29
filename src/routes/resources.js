@@ -15,6 +15,7 @@ const valinhos = require('../resources/adapters/valinhos');
 const adapters = require('../resources/adapters');     // registry por kind (anti-vazamento)
 const extranetClient = require('../resources/adapters/extranet-client');
 const { withExtranetLock } = require('../resources/extranet-lock');
+const grade = require('../resources/grade');
 const { isUuid } = require('../validation');
 
 const router = express.Router();
@@ -26,15 +27,29 @@ const WRITE_ROLES = ['TENANT_ADMIN', 'RECEPCAO'];   // VISUALIZADOR não grava
 const LOCK_TIMEOUT_MS = Number(process.env.RESOURCES_LIVE_LOCK_TIMEOUT_MS ?? 9000);
 const GRADE_PATH = (d) => `/mod_agenda/api-salas-grade.php?hoje=${encodeURIComponent(d)}&professor=`;
 
-// GET /tenant/:tenantId/resources/ocupacao-ao-vivo?anchor=YYYY-MM-DD&time=HH:MM[&sala=Sala N]
-// STREAMING (SSE): um evento 'ocorrencia' por data conforme resolve (regra das 3 semanas) +
-// 'completo' no fim. Lê ocupação AO VIVO (não cacheada) e desconta exceção.
+// GET /tenant/:tenantId/resources/ocupacao-ao-vivo
+//   LEGADO  (1 slot, retrocompat 100%):  ?anchor=YYYY-MM-DD&time=HH:MM[&sala=Sala N]
+//   MULTI   (até 3 slots, opt-in):        ?slots=YYYY-MM-DD@HH:MM[@HH:MM],...[&sala=Sala N]
+//                          ou 1 slot c/ intervalo: ?anchor=&time=&fim=HH:MM
+// STREAMING (SSE): 'ocorrencia' por (slot×data) conforme resolve + 'completo' no fim. O multi
+// agrupa slots que colapsam nas mesmas datas (1 GET por data distinta); throttle/lock intactos.
 router.get('/:tenantId/resources/ocupacao-ao-vivo', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
-  const anchor = String(req.query.anchor || '');
-  const time = String(req.query.time || '');
+  // MULTI quando vier ?slots= OU ?fim= (opt-in). Senão, caminho LEGADO 1-slot exato.
+  const isMulti = req.query.slots !== undefined || req.query.fim !== undefined;
+
+  // VALIDAÇÃO antes do SSE (não dá pra responder 400 depois do event-stream).
+  let parsed = null;
+  let anchor = '', time = '';
+  if (isMulti) {
+    parsed = valinhos.parseSlotsInput(req.query);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+  } else {
+    anchor = String(req.query.anchor || '');
+    time = String(req.query.time || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(anchor)) return res.status(400).json({ error: 'anchor inválido (YYYY-MM-DD)' });
+    if (!/^\d{2}:\d{2}$/.test(time)) return res.status(400).json({ error: 'time inválido (HH:MM)' });
+  }
   const sala = req.query.sala ? String(req.query.sala) : null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(anchor)) return res.status(400).json({ error: 'anchor inválido (YYYY-MM-DD)' });
-  if (!/^\d{2}:\d{2}$/.test(time)) return res.status(400).json({ error: 'time inválido (HH:MM)' });
 
   // SSE
   res.set({
@@ -61,7 +76,7 @@ router.get('/:tenantId/resources/ocupacao-ao-vivo', authenticate, requireTenantA
     const creds = { email: cfg.email, senha, perfil: cfg.perfil, unidade: cfg.unidade };
     const session = await extranetClient.getSession(creds); // reusa sessão do disco
 
-    // IO injetado no adapter:
+    // IO injetado no adapter (igual nos dois caminhos):
     const getGradeHtml = (d) => withExtranetLock(
       () => extranetClient.fetchAuthed(GRADE_PATH(d), session, { noGap: true }), // lock só no GET
       { timeoutMs: LOCK_TIMEOUT_MS });
@@ -70,11 +85,17 @@ router.get('/:tenantId/resources/ocupacao-ao-vivo', authenticate, requireTenantA
          WHERE tenant_id=$1 AND resource_id IS NULL AND $2::date BETWEEN starts_at::date AND ends_at::date`,
       [req.tenantId, d])).then((r) => r.rows[0].n > 0);
     const throttle = () => extranetClient.throttleGap();                  // gap FORA do lock
-    const onOccurrence = (occ) => { if (!closed) sse('ocorrencia', occ); }; // streaming por data
+    const onOccurrence = (occ) => { if (!closed) sse('ocorrencia', occ); }; // streaming conforme resolve
+    const io = { getGradeHtml, isException, throttle, onOccurrence };
 
-    const result = await valinhos.readSlot3Weeks({ anchorDate: anchor, time, sala }, { getGradeHtml, isException, throttle, onOccurrence });
-
-    if (!closed) sse('completo', { anchorDate: result.anchorDate, time: result.time, weekday: result.weekday, sala: result.sala, total: result.occurrences.length });
+    if (isMulti) {
+      const result = await valinhos.readSlotsMulti({ slots: parsed.slots, sala: parsed.sala }, io);
+      if (!closed) sse('completo', { slots: result.slots, total: result.occurrences.length });
+    } else {
+      // Caminho LEGADO preservado byte-a-byte (mesma chamada de antes).
+      const result = await valinhos.readSlot3Weeks({ anchorDate: anchor, time, sala }, io);
+      if (!closed) sse('completo', { anchorDate: result.anchorDate, time: result.time, weekday: result.weekday, sala: result.sala, total: result.occurrences.length });
+    }
     res.end();
   } catch (e) {
     logger.error('resources.ocupacao_ao_vivo.error', { tenant_id: req.tenantId, error: e.message });
@@ -219,6 +240,96 @@ router.put('/:tenantId/resources/salas/:resourceId/capabilities', authenticate, 
   } catch (err) {
     logger.error('resources.salas.put.error', { tenant_id: req.tenantId, resource_id: resourceId, error: err.message });
     res.status(500).json({ error: 'falha ao gravar capabilities da sala' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// VÃOS LIVRES RECORRENTES por capability — leitura barata de banco (sem Extranet).
+// Cruza professores↔salas compatíveis + a disponibilidade recorrente e devolve os
+// INTERVALOS contínuos livres [inicio,fim) crus (o front é quem fatia/arrasta).
+// ---------------------------------------------------------------------------
+
+// GET /tenant/:tenantId/resources/grade-recorrente?capability=cap:xxx[&professores=id1,id2][&salas=id1,id2]
+// capability aceita external_ref OU id. Filtros 'professores'/'salas' (CSV de UUID) RESTRINGEM
+// o conjunto compatível; ausentes = todos.
+router.get('/:tenantId/resources/grade-recorrente', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  const capParam = String(req.query.capability || '').trim();
+  if (!capParam) return res.status(400).json({ error: 'capability obrigatória (external_ref ou id)' });
+
+  const parseIds = (s) => String(s).split(',').map((x) => x.trim()).filter(isUuid);
+  const profFilter = req.query.professores !== undefined ? parseIds(req.query.professores) : null;
+  const salaFilter = req.query.salas !== undefined ? parseIds(req.query.salas) : null;
+
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      // a. capability por external_ref OU id (RLS confina ao tenant).
+      const cap = (await c.query(
+        `SELECT id, external_ref, name FROM resources.capability
+          WHERE external_ref = $1 OR id = $2::uuid LIMIT 1`,
+        [capParam, isUuid(capParam) ? capParam : null])).rows[0];
+      if (!cap) return { notFound: true };
+
+      // b. professores compatíveis (TEACHER com a capability).
+      const profsCompat = (await c.query(
+        `SELECT r.id, r.name AS nome
+           FROM resources.resource r
+           JOIN resources.resource_capability rc ON rc.resource_id = r.id
+          WHERE r.type='TEACHER' AND rc.capability_id = $1
+          ORDER BY r.name`, [cap.id])).rows;
+
+      // c. salas compatíveis (ROOM com a capability — vocação que a tela de atribuição alimenta).
+      const salasCompat = (await c.query(
+        `SELECT r.id, r.external_ref AS numero, r.attributes
+           FROM resources.resource r
+           JOIN resources.resource_capability rc ON rc.resource_id = r.id
+          WHERE r.type='ROOM' AND rc.capability_id = $1
+          ORDER BY r.external_ref`, [cap.id])).rows;
+
+      // seleção: filtro opcional RESTRINGE; null = todos.
+      const profIdsSel = profsCompat.filter((p) => !profFilter || profFilter.includes(p.id)).map((p) => p.id);
+      const salaIdsSel = salasCompat.filter((s) => !salaFilter || salaFilter.includes(s.id)).map((s) => s.id);
+
+      // d. disponibilidade recorrente dos selecionados → {resource_id → [{weekday,start,end}]} (minutos).
+      const availOf = async (ids) => {
+        const m = new Map();
+        if (!ids.length) return m;
+        const rows = (await c.query(
+          `SELECT resource_id, weekday, start_time, end_time
+             FROM resources.resource_availability
+            WHERE resource_id = ANY($1::uuid[])
+            ORDER BY weekday, start_time`, [ids])).rows;
+        for (const r of rows) {
+          if (!m.has(r.resource_id)) m.set(r.resource_id, []);
+          m.get(r.resource_id).push({ weekday: r.weekday, start: grade.toMin(r.start_time), end: grade.toMin(r.end_time) });
+        }
+        return m;
+      };
+      const profAvail = await availOf(profIdsSel);
+      const salaAvail = await availOf(salaIdsSel);
+
+      return { cap, profsCompat, salasCompat, profAvail, salaAvail, profIdsSel, salaIdsSel };
+    });
+
+    if (out.notFound) return res.status(404).json({ error: 'capability não encontrada neste tenant' });
+
+    const profSel = new Set(out.profIdsSel);
+    const salaSel = new Set(out.salaIdsSel);
+    const professoresGrid = out.profIdsSel.map((id) => ({ id, avail: out.profAvail.get(id) || [] }));
+    const salasGrid = out.salaIdsSel.map((id) => ({ id, avail: out.salaAvail.get(id) || [] }));
+    const { vaos, janela } = grade.computeVaos(professoresGrid, salasGrid);
+
+    res.json({
+      capability: { id: out.cap.id, external_ref: out.cap.external_ref, name: out.cap.name },
+      professores: out.profsCompat.map((p) => ({ id: p.id, nome: p.nome, selecionado: profSel.has(p.id) })),
+      salas: out.salasCompat.map((s) => ({
+        id: s.id, numero: s.numero, apelido: (s.attributes || {}).apelido || null, selecionado: salaSel.has(s.id),
+      })),
+      vaos,
+      janela,
+    });
+  } catch (err) {
+    logger.error('resources.grade_recorrente.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao montar a grade recorrente' });
   }
 });
 

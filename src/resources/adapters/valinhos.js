@@ -385,4 +385,116 @@ async function readSlot3Weeks({ anchorDate, time, sala = null }, { getGradeHtml,
   return { anchorDate, time, weekday, sala, occurrences };
 }
 
-module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks, matchTeacher, nextOccurrenceDate, suggestRoomCaps };
+// ---------------------------------------------------------------------------
+// MULTI-SLOT (até 3) — evolução da leitura ao vivo. Mesma REGRA DAS 3 SEMANAS, mas
+// agrupando slots que colapsam nas MESMAS datas (terça 14h + terça 15h = mesmas 3 datas):
+// busca cada DATA distinta UMA vez e distribui os horários pedidos daquele HTML. O throttle
+// e o lock continuem invioláveis (teto anti-429) — o agrupamento reduz o nº de requisições,
+// não o espaçamento. Reusa parseGradeOcupacao (NÃO reescreve a leitura).
+// ---------------------------------------------------------------------------
+
+const _toMinV = (t) => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m; };
+
+// matchOcupacao — o intervalo do SLOT [ini,fim) sobrepõe o da AULA [hi,hf)? O front manda
+// ini/fim do bloco arrastado (60 ou 90min); a rota NÃO calcula duração de turma. Aula sem
+// hora_fim (raro) vira ponto: conta se o início cair dentro do slot.
+function matchOcupacao(slotIni, slotFim, aulaIni, aulaFim) {
+  if (aulaIni == null) return false;
+  const a1 = _toMinV(slotIni), a2 = _toMinV(slotFim);
+  const b1 = _toMinV(aulaIni), b2 = aulaFim != null ? _toMinV(aulaFim) : b1 + 1;
+  return a1 < b2 && b1 < a2;
+}
+
+// parseSlotsInput(query) — normaliza a querystring em { slots:[{key,anchorDate,inicio,fim}], sala }
+// ou { error }. Duas formas de entrada MULTI (a forma LEGADA 1-slot sem 'fim'/'slots' é tratada
+// fora, direto pelo readSlot3Weeks):
+//   ?slots=YYYY-MM-DD@HH:MM[@HH:MM],...   (até 3; @ separa data@inicio@fim; fim default +60)
+//   ?anchor=YYYY-MM-DD&time=HH:MM[&fim=HH:MM]   (1 slot com fim explícito → semântica de intervalo)
+function parseSlotsInput(query) {
+  const reDate = /^\d{4}-\d{2}-\d{2}$/, reTime = /^\d{2}:\d{2}$/;
+  const sala = query.sala ? String(query.sala) : null;
+  const fimDefault = (ini) => { const t = _toMinV(ini) + 60; return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`; };
+
+  if (query.slots !== undefined) {
+    const pieces = String(query.slots).split(',').map((s) => s.trim()).filter(Boolean);
+    if (!pieces.length) return { error: 'slots vazio' };
+    if (pieces.length > 3) return { error: 'máximo de 3 slots por consulta' };
+    const slots = [];
+    for (const p of pieces) {
+      const [anchor, ini, fim] = p.split('@').map((x) => (x == null ? x : x.trim()));
+      if (!reDate.test(anchor || '')) return { error: `slot inválido (data): ${p}` };
+      if (!reTime.test(ini || '')) return { error: `slot inválido (hora): ${p}` };
+      if (fim !== undefined && !reTime.test(fim)) return { error: `slot inválido (fim): ${p}` };
+      slots.push({ key: `${anchor}T${ini}`, anchorDate: anchor, inicio: ini, fim: fim || fimDefault(ini) });
+    }
+    return { slots, sala };
+  }
+
+  const anchor = String(query.anchor || ''), time = String(query.time || '');
+  if (!reDate.test(anchor)) return { error: 'anchor inválido (YYYY-MM-DD)' };
+  if (!reTime.test(time)) return { error: 'time inválido (HH:MM)' };
+  const fim = query.fim !== undefined ? String(query.fim) : undefined;
+  if (fim !== undefined && !reTime.test(fim)) return { error: 'fim inválido (HH:MM)' };
+  return { slots: [{ key: `${anchor}T${time}`, anchorDate: anchor, inicio: time, fim: fim || fimDefault(time) }], sala };
+}
+
+// Datas DISTINTAS (a regra das 3 semanas aplicada a cada slot, DEDUPLICADAS). Ordenadas.
+function distinctSlotDates(slots) {
+  const set = new Set();
+  for (const s of slots) for (let i = 0; i < 3; i++) set.add(_ymdAddDays(s.anchorDate, i * 7));
+  return [...set].sort();
+}
+
+// readSlotsMulti — busca cada DATA distinta UMA vez (throttle só ENTRE fetches reais) e emite
+// uma ocorrência por (slot × semana), STREAMING agrupado por data conforme cada data resolve.
+// Shape dos eventos = igual ao readSlot3Weeks + campo NOVO 'slotKey' (identifica o slot).
+async function readSlotsMulti({ slots, sala = null }, { getGradeHtml, isException, throttle, onOccurrence }) {
+  const slotDates = slots.map((s) => ({
+    slot: s,
+    dates: [0, 1, 2].map((i) => _ymdAddDays(s.anchorDate, i * 7)),
+    weekday: _weekdayIso(s.anchorDate),
+  }));
+  const occurrences = [];
+  let fetchCount = 0;
+
+  for (const date of distinctSlotDates(slots)) {
+    let parsed;
+    try {
+      if (await isException(date)) {
+        parsed = { exception: true }; // não bate na Extranet
+      } else {
+        if (fetchCount > 0 && typeof throttle === 'function') await throttle(); // gap só entre GETs reais
+        fetchCount++;
+        parsed = { slots: parseGradeOcupacao(await getGradeHtml(date)) };
+      }
+    } catch (e) {
+      const lockBusy = /lock timeout|canceling statement due to lock/i.test(e && e.message || '');
+      parsed = { error: lockBusy ? 'sistema_ocupado' : 'erro_consulta' };
+    }
+
+    for (const sd of slotDates) {
+      const i = sd.dates.indexOf(date);
+      if (i === -1) continue; // esta data não pertence a este slot
+      const base = { slotKey: sd.slot.key, occurrence: i + 1, date, weekday: sd.weekday };
+      let occ;
+      if (parsed.exception) {
+        occ = { ...base, state: 'bloqueada_por_excecao', ocupadas: [] };
+      } else if (parsed.error) {
+        occ = { ...base, state: 'indisponivel', reason: parsed.error, ocupadas: [] };
+      } else {
+        const ocupadas = parsed.slots.filter((s) =>
+          matchOcupacao(sd.slot.inicio, sd.slot.fim, s.hora_inicio, s.hora_fim) && (!sala || _salaMatch(s.sala, sala)));
+        occ = { ...base, state: ocupadas.length ? 'ocupada_por_aula' : 'livre', ocupadas: ocupadas.map((s) => ({ sala: s.sala, curso: s.curso, status: s.status })) };
+      }
+      occurrences.push(occ);
+      if (typeof onOccurrence === 'function') { try { await onOccurrence(occ); } catch (_e) { /* stream best-effort */ } }
+    }
+  }
+
+  return {
+    slots: slotDates.map((sd) => ({ slotKey: sd.slot.key, anchorDate: sd.slot.anchorDate, inicio: sd.slot.inicio, fim: sd.slot.fim, weekday: sd.weekday })),
+    occurrences,
+  };
+}
+
+module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks, matchTeacher, nextOccurrenceDate, suggestRoomCaps, parseSlotsInput, distinctSlotDates, matchOcupacao, readSlotsMulti };
