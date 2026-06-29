@@ -132,9 +132,18 @@ async function syncResources(client, { tenantId, sourceBindingId, snapshot }) {
   }
 
   // ----- 3) resource_capability: por recurso, sincroniza vínculos (insert faltantes / delete extras) -----
+  // FRONTEIRA (ADR-026): o sync só gerencia vínculos de recursos cujas capabilities VÊM DA
+  // FONTE — ou seja, cujo snapshot traz `capabilityRefs` como ARRAY (competência de TEACHER).
+  // Recurso SEM o campo (capabilityRefs undefined) tem o vínculo gerido por HUMANO, fora do
+  // alcance do sync: é o caso da SALA (vocação sala↔capability, atribuída na tela — parseSala
+  // devolve sem capabilityRefs). NUNCA tocamos (delete/insert) o vínculo desses. A distinção é
+  // por AUSÊNCIA do campo, não por length: `[]` (lista vazia explícita, ex.: TEACHER que perdeu
+  // todas as caps na fonte) SEGUE gerenciado e seus vínculos são removidos.
   for (const res of snapshot.resources) {
+    if (!Array.isArray(res.capabilityRefs)) continue; // ROOM (vocação humana) → sync não gerencia
+
     const rid = resId.get(`${res.type}|${res.ref}`);
-    const wantIds = (res.capabilityRefs || []).map((ref) => capId.get(ref)).filter(Boolean);
+    const wantIds = res.capabilityRefs.map((ref) => capId.get(ref)).filter(Boolean);
 
     if (wantIds.length) {
       const del = await client.query(
