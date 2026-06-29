@@ -143,8 +143,8 @@ test('7. validação informativa: Sala 7 com Curso VOCAL 17h → linha ROOM (bat
   assert.ok(captured.vocacaoInconsistente >= 1, 'curso VOCAL ∉ vocação(bateria) da Sala 7 → inconsistência');
 });
 
-test('8. stats agregados da rodada conferem (6 fetches, cancelada contada, salas resolvidas)', async () => {
-  assert.equal(captured.fetched, 6);
+test('8. stats agregados da rodada conferem (24 fetches = 6 weekdays × 4 semanas, cancelada, salas)', async () => {
+  assert.equal(captured.fetched, 24); // 4 semanas × 6 weekdays (mock só tem conteúdo na 1ª; demais vazias)
   assert.ok(captured.canceladas >= 1);
   assert.equal(captured.salasResolvidas, 3, 'Sala 7(15h) + Sala 9(16h) + Sala 7(17h)');
   assert.equal(captured.resolvidas, 1, 'só Ricardo(15h) resolve — o de 10h é cancelado antes do prof');

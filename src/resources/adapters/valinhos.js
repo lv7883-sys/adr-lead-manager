@@ -371,6 +371,16 @@ function nextOccurrenceDate(fromYmd, weekdayIso) {
   return fromYmd;
 }
 
+// As N próximas ocorrências (semanas CONSECUTIVAS) de um weekday: a próxima ocorrência + k*7
+// dias, k=0..N-1. Usado p/ destilar o RECORRENTE de várias semanas (uma anomalia isolada —
+// cancelamento/feriado numa semana — não vira recorrente). count default 4.
+function occurrenceDates(fromYmd, weekdayIso, count = 4) {
+  const base = nextOccurrenceDate(fromYmd, weekdayIso);
+  const out = [];
+  for (let k = 0; k < count; k++) out.push(_ymdAddDays(base, k * 7));
+  return out;
+}
+
 const _salaMatch = (a, b) => String(a || '').toLowerCase().replace(/\s+/g, '') === String(b || '').toLowerCase().replace(/\s+/g, '');
 function _ymdAddDays(ymd, n) {
   const [y, mo, d] = ymd.split('-').map(Number);
@@ -534,4 +544,4 @@ async function readSlotsMulti({ slots, sala = null }, { getGradeHtml, isExceptio
   };
 }
 
-module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks, matchTeacher, nextOccurrenceDate, suggestRoomCaps, parseSlotsInput, distinctSlotDates, matchOcupacao, readSlotsMulti, statusOcupa, statusConhecido, cursoCapRef };
+module.exports = { parse, fetch, CAPABILITIES, CURSOS_BUSCA, DEPARA, capRef, parseGradeOcupacao, readSlot3Weeks, matchTeacher, nextOccurrenceDate, occurrenceDates, suggestRoomCaps, parseSlotsInput, distinctSlotDates, matchOcupacao, readSlotsMulti, statusOcupa, statusConhecido, cursoCapRef };

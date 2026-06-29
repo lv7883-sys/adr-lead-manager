@@ -55,9 +55,22 @@ async function produce(binding, { destDir } = {}) {
 //   ancorado) — métrica de TENDÊNCIA. Nome ambíguo → NÃO atribui o prof, mas a SALA daquela aula
 //   AINDA é capturada (a ocupação física da sala independe de identificar o professor).
 //
+// 4 SEMANAS (DESTILAÇÃO DO RECORRENTE): lê 4 ocorrências de cada weekday (próxima + 7/14/21 dias)
+// e destila o estado recorrente por (resource, cap, weekday, slot). REGRA "OCUPADO GANHA": o slot
+// é OCUPADO no recorrente se aparece com aula (statusOcupa) em >=1 das 4 semanas; só é LIVRE se
+// livre nas 4. Assim uma ANOMALIA isolada (cancelamento/feriado numa semana) NÃO apaga a ocupação
+// recorrente (era o bug: 1 semana com cancelamento gravava "livre"). slot_end ocupado = o MAIOR
+// das ocorrências (conservador). Feriado formal (resource_exception) fica fora deste escopo — a
+// regra "ocupado ganha" já neutraliza feriado isolado.
+//
+// ROBUSTEZ: se o fetch de UMA das 4 semanas falhar, aquela semana é tratada como SEM DADO (ignora
+// na contagem) — NUNCA como "livre" (seria o mesmo bug). Decide com as semanas que vieram. Se as
+// 4 falharem para um weekday, nada é destilado p/ ele e o DIFF preserva o estado anterior (não
+// "libera" por falha).
+//
 // IO INJETÁVEL: `getGradeHtml(date, idx)` permite testar sem Extranet. Default = fetch real
-// (sob pg_advisory_lock, gap FORA do lock). 6 fetches/rodada (1 por weekday); sala sai do MESMO
-// HTML — custo de rede ZERO em relação à captura de professor.
+// (sob pg_advisory_lock, gap FORA do lock; ~24 fetches serializados/rodada ≈ +10min, 1x/dia de
+// madrugada). Sala sai do MESMO HTML — custo de rede ZERO em relação à captura de professor.
 async function captureHistory({ tenantId, binding, getGradeHtml }) {
   if (!getGradeHtml) {
     const cfg = binding.config || {};
@@ -93,54 +106,80 @@ async function captureHistory({ tenantId, binding, getGradeHtml }) {
     capRefById.set(row.capability_id, row.external_ref);
   }
 
-  // OCUPADO real, DIRETO da grade: próxima ocorrência de cada weekday.
+  // OCUPADO real, DIRETO da grade: 4 ocorrências (semanas) de cada weekday, destiladas.
   const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // YYYY-MM-DD BRT
-  const occMap = new Map(); // chave: resource|cap|weekday|slot → slot_end ('HH:MM'|null). Capacidade consumida (prof OU sala).
-  const stats = { fetched: 0, aulas: 0, resolvidas: 0, ambiguas: 0, semCapability: 0,
-    canceladas: 0, statusDesconhecido: 0, salasResolvidas: 0, salasNaoCasadas: 0, salasSemVocacao: 0, vocacaoInconsistente: 0 };
+  const SEMANAS = Math.max(1, Number(process.env.EXTRANET_CAPTURE_SEMANAS ?? 4));
+  // occMap = estado DESTILADO: chave resource|cap|weekday|slot → slot_end ('HH:MM'|null). A PRESENÇA
+  // da chave = ocupado em >=1 semana ("ocupado ganha"); o valor = MAIOR slot_end (HH:MM zero-pad
+  // compara lexicograficamente = cronologicamente; null = sem fim conhecido).
+  const occMap = new Map();
+  const coveredWd = new Set(); // weekdays com >=1 semana de dado (gate do "freed" no diff).
+  const recordOcc = (key, fim) => {
+    const end = fim || null;
+    if (!occMap.has(key)) { occMap.set(key, end); return; }
+    const cur = occMap.get(key);
+    if (end && (cur === null || end > cur)) occMap.set(key, end); // mantém o MAIOR fim
+  };
+  const stats = { fetched: 0, semanasFalhadas: 0, weekdaysSemDado: 0, aulas: 0, resolvidas: 0, ambiguas: 0,
+    semCapability: 0, canceladas: 0, statusDesconhecido: 0, salasResolvidas: 0, salasNaoCasadas: 0, salasSemVocacao: 0, vocacaoInconsistente: 0 };
   let idx = 0;
   for (const wd of [1, 2, 3, 4, 5, 6]) {
-    const date = valinhos.nextOccurrenceDate(hoje, wd);
-    const html = await getGradeHtml(date, idx); idx++;
-    stats.fetched++;
-    for (const aula of valinhos.parseGradeOcupacao(html)) {
-      if (!aula.hora_inicio) continue;
-      stats.aulas++;
-
-      // STATUS (DP-C): cancelada NÃO ocupa; desconhecido = conservador (ocupado) + log p/ revisão.
-      if (!valinhos.statusConhecido(aula.status)) {
-        stats.statusDesconhecido++;
-        logger.warn('capture.status_desconhecido', { tenant_id: tenantId, status: aula.status, sala: aula.sala });
+    const dates = valinhos.occurrenceDates(hoje, wd, SEMANAS);
+    let semanasOk = 0;
+    for (const date of dates) {
+      let html;
+      try {
+        html = await getGradeHtml(date, idx);
+      } catch (e) {
+        // falha de UMA semana → SEM DADO (nunca "livre"). Decide com as demais.
+        stats.semanasFalhadas++;
+        logger.warn('capture.semana_falhou', { tenant_id: tenantId, weekday: wd, date, error: e.message });
+        idx++; continue;
       }
-      if (!valinhos.statusOcupa(aula.status)) { stats.canceladas++; continue; } // cancelada → slot livre
+      idx++;
+      semanasOk++;
+      stats.fetched++;
+      for (const aula of valinhos.parseGradeOcupacao(html)) {
+        if (!aula.hora_inicio) continue;
+        stats.aulas++;
 
-      // PROFESSOR — capacidade consumida em TODAS as caps dele (ambíguo: não atribui, mas a sala segue).
-      if (aula.prof) {
-        const m = valinhos.matchTeacher(aula.prof, teachers);
-        if (!m.resource_id) { stats.ambiguas++; } else {
-          stats.resolvidas++;
-          const caps = capsByResource.get(m.resource_id) || [];
-          if (!caps.length) stats.semCapability++;
-          for (const capId of caps) occMap.set(`${m.resource_id}|${capId}|${wd}|${aula.hora_inicio}`, aula.hora_fim || null);
+        // STATUS (DP-C): cancelada NÃO ocupa NAQUELA semana; desconhecido = conservador + log.
+        if (!valinhos.statusConhecido(aula.status)) {
+          stats.statusDesconhecido++;
+          logger.warn('capture.status_desconhecido', { tenant_id: tenantId, status: aula.status, sala: aula.sala });
         }
-      }
+        if (!valinhos.statusOcupa(aula.status)) { stats.canceladas++; continue; } // cancelada → livre nessa semana
 
-      // SALA (Opção D) — UMA linha por VOCAÇÃO da sala. Número "Sala N" → ROOM por external_ref.
-      const num = Number((String(aula.sala).match(/\d+/) || [])[0]);
-      if (!Number.isInteger(num)) continue;
-      const roomId = roomByNum.get(num);
-      if (!roomId) { stats.salasNaoCasadas++; logger.warn('capture.sala_nao_casada', { tenant_id: tenantId, sala: aula.sala, num }); continue; }
-      const vocacoes = capsByResource.get(roomId) || [];
-      if (!vocacoes.length) { stats.salasSemVocacao++; logger.warn('capture.sala_sem_vocacao', { tenant_id: tenantId, sala: aula.sala }); continue; }
-      stats.salasResolvidas++;
-      // VALIDAÇÃO informativa (não bloqueia): o instrumento da aula está entre as vocações da sala?
-      const cursoRef = valinhos.cursoCapRef(aula.curso);
-      if (cursoRef && !vocacoes.some((id) => capRefById.get(id) === cursoRef)) {
-        stats.vocacaoInconsistente++;
-        logger.info('capture.vocacao_inconsistente', { tenant_id: tenantId, sala: aula.sala, curso: aula.curso, curso_cap: cursoRef });
+        // PROFESSOR — capacidade consumida em TODAS as caps dele (ambíguo: não atribui, mas a sala segue).
+        if (aula.prof) {
+          const m = valinhos.matchTeacher(aula.prof, teachers);
+          if (!m.resource_id) { stats.ambiguas++; } else {
+            stats.resolvidas++;
+            const caps = capsByResource.get(m.resource_id) || [];
+            if (!caps.length) stats.semCapability++;
+            for (const capId of caps) recordOcc(`${m.resource_id}|${capId}|${wd}|${aula.hora_inicio}`, aula.hora_fim);
+          }
+        }
+
+        // SALA (Opção D) — UMA linha por VOCAÇÃO da sala. Número "Sala N" → ROOM por external_ref.
+        const num = Number((String(aula.sala).match(/\d+/) || [])[0]);
+        if (!Number.isInteger(num)) continue;
+        const roomId = roomByNum.get(num);
+        if (!roomId) { stats.salasNaoCasadas++; logger.warn('capture.sala_nao_casada', { tenant_id: tenantId, sala: aula.sala, num }); continue; }
+        const vocacoes = capsByResource.get(roomId) || [];
+        if (!vocacoes.length) { stats.salasSemVocacao++; logger.warn('capture.sala_sem_vocacao', { tenant_id: tenantId, sala: aula.sala }); continue; }
+        stats.salasResolvidas++;
+        // VALIDAÇÃO informativa (não bloqueia): o instrumento da aula está entre as vocações da sala?
+        const cursoRef = valinhos.cursoCapRef(aula.curso);
+        if (cursoRef && !vocacoes.some((id) => capRefById.get(id) === cursoRef)) {
+          stats.vocacaoInconsistente++;
+          logger.info('capture.vocacao_inconsistente', { tenant_id: tenantId, sala: aula.sala, curso: aula.curso, curso_cap: cursoRef });
+        }
+        for (const capId of vocacoes) recordOcc(`${roomId}|${capId}|${wd}|${aula.hora_inicio}`, aula.hora_fim);
       }
-      for (const capId of vocacoes) occMap.set(`${roomId}|${capId}|${wd}|${aula.hora_inicio}`, aula.hora_fim || null);
     }
+    if (semanasOk > 0) coveredWd.add(wd);
+    else { stats.weekdaysSemDado++; logger.warn('capture.weekday_sem_dado', { tenant_id: tenantId, weekday: wd }); }
   }
 
   // estado anterior (último por slot, via índice changed_at DESC) p/ o DIFF.
@@ -164,8 +203,10 @@ async function captureHistory({ tenantId, binding, getGradeHtml }) {
     }
   }
   for (const [key, prev] of lastMap) {
-    if (prev.occupied === true && !occMap.has(key)) {
-      const [r, c, w, s] = key.split('|');
+    const [r, c, w, s] = key.split('|');
+    // só LIBERA (occupied=false) se o weekday teve dado nesta rodada (>=1 semana). Weekday sem
+    // dado (todas as semanas falharam) → preserva o estado anterior (não "libera" por falha).
+    if (prev.occupied === true && !occMap.has(key) && coveredWd.has(+w)) {
       changes.push({ resource_id: r, capability_id: c, weekday: +w, slot_time: s, slot_end: prev.slot_end, occupied: false });
     }
   }
