@@ -16,6 +16,7 @@ const adapters = require('../resources/adapters');     // registry por kind (ant
 const extranetClient = require('../resources/adapters/extranet-client');
 const { withExtranetLock } = require('../resources/extranet-lock');
 const grade = require('../resources/grade');
+const { faixasDoDia, fromLegacy } = require('../horario'); // expediente do tenant = agenda recorrente da sala
 const { isUuid } = require('../validation');
 
 const router = express.Router();
@@ -278,6 +279,8 @@ router.get('/:tenantId/resources/grade-recorrente', authenticate, requireTenantA
           ORDER BY r.name`, [cap.id])).rows;
 
       // c. salas compatíveis (ROOM com a capability — vocação que a tela de atribuição alimenta).
+      // A sala NÃO tem agenda própria (a Extranet só dá horário de professor): ela conta livre
+      // em todo o expediente. Aqui só importa QUANTAS salas compatíveis há (≥1 = lugar físico).
       const salasCompat = (await c.query(
         `SELECT r.id, r.external_ref AS numero, r.attributes
            FROM resources.resource r
@@ -289,25 +292,31 @@ router.get('/:tenantId/resources/grade-recorrente', authenticate, requireTenantA
       const profIdsSel = profsCompat.filter((p) => !profFilter || profFilter.includes(p.id)).map((p) => p.id);
       const salaIdsSel = salasCompat.filter((s) => !salaFilter || salaFilter.includes(s.id)).map((s) => s.id);
 
-      // d. disponibilidade recorrente dos selecionados → {resource_id → [{weekday,start,end}]} (minutos).
-      const availOf = async (ids) => {
-        const m = new Map();
-        if (!ids.length) return m;
+      // d. disponibilidade recorrente dos PROFESSORES selecionados → {id → [{weekday,start,end}]} (min).
+      const profAvail = new Map();
+      if (profIdsSel.length) {
         const rows = (await c.query(
           `SELECT resource_id, weekday, start_time, end_time
              FROM resources.resource_availability
             WHERE resource_id = ANY($1::uuid[])
-            ORDER BY weekday, start_time`, [ids])).rows;
+            ORDER BY weekday, start_time`, [profIdsSel])).rows;
         for (const r of rows) {
-          if (!m.has(r.resource_id)) m.set(r.resource_id, []);
-          m.get(r.resource_id).push({ weekday: r.weekday, start: grade.toMin(r.start_time), end: grade.toMin(r.end_time) });
+          if (!profAvail.has(r.resource_id)) profAvail.set(r.resource_id, []);
+          profAvail.get(r.resource_id).push({ weekday: r.weekday, start: grade.toMin(r.start_time), end: grade.toMin(r.end_time) });
         }
-        return m;
-      };
-      const profAvail = await availOf(profIdsSel);
-      const salaAvail = await availOf(salaIdsSel);
+      }
 
-      return { cap, profsCompat, salasCompat, profAvail, salaAvail, profIdsSel, salaIdsSel };
+      // e. EXPEDIENTE do tenant (horário de atendimento por-dia) = agenda recorrente da sala.
+      // Multi-tenant: lê do tenant atual (jsonb novo OU colunas legadas como fallback). Nada hardcoded.
+      const hrow = (await c.query(
+        `SELECT horario_comercial AS jsonb,
+                to_char(horario_comercial_inicio, 'HH24:MI') AS inicio,
+                to_char(horario_comercial_fim, 'HH24:MI') AS fim,
+                horario_comercial_dias AS dias
+           FROM tenants WHERE id = $1`, [req.tenantId])).rows[0] || {};
+      const horario = hrow.jsonb || fromLegacy(hrow.inicio, hrow.fim, hrow.dias);
+
+      return { cap, profsCompat, salasCompat, profAvail, profIdsSel, salaIdsSel, horario };
     });
 
     if (out.notFound) return res.status(404).json({ error: 'capability não encontrada neste tenant' });
@@ -315,8 +324,13 @@ router.get('/:tenantId/resources/grade-recorrente', authenticate, requireTenantA
     const profSel = new Set(out.profIdsSel);
     const salaSel = new Set(out.salaIdsSel);
     const professoresGrid = out.profIdsSel.map((id) => ({ id, avail: out.profAvail.get(id) || [] }));
-    const salasGrid = out.salaIdsSel.map((id) => ({ id, avail: out.salaAvail.get(id) || [] }));
-    const { vaos, janela } = grade.computeVaos(professoresGrid, salasGrid);
+    // Expediente por weekday (ISO 1=seg..7=dom) em minutos — mesma convenção do resource_availability.
+    const expediente = new Map();
+    for (let weekday = 1; weekday <= 7; weekday++) {
+      const faixas = faixasDoDia(out.horario, weekday).map((f) => ({ start: grade.toMin(f.inicio), end: grade.toMin(f.fim) }));
+      if (faixas.length) expediente.set(weekday, faixas);
+    }
+    const { vaos, janela } = grade.computeVaos(professoresGrid, { salasCount: out.salaIdsSel.length, expediente });
 
     res.json({
       capability: { id: out.cap.id, external_ref: out.cap.external_ref, name: out.cap.name },

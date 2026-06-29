@@ -32,12 +32,33 @@ done
 echo "[itest] bootstrap (role + db + lead_manager.tenants) + migration 046…"
 docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d postgres >/dev/null <<SQL
 CREATE ROLE lead_manager_user LOGIN PASSWORD 'itest';
+-- search_path como em produção (ALTER ROLE da migration 001): a rota consulta 'tenants'
+-- (schema lead_manager) sem qualificar e 'resources.*' qualificado.
+ALTER ROLE lead_manager_user SET search_path = lead_manager, resources, public;
 CREATE DATABASE lm_itest OWNER postgres;
 SQL
 docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest >/dev/null <<SQL
 CREATE SCHEMA lead_manager;
-CREATE TABLE lead_manager.tenants (id uuid PRIMARY KEY, name text);
+-- tenants com as colunas de horário de atendimento (jsonb por-dia + legado), que a grade
+-- recorrente lê como a "agenda recorrente da sala" (expediente do tenant).
+CREATE TABLE lead_manager.tenants (
+  id uuid PRIMARY KEY,
+  name text,
+  horario_comercial jsonb,
+  horario_comercial_inicio time,
+  horario_comercial_fim time,
+  horario_comercial_dias smallint[]
+);
 INSERT INTO lead_manager.tenants (id, name) VALUES ('${TENANT_A}','itest-A'), ('${TENANT_B}','itest-B');
+-- EXPEDIENTE do TENANT_A: seg–sex 09:00–22:00, sáb 09:00–13:00 (dom fechado). TENANT_B sem horário.
+UPDATE lead_manager.tenants SET horario_comercial = '{
+  "1":[{"inicio":"09:00","fim":"22:00"}],
+  "2":[{"inicio":"09:00","fim":"22:00"}],
+  "3":[{"inicio":"09:00","fim":"22:00"}],
+  "4":[{"inicio":"09:00","fim":"22:00"}],
+  "5":[{"inicio":"09:00","fim":"22:00"}],
+  "6":[{"inicio":"09:00","fim":"13:00"}]
+}'::jsonb WHERE id = '${TENANT_A}';
 GRANT USAGE ON SCHEMA lead_manager TO lead_manager_user;
 GRANT SELECT ON lead_manager.tenants TO lead_manager_user;
 SQL

@@ -1,12 +1,16 @@
 'use strict';
 
-// Testes de INTEGRAÇÃO da GRADE RECORRENTE (vãos com FOLGA = concorrência real, subdivididos no
-// sweep line) + o limite multi-slot da rota ao vivo (validação 400, pré-Extranet). Sobe o router
-// real num Express efêmero, autentica com token de SERVIÇO e exercita GET /grade-recorrente
-// contra um Postgres DESCARTÁVEL (migration 046). NUNCA toca produção nem a Extranet.
+// Testes de INTEGRAÇÃO da GRADE RECORRENTE (vãos) sob o NOVO modelo: a SALA não tem agenda
+// própria (a Extranet só dá horário de PROFESSOR). A disponibilidade recorrente da sala = o
+// EXPEDIENTE do tenant (horário de atendimento por-dia). Um vão existe onde há ≥1 PROFESSOR
+// compatível livre, DENTRO do expediente do dia, havendo ≥1 SALA compatível (a sala conta livre
+// em todo o expediente; salas_livres = nº de salas compatíveis). Sobe o router real num Express
+// efêmero, autentica com token de SERVIÇO e exercita GET /grade-recorrente contra um Postgres
+// DESCARTÁVEL (migration 046 + expediente semeado). NUNCA toca produção nem a Extranet.
 //
-// Provisão: test/run-resources-grade-itest.sh.
-// weekday ISO (CHECK 1..7 de resource_availability): 1=seg … 6=sáb, 7=dom.
+// Provisão: test/run-resources-grade-itest.sh (semeia o expediente do TENANT_A).
+// weekday ISO (CHECK 1..7 de resource_availability / chave do horário): 1=seg … 6=sáb, 7=dom.
+// EXPEDIENTE semeado p/ TENANT_A: seg–sex 09:00–22:00, sáb 09:00–13:00, dom fechado.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -59,40 +63,27 @@ before(async () => {
 
   // ---- TENANT A ----
   ids.capGuitarra = await cap(TENANT_A, 'cap:guitarra', 'Guitarra');
-  ids.capSozinho = await cap(TENANT_A, 'cap:canto', 'Canto'); // cap só com prof (sem sala)
+  ids.capCanto = await cap(TENANT_A, 'cap:canto', 'Canto'); // cap só com prof (sem sala)
 
   ids.pg1 = await resource(TENANT_A, 'TEACHER', 'T1', 'Prof Guitarra 1');
   ids.pg2 = await resource(TENANT_A, 'TEACHER', 'T2', 'Prof Guitarra 2');
-  ids.rg1 = await resource(TENANT_A, 'ROOM', '1', 'Sala 1');
-  ids.rg2 = await resource(TENANT_A, 'ROOM', '2', 'Sala 2');
+  // Salas Cordas: SEM resource_availability (a sala não tem agenda própria — vale o expediente).
+  ids.rg1 = await resource(TENANT_A, 'ROOM', '4', 'Sala 4 (Cordas)');
+  ids.rg2 = await resource(TENANT_A, 'ROOM', '5', 'Sala 5 (Cordas)');
   for (const r of [ids.pg1, ids.pg2, ids.rg1, ids.rg2]) await link(TENANT_A, r, ids.capGuitarra);
 
-  // seg(1) SUBDIVISÃO: PG1 08–12, PG2 08–09 ; salas RG1/RG2 08–12.
-  //   → 08:00-09:00 (2 prof/2 sala) + 09:00-12:00 (1 prof/2 sala). NÃO um único 08–12 folga 2.
+  // seg(1): PG1 08–12, PG2 10–12. Expediente seg 09–22.
+  //   → 08:00–09:00 cai FORA do expediente (clip) → some; 09:00–10:00 (1 prof) + 10:00–12:00 (2 profs).
   await avail(TENANT_A, ids.pg1, 1, '08:00', '12:00');
-  await avail(TENANT_A, ids.pg2, 1, '08:00', '09:00');
-  await avail(TENANT_A, ids.rg1, 1, '08:00', '12:00');
-  await avail(TENANT_A, ids.rg2, 1, '08:00', '12:00');
+  await avail(TENANT_A, ids.pg2, 1, '10:00', '12:00');
 
-  // ter(2) BURACO: PG1 08–12 ; salas RG1 08–09 e RG2 10–12 (nada às 09–10).
-  //   → 08:00-09:00 (1/1) + 10:00-12:00 (1/1) ; 09:00-10:00 SEM vão (0 sala).
-  await avail(TENANT_A, ids.pg1, 2, '08:00', '12:00');
-  await avail(TENANT_A, ids.rg1, 2, '08:00', '09:00');
-  await avail(TENANT_A, ids.rg2, 2, '10:00', '12:00');
+  // sáb(6): PG1 14–16, mas expediente sáb é 09–13 → professor FORA do expediente → SEM vão.
+  await avail(TENANT_A, ids.pg1, 6, '14:00', '16:00');
 
-  // qua(3): só PROF livre (PG1 14–16), nenhuma sala → SEM vão.
-  await avail(TENANT_A, ids.pg1, 3, '14:00', '16:00');
-  // qui(4): só SALA livre (RG1 14–16), nenhum prof → SEM vão.
-  await avail(TENANT_A, ids.rg1, 4, '14:00', '16:00');
-
-  // sex(5): sobreposição PARCIAL — PG1 08–11, RG1 09–12 → vão 09:00-11:00 (1/1).
-  await avail(TENANT_A, ids.pg1, 5, '08:00', '11:00');
-  await avail(TENANT_A, ids.rg1, 5, '09:00', '12:00');
-
-  // CANTO: 1 prof, NENHUMA sala compatível → grade sem vãos.
+  // CANTO: 1 prof livre seg 09–12, NENHUMA sala compatível → grade sem vãos (sem lugar físico).
   ids.pc1 = await resource(TENANT_A, 'TEACHER', 'T9', 'Prof Canto');
-  await link(TENANT_A, ids.pc1, ids.capSozinho);
-  await avail(TENANT_A, ids.pc1, 1, '08:00', '12:00');
+  await link(TENANT_A, ids.pc1, ids.capCanto);
+  await avail(TENANT_A, ids.pc1, 1, '09:00', '12:00');
 
   // ---- TENANT B (isolamento) ---- vazio de propósito.
 });
@@ -103,62 +94,30 @@ after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-test('1. SUBDIVISÃO: prof que sai às 09h reduz a folga real (não infla o vão inteiro)', async () => {
+test('1. DEIXOU DE SER 0: cap com profs + ≥1 sala + expediente → grade retorna vãos', async () => {
   const { status, json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra`);
   assert.equal(status, 200);
   assert.equal(json.professores.length, 2);
   assert.equal(json.salas.length, 2);
+  assert.ok(json.vaos.length > 0, 'esperava ≥1 vão (antes do fix vinha 0 por falta de availability de sala)');
+});
 
-  // seg: dois subvãos com folga constante e REAL — não "08:00-12:00 folga 2".
+test('2. EXPEDIENTE recorta o professor: seg PG1 livre 08:00, mas expediente começa 09:00 → 08:00 não é vão', async () => {
+  const { json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra`);
+  // seg subdividido por folga, já recortado pelo expediente (nada antes das 09:00).
   assert.deepEqual(diaVaos(json.vaos, 1), [
-    { faixa: '08:00-09:00', p: 2, s: 2 },
-    { faixa: '09:00-12:00', p: 1, s: 2 },
+    { faixa: '09:00-10:00', p: 1, s: 2 },
+    { faixa: '10:00-12:00', p: 2, s: 2 },
   ]);
+  assert.equal(json.vaos.some((v) => v.weekday === 1 && v.inicio < '09:00'), false);
 });
 
-test('2. BURACO: sem sala às 09–10 → aquele trecho NÃO vira vão', async () => {
+test('3. SÁBADO fora do expediente: prof livre sáb 14:00, expediente sáb 09–13 → SEM vão', async () => {
   const { json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra`);
-  assert.deepEqual(diaVaos(json.vaos, 2), [
-    { faixa: '08:00-09:00', p: 1, s: 1 },
-    { faixa: '10:00-12:00', p: 1, s: 1 },
-  ]);
-  // explícito: nenhum vão cobre 09:00–10:00.
-  assert.equal(json.vaos.some((v) => v.weekday === 2 && v.inicio < '10:00' && v.fim > '09:00' && v.inicio >= '09:00'), false);
+  assert.deepEqual(diaVaos(json.vaos, 6), []);
 });
 
-test('3. prof livre sem sala (qua) → SEM vão; sala livre sem prof (qui) → SEM vão', async () => {
-  const { json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra`);
-  assert.equal(json.vaos.filter((v) => v.weekday === 3).length, 0);
-  assert.equal(json.vaos.filter((v) => v.weekday === 4).length, 0);
-});
-
-test('4. sobreposição PARCIAL (sex) → vão = interseção 09:00–11:00 (1/1)', async () => {
-  const { json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra`);
-  assert.deepEqual(diaVaos(json.vaos, 5), [{ faixa: '09:00-11:00', p: 1, s: 1 }]);
-});
-
-test('5. filtro professores=PG1 → some a fronteira das 09h; vira 1 vão 08:00–12:00 (1/2)', async () => {
-  const { json } = await api('GET',
-    `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra&professores=${ids.pg1}`);
-  const sel = Object.fromEntries(json.professores.map((p) => [p.id, p.selecionado]));
-  assert.equal(sel[ids.pg1], true);
-  assert.equal(sel[ids.pg2], false);
-  assert.deepEqual(diaVaos(json.vaos, 1), [{ faixa: '08:00-12:00', p: 1, s: 2 }]);
-});
-
-test('6. filtro salas=RG1 → salas_livres cai p/ 1 em cada subvão', async () => {
-  const { json } = await api('GET',
-    `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra&salas=${ids.rg1}`);
-  const sel = Object.fromEntries(json.salas.map((s) => [s.id, s.selecionado]));
-  assert.equal(sel[ids.rg1], true);
-  assert.equal(sel[ids.rg2], false);
-  assert.deepEqual(diaVaos(json.vaos, 1), [
-    { faixa: '08:00-09:00', p: 2, s: 1 },
-    { faixa: '09:00-12:00', p: 1, s: 1 },
-  ]);
-});
-
-test('7. capability só com prof (sem sala compatível) → professores listados, vaos vazio', async () => {
+test('4. capability SEM sala compatível → professores listados, mas vaos vazio (sem lugar físico)', async () => {
   const { status, json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:canto`);
   assert.equal(status, 200);
   assert.equal(json.professores.length, 1);
@@ -166,12 +125,35 @@ test('7. capability só com prof (sem sala compatível) → professores listados
   assert.deepEqual(json.vaos, []);
 });
 
-test('8. janela (extent) cobre o weekday/hora min–max da disponibilidade', async () => {
+test('5. DESMARCAR todas as salas (filtro salas vazio) → 0 vãos', async () => {
+  const { status, json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra&salas=`);
+  assert.equal(status, 200);
+  assert.ok(json.salas.every((s) => s.selecionado === false));
+  assert.deepEqual(json.vaos, []);
+});
+
+test('6. FOLGA: salas_livres = nº de salas compatíveis (constante); profs_livres varia por subvão', async () => {
+  const { json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra`);
+  const seg = json.vaos.filter((v) => v.weekday === 1);
+  assert.ok(seg.every((v) => v.salas_livres === 2), 'salas_livres deve ser o nº de salas compatíveis (2)');
+  assert.deepEqual(seg.map((v) => v.profs_livres), [1, 2], 'profs_livres varia por subvão (sweep line)');
+});
+
+test('7. filtro professores=PG1 → some a fronteira das 10h; vira 1 vão 09:00–12:00 (1/2)', async () => {
+  const { json } = await api('GET',
+    `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra&professores=${ids.pg1}`);
+  const sel = Object.fromEntries(json.professores.map((p) => [p.id, p.selecionado]));
+  assert.equal(sel[ids.pg1], true);
+  assert.equal(sel[ids.pg2], false);
+  assert.deepEqual(diaVaos(json.vaos, 1), [{ faixa: '09:00-12:00', p: 1, s: 2 }]);
+});
+
+test('8. janela (eixos) = moldura do EXPEDIENTE do tenant (seg–sáb, 09:00–22:00)', async () => {
   const { json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra`);
   assert.equal(json.janela.weekday_min, 1);
-  assert.equal(json.janela.weekday_max, 5);
-  assert.equal(json.janela.hora_min, '08:00');
-  assert.equal(json.janela.hora_max, '16:00');
+  assert.equal(json.janela.weekday_max, 6);
+  assert.equal(json.janela.hora_min, '09:00');
+  assert.equal(json.janela.hora_max, '22:00');
 });
 
 test('9. capability inexistente → 404', async () => {
