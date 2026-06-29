@@ -95,7 +95,7 @@ async function captureHistory({ tenantId, binding, getGradeHtml }) {
 
   // OCUPADO real, DIRETO da grade: próxima ocorrência de cada weekday.
   const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // YYYY-MM-DD BRT
-  const occSet = new Set(); // chave: resource|cap|weekday|slot — capacidade consumida (prof OU sala)
+  const occMap = new Map(); // chave: resource|cap|weekday|slot → slot_end ('HH:MM'|null). Capacidade consumida (prof OU sala).
   const stats = { fetched: 0, aulas: 0, resolvidas: 0, ambiguas: 0, semCapability: 0,
     canceladas: 0, statusDesconhecido: 0, salasResolvidas: 0, salasNaoCasadas: 0, salasSemVocacao: 0, vocacaoInconsistente: 0 };
   let idx = 0;
@@ -121,7 +121,7 @@ async function captureHistory({ tenantId, binding, getGradeHtml }) {
           stats.resolvidas++;
           const caps = capsByResource.get(m.resource_id) || [];
           if (!caps.length) stats.semCapability++;
-          for (const capId of caps) occSet.add(`${m.resource_id}|${capId}|${wd}|${aula.hora_inicio}`);
+          for (const capId of caps) occMap.set(`${m.resource_id}|${capId}|${wd}|${aula.hora_inicio}`, aula.hora_fim || null);
         }
       }
 
@@ -139,39 +139,49 @@ async function captureHistory({ tenantId, binding, getGradeHtml }) {
         stats.vocacaoInconsistente++;
         logger.info('capture.vocacao_inconsistente', { tenant_id: tenantId, sala: aula.sala, curso: aula.curso, curso_cap: cursoRef });
       }
-      for (const capId of vocacoes) occSet.add(`${roomId}|${capId}|${wd}|${aula.hora_inicio}`);
+      for (const capId of vocacoes) occMap.set(`${roomId}|${capId}|${wd}|${aula.hora_inicio}`, aula.hora_fim || null);
     }
   }
 
   // estado anterior (último por slot, via índice changed_at DESC) p/ o DIFF.
   const last = (await withTenant(tenantId, (c) => c.query(
     `SELECT DISTINCT ON (resource_id, capability_id, weekday, slot_time)
-            resource_id, capability_id, weekday, to_char(slot_time,'HH24:MI') AS slot_time, occupied
+            resource_id, capability_id, weekday,
+            to_char(slot_time,'HH24:MI') AS slot_time, to_char(slot_end,'HH24:MI') AS slot_end, occupied
        FROM resources.occupation_history WHERE tenant_id=$1
       ORDER BY resource_id, capability_id, weekday, slot_time, changed_at DESC`, [tenantId]))).rows;
-  const lastMap = new Map(last.map((x) => [`${x.resource_id}|${x.capability_id}|${x.weekday}|${x.slot_time}`, x.occupied]));
+  const lastMap = new Map(last.map((x) =>
+    [`${x.resource_id}|${x.capability_id}|${x.weekday}|${x.slot_time}`, { occupied: x.occupied, slot_end: x.slot_end }]));
 
-  // DIFF (só MUDANÇA): novo/virou ocupado → true; estava ocupado e sumiu da grade → false.
+  // DIFF (só MUDANÇA). Compara occupied E slot_end → flip de estado OU mudança de DURAÇÃO da
+  // aula re-grava a linha (também faz o legado slot_end=NULL ser regravado com o fim real).
   const changes = [];
-  for (const key of occSet) {
-    if (lastMap.get(key) !== true) { const [r, c, w, s] = key.split('|'); changes.push({ resource_id: r, capability_id: c, weekday: +w, slot_time: s, occupied: true }); }
+  for (const [key, slotEnd] of occMap) {
+    const prev = lastMap.get(key);
+    if (!prev || prev.occupied !== true || prev.slot_end !== slotEnd) {
+      const [r, c, w, s] = key.split('|');
+      changes.push({ resource_id: r, capability_id: c, weekday: +w, slot_time: s, slot_end: slotEnd, occupied: true });
+    }
   }
-  for (const [key, occ] of lastMap) {
-    if (occ === true && !occSet.has(key)) { const [r, c, w, s] = key.split('|'); changes.push({ resource_id: r, capability_id: c, weekday: +w, slot_time: s, occupied: false }); }
+  for (const [key, prev] of lastMap) {
+    if (prev.occupied === true && !occMap.has(key)) {
+      const [r, c, w, s] = key.split('|');
+      changes.push({ resource_id: r, capability_id: c, weekday: +w, slot_time: s, slot_end: prev.slot_end, occupied: false });
+    }
   }
 
-  // insere as mudanças (APPEND-ONLY: só INSERT) sob RLS.
+  // insere as mudanças (APPEND-ONLY: só INSERT) sob RLS. slot_end pode ser NULL (parser sem fim).
   if (changes.length) {
     await withTenant(tenantId, async (c) => {
       for (const ch of changes) {
         await c.query(
-          `INSERT INTO resources.occupation_history (tenant_id, resource_id, capability_id, weekday, slot_time, occupied)
-                VALUES ($1, $2, $3, $4, $5::time, $6)`,
-          [tenantId, ch.resource_id, ch.capability_id, ch.weekday, ch.slot_time, ch.occupied]);
+          `INSERT INTO resources.occupation_history (tenant_id, resource_id, capability_id, weekday, slot_time, slot_end, occupied)
+                VALUES ($1, $2, $3, $4, $5::time, $6::time, $7)`,
+          [tenantId, ch.resource_id, ch.capability_id, ch.weekday, ch.slot_time, ch.slot_end, ch.occupied]);
       }
     });
   }
-  return { ...stats, slotsOcupados: occSet.size, mudancasGravadas: changes.length };
+  return { ...stats, slotsOcupados: occMap.size, mudancasGravadas: changes.length };
 }
 
 // suggestRoomCaps — sugestão de capabilities por vocação da sala (pura, sem rede).
