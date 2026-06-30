@@ -702,7 +702,11 @@ router.get(
             `SELECT count(*)::int AS n FROM leads WHERE review_queue = true AND review_result IS NULL AND status = 'REVIEW_QUEUE'`
           )
         ).rows[0].n;
-        return { leads, pendingTotal, reviewTotal };
+        // ADR-028 — N de dormência (config por tenant; default 7). O dashboard usa p/
+        // definir "lead ativo" (única fonte do N), nunca constante no código.
+        const dorm = (await c.query(
+          'SELECT dormancy_days FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
+        return { leads, pendingTotal, reviewTotal, dormancyDays: dorm?.dormancy_days ?? 7 };
       });
       res.json({
         tenant_id: req.tenantId,
@@ -711,6 +715,7 @@ router.get(
         pending_approvals_count: result.pendingTotal,
         review_queue_count: result.reviewTotal,
         lista_ordenacao: LISTA_ORDENACAO_DEFAULTS,   // ADR-028: ordenação por tenant (seed)
+        dormancy_days: result.dormancyDays,
         leads: result.leads,
       });
     } catch (err) {
@@ -2023,6 +2028,83 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
     res.json({ ok: true, config: { ..._snapshotAutomacao(out.row), updated_at: out.row.updated_at, updated_by: out.row.updated_by }, anterior: out.anterior });
   } catch (err) {
     logger.error('tenant.automacao.update_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// ===========================================================================
+// ADR-029 fatia 3 — controle do gate (modo sombra/on) + resumo do gate_shadow_log.
+// Read-only agregado (GET) + UPDATE parametrizado do flag (PUT). RLS por app.current_tenant.
+// ===========================================================================
+const GATE_MODES = ['off', 'shadow', 'on'];
+
+// GET /tenant/:tid/gate-config — config atual + desde-quando observa + resumo do sombra.
+router.get('/:tenantId/gate-config', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      const cfg = (await c.query(
+        'SELECT gate_suppression_mode, presignal_ttl_days, dormancy_days FROM tenant_lead_config WHERE tenant_id = $1',
+        [req.tenantId])).rows[0] || {};
+      const since = (await c.query(
+        'SELECT min(created_at) AS observing_since, count(*)::int AS total FROM gate_shadow_log')).rows[0];
+      const grupos = (await c.query(
+        `SELECT would_action, crivo_outcome, count(*)::int AS n
+           FROM gate_shadow_log GROUP BY would_action, crivo_outcome`)).rows;
+      return { cfg, since, grupos };
+    });
+    // Derivados nomeados (o que a tela mostra "em palavras"):
+    const g = (wa, co) => out.grupos.filter((r) => r.would_action === wa && (co === undefined || r.crivo_outcome === co))
+      .reduce((s, r) => s + r.n, 0);
+    res.json({
+      tenant_id: req.tenantId,
+      mode: GATE_MODES.includes(out.cfg.gate_suppression_mode) ? out.cfg.gate_suppression_mode : 'off',
+      presignal_ttl_days: Number.isInteger(out.cfg.presignal_ttl_days) ? out.cfg.presignal_ttl_days : 30,
+      dormancy_days: Number.isInteger(out.cfg.dormancy_days) ? out.cfg.dormancy_days : 7,
+      observing_since: out.since.observing_since || null,
+      summary: {
+        total: out.since.total,
+        would_review: g('presignal', 'not_lead'),     // iriam pro Revisar (tamanho do trade-off)
+        hard_would_eat_lead: g('hard', 'lead'),        // ⚠️ ALARME: hard engoliria um lead real
+        hard_total: g('hard'),
+        presignal_total: g('presignal'),
+        grupos: out.grupos,
+      },
+    });
+  } catch (err) {
+    logger.error('tenant.gate_config.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// PUT /tenant/:tid/gate-config — body { gate_suppression_mode?, presignal_ttl_days? }.
+router.put('/:tenantId/gate-config', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const b = req.body || {};
+  const sets = [], vals = [req.tenantId];
+  if (b.gate_suppression_mode !== undefined) {
+    if (!GATE_MODES.includes(b.gate_suppression_mode)) return res.status(400).json({ error: 'modo inválido' });
+    vals.push(b.gate_suppression_mode); sets.push(`gate_suppression_mode = $${vals.length}`);
+  }
+  if (b.presignal_ttl_days !== undefined) {
+    const ttl = Number(b.presignal_ttl_days);
+    if (!Number.isInteger(ttl) || ttl < 1 || ttl > 365) return res.status(400).json({ error: 'TTL deve ser 1–365 dias' });
+    vals.push(ttl); sets.push(`presignal_ttl_days = $${vals.length}`);
+  }
+  if (b.dormancy_days !== undefined) {
+    const d = Number(b.dormancy_days);
+    if (!Number.isInteger(d) || d < 1 || d > 365) return res.status(400).json({ error: 'Dormência deve ser 1–365 dias' });
+    vals.push(d); sets.push(`dormancy_days = $${vals.length}`);
+  }
+  if (!sets.length) return res.status(400).json({ error: 'nada para atualizar' });
+  try {
+    const r = await withTenant(req.tenantId, (c) => c.query(
+      `UPDATE tenant_lead_config SET ${sets.join(', ')}, updated_at = now()
+        WHERE tenant_id = $1
+        RETURNING gate_suppression_mode, presignal_ttl_days, dormancy_days`, vals));
+    if (!r.rows[0]) return res.status(404).json({ error: 'tenant sem configuração de leads' });
+    logger.info('tenant.gate_config.updated', { tenant_id: req.tenantId, mode: r.rows[0].gate_suppression_mode, ttl: r.rows[0].presignal_ttl_days, dormancy: r.rows[0].dormancy_days, by: req.tenantRole });
+    res.json({ ok: true, mode: r.rows[0].gate_suppression_mode, presignal_ttl_days: r.rows[0].presignal_ttl_days, dormancy_days: r.rows[0].dormancy_days });
+  } catch (err) {
+    logger.error('tenant.gate_config.update_error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
   }
 });
