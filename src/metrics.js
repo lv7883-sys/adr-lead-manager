@@ -738,6 +738,7 @@ async function computePainel(tenantId) {
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
                   min(m.received_at) AS first_in, max(m.received_at) AS last_in,
                   (array_agg(coalesce(m.media_transcription, m.body) ORDER BY m.received_at DESC))[1] AS last_in_body,
+                  (array_agg(coalesce(m.media_transcription, m.body) ORDER BY m.received_at ASC))[1] AS first_in_body,
                   array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) AS ts_in
              FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
             WHERE cv.tenant_id = $1 AND m.role = 'USER' GROUP BY 1
@@ -763,11 +764,11 @@ async function computePainel(tenantId) {
            SELECT lead_id FROM reabordagem_tentativas
             WHERE tenant_id = $1 AND status = 'pendente' GROUP BY lead_id
          )
-         SELECT l.id, l.name, l.status, l.intent, l.desfecho, l.created_at, l.temperatura_manual,
-                l.review_queue, l.review_result, l.classification_confidence,
+         SELECT l.id, l.name, l.phone, l.meta_psid, l.status, l.intent, l.desfecho, l.created_at, l.temperatura_manual,
+                l.review_queue, l.review_result, l.classification_confidence, l.classification_reasoning,
                 l.conversation_state, l.state_computed_at,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
-                i.first_in, i.last_in, i.last_in_body, o.first_out, o.last_out, c.channel,
+                i.first_in, i.last_in, i.last_in_body, i.first_in_body, o.first_out, o.last_out, c.channel,
                 i.ts_in, o.ts_out,
                 d.draft_at, COALESCE(d.n, 0) AS drafts,
                 (p.lead_id IS NOT NULL) AS retomada_pendente
@@ -885,7 +886,14 @@ async function computePainel(tenantId) {
       if (silenciouEng && tipo === 'monitorar') tipo = 'retomada';
       fila.push({
         id: l.id, name: l.name || 'Lead sem nome',
+        phone: l.phone || l.meta_psid || null,
         instrument: l.instrument || null, channel: l.channel || null,
+        // Cabeçalho compartilhado (recep-decisao): resumo cacheado da IA + 1ª msg +
+        // intenção/confiança. Campos do payload existente — sem rota/migration nova.
+        intent: l.intent || null,
+        confidence: l.classification_confidence != null ? Number(l.classification_confidence) : null,
+        reasoning: l.classification_reasoning || null,
+        first_message: l.first_in_body || null,
         temperatura: temperatura(l), tipo, detalhe_seg: Math.max(0, Math.round(detalheSeg)),
         tem_rascunho: l.drafts > 0,
         retomada_sugerida: !!l.retomada_pendente || (silenciouEng && tipo === 'retomada'),   // ADR-020 + P5
