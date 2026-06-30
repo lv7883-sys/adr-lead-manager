@@ -60,6 +60,91 @@ async function _classifierConfig(tenantId) {
   } catch { return { leadDefinition: null, stageDefinitions: null }; }
 }
 
+// ============================================================================
+// ADR-029 fatia 3 — supressão por papel + pré-sinalização de "não é lead" (MODO SOMBRA).
+// INERTE com gate_suppression_mode='off' (default de TODOS os tenants). 'shadow' só
+// REGISTRA em gate_shadow_log (não age). 'on' age. Toda leitura de contact_role_member
+// passa por withTenant (set app.current_tenant) → RLS isola um tenant do outro.
+// TTL e modo vêm da config por tenant (nunca constante). Edição por UI = fatia 5.
+// ============================================================================
+const PRESIGNAL_NOTE = 'Contato já marcado "não é lead" antes (dentro da validade). '
+  + 'Reavalie a conversa do zero — isto é só uma dúvida a conferir, NÃO um veredito.';
+
+async function _gateConfig(tenantId) {
+  try {
+    const r = await withTenant(tenantId, (c) => c.query(
+      'SELECT gate_suppression_mode, presignal_ttl_days FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]));
+    const row = r.rows[0] || {};
+    const mode = ['off', 'shadow', 'on'].includes(row.gate_suppression_mode) ? row.gate_suppression_mode : 'off';
+    const ttlDays = Number.isInteger(row.presignal_ttl_days) ? row.presignal_ttl_days : 30;
+    return { mode, ttlDays };
+  } catch { return { mode: 'off', ttlDays: 30 }; }   // falha → inerte
+}
+
+// Papel EXPLÍCITO do contato (contact_role_member ⋈ contact_role). RLS isola por tenant.
+async function _lookupRole(tenantId, phone) {
+  if (!String(phone || '').replace(/\D/g, '')) return null;
+  try {
+    const r = await withTenant(tenantId, (c) => c.query(
+      `SELECT cr.id AS role_id, cr.key, cr.suppression
+         FROM contact_role_member m
+         JOIN contact_role cr ON cr.id = m.role_id
+        WHERE m.tenant_id = $1
+          AND regexp_replace(m.phone, '[^0-9]', '', 'g') = regexp_replace($2, '[^0-9]', '', 'g')
+        LIMIT 1`,
+      [tenantId, phone]));
+    return r.rows[0] || null;
+  } catch { return null; }
+}
+
+// Pré-sinalização DERIVADA DO HISTÓRICO (sem linha por-contato): houve confirmed_not_lead
+// dentro da validade (TTL por tenant). Casa com a decisão da fatia 2 (estado-por-histórico).
+async function _presignalActive(tenantId, phone, ttlDays) {
+  const keys = phone ? telBR.matchKeys(phone) : [];
+  if (!keys.length) return false;
+  const days = Number.isInteger(ttlDays) && ttlDays > 0 ? ttlDays : 30;
+  try {
+    const r = await withTenant(tenantId, (c) => c.query(
+      `SELECT 1 FROM leads
+        WHERE tenant_id = $1
+          AND review_result = 'confirmed_not_lead'
+          AND review_em > now() - ($3 || ' days')::interval
+          AND regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') = ANY($2::text[])
+        LIMIT 1`,
+      [tenantId, keys, String(days)]));
+    return r.rowCount > 0;
+  } catch { return false; }
+}
+
+// Decisão do gate SEM agir: { hard, presignal, roleId, roleKey }. Papel 'hard' tem
+// precedência; senão 'presignal' (papel explícito OU histórico dentro do TTL).
+async function _evaluateGateSuppression(tenantId, phone, cfg) {
+  const role = await _lookupRole(tenantId, phone);
+  if (role && role.suppression === 'hard') return { hard: true, presignal: false, roleId: role.role_id, roleKey: role.key };
+  if (role && role.suppression === 'presignal') return { hard: false, presignal: true, roleId: role.role_id, roleKey: role.key };
+  const presignal = await _presignalActive(tenantId, phone, cfg.ttlDays);
+  return { hard: false, presignal, roleId: null, roleKey: null };
+}
+
+// Log do modo sombra (append-only). Retorna o id p/ preencher crivo_outcome pós-classify.
+async function _shadowLog(tenantId, { phone, channel, wouldAction, roleId, reason, externalMessageId }) {
+  try {
+    const r = await withTenant(tenantId, (c) => c.query(
+      `INSERT INTO gate_shadow_log (tenant_id, phone, channel, would_action, role_id, reason, external_message_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [tenantId, phone || null, channel || null, wouldAction, roleId || null, reason || null, externalMessageId || null]));
+    return r.rows[0]?.id || null;
+  } catch (e) { logger.warn('gate0.shadow_log_failed', { tenant_id: tenantId, error: e.message }); return null; }
+}
+
+async function _shadowOutcome(tenantId, shadowId, crivoOutcome) {
+  if (!shadowId || !['lead', 'not_lead'].includes(crivoOutcome)) return;
+  try {
+    await withTenant(tenantId, (c) => c.query(
+      'UPDATE gate_shadow_log SET crivo_outcome = $2 WHERE id = $1', [shadowId, crivoOutcome]));
+  } catch (e) { logger.warn('gate0.shadow_outcome_failed', { tenant_id: tenantId, error: e.message }); }
+}
+
 // ADR sugestão-de-etapa — persiste a sugestão da IA (suggestion-only) com as DUAS travas:
 // (1) nunca sugerir a etapa em que o lead JÁ está; (2) não re-sugerir uma etapa que a
 // recepção já dispensou (suggested_stage_dismissed). NUNCA move o lead. Best-effort.
@@ -785,6 +870,32 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     }
   }
 
+  // ---- ADR-029 fatia 3: supressão por PAPEL (hard) + pré-sinalização. INERTE com mode='off'.
+  // O caminho do internal_contacts acima fica intocado (generalização = futuro). Em 'shadow'
+  // apenas REGISTRA o que faria; em 'on' age (hard descarta; presignal vira contexto do crivo
+  // e roteia não-lead pro Revisar). Decisão sem agir = gate_shadow_log.
+  const gateCfg = await _gateConfig(tenantId);
+  let gatePresignal = false, gateShadowId = null;
+  if (phone && gateCfg.mode !== 'off') {
+    const sup = await _evaluateGateSuppression(tenantId, phone, gateCfg);
+    if (sup.hard) {
+      if (gateCfg.mode === 'on') {
+        log.info('gate0.role_hard', { gate: 0, role: sup.roleKey });
+        await captureDiscarded(tenantId, channel, phone, msg, rawBody, 'role_hard');  // distinto de 'internal_contact'
+        return;
+      }
+      gateShadowId = await _shadowLog(tenantId, { phone, channel, wouldAction: 'hard',
+        roleId: sup.roleId, reason: 'role:' + (sup.roleKey || ''), externalMessageId: msg.externalMessageId });
+    } else if (sup.presignal) {
+      gatePresignal = true;   // presignal NUNCA descarta sozinha; segue pro crivo
+      if (gateCfg.mode !== 'on') {
+        gateShadowId = await _shadowLog(tenantId, { phone, channel, wouldAction: 'presignal',
+          roleId: sup.roleId, reason: sup.roleKey ? ('role:' + sup.roleKey) : 'history_notlead_within_ttl',
+          externalMessageId: msg.externalMessageId });
+      }
+    }
+  }
+
   let cls = null;
 
   // ---- Buffer "aguardando classificação" (resiliência a 503 no Portão 1) ----
@@ -898,8 +1009,10 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   // CONVERSA INTEIRA acima — não reclassificar single-message aqui.
   if (!msg.skipTriage && !viaConversaBlock) {
     const examples = await _fewShotExamples(tenantId);   // few-shot dinâmico (PARTE 3)
+    // ADR-029: pré-marca entra como CONTEXTO (não veredito), só em 'on'. Em shadow é null.
+    const presignalNote = (gateCfg.mode === 'on' && gatePresignal) ? PRESIGNAL_NOTE : null;
     try {
-      cls = await _classifyRetry(classify, { message: msg.body, examples });   // retry imediato (503 spike)
+      cls = await _classifyRetry(classify, { message: msg.body, examples, presignalNote });   // retry imediato (503 spike)
     } catch (err) {
       // RESILIÊNCIA 503: falha TRANSITÓRIA esgotou o retry → NÃO joga no limbo. Entra no
       // buffer "aguardando classificação" (visível, reprocessável pela conversa inteira via
@@ -914,9 +1027,17 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       return; // não trava: webhook já retornou 200
     }
     log.info('gate1.classified', { gate: 1, is_lead: cls.is_lead, confidence: cls.confidence });
+    // ADR-029 modo sombra: registra o desfecho do crivo na MESMA linha (dimensiona o trade-off).
+    if (gateShadowId) await _shadowOutcome(tenantId, gateShadowId, cls.is_lead ? 'lead' : 'not_lead');
     // Bloco 2 — abaixo do limite automático: NÃO entra no funil; vai pra fila de revisão.
     if (cls.confidence < AUTO_THRESHOLD) {
-      const reviewStatus = cls.confidence >= REVIEW_THRESHOLD ? 'REVIEW_QUEUE' : 'NOT_LEAD';
+      let reviewStatus = cls.confidence >= REVIEW_THRESHOLD ? 'REVIEW_QUEUE' : 'NOT_LEAD';
+      // ADR-029 presignal (só 'on'): mantém não-lead → vai pro Revisar (dúvida a conferir),
+      // NUNCA NOT_LEAD silencioso/Descartados automático. A nota aparece no card.
+      if (gateCfg.mode === 'on' && gatePresignal && reviewStatus === 'NOT_LEAD') {
+        reviewStatus = 'REVIEW_QUEUE';
+        cls = { ...cls, reasoning: '[pré-marcado não-lead — confirme] ' + (cls.reasoning || '') };
+      }
       log.info('gate1.review_queue', { gate: 1, status: reviewStatus, confidence: cls.confidence });
       const reviewLeadId = await captureForReview(tenantId, channel, phone || psid, msg, rawBody, cls, reviewStatus);
       // Gatilho 3 — só REVIEW_QUEUE (médio) notifica; NOT_LEAD<0.40 segue silencioso.
@@ -1352,4 +1473,6 @@ module.exports = {
   CONFIDENCE_THRESHOLD,
   // Helpers puros expostos p/ teste (resiliência 503).
   _isTransientAIError, _pendingWindowExpired, _decideConversaRoute, PENDING_CLASSIFICATION_WINDOW_MS,
+  // ADR-029 fatia 3 — expostos p/ o teste de isolamento multi-tenant (§7).
+  _gateConfig, _lookupRole, _presignalActive, _evaluateGateSuppression, _shadowLog, _shadowOutcome,
 };

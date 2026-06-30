@@ -99,13 +99,15 @@ function _fewShot(examples) {
   return s;
 }
 
-async function classify({ message, examples }) {
+async function classify({ message, examples, presignalNote }) {
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0 },
     });
-    const res = await model.generateContent(`${TRIAGE_PROMPT}${_fewShot(examples)}\n\nMensagem: """${message ?? ''}"""`);
+    // ADR-029: pré-marca como CONTEXTO (sinal fraco, reavaliável), nunca veredito. Ausente → sem mudança.
+    const nota = presignalNote ? `\n\nContexto (sinal fraco, reavalie do zero): ${presignalNote}` : '';
+    const res = await model.generateContent(`${TRIAGE_PROMPT}${_fewShot(examples)}${nota}\n\nMensagem: """${message ?? ''}"""`);
     const parsed = JSON.parse(res.response.text());
     const confidence = Math.min(1, Math.max(0, Number(parsed.confidence) || 0));
     const isLead = typeof parsed.is_lead === 'boolean' ? parsed.is_lead : confidence >= 0.5;
