@@ -55,6 +55,17 @@ function parseFunilPeriod(v) {
 
 const router = express.Router();
 
+// ADR-028 — ordenação das listas de triagem POR TENANT. FONTE ÚNICA dos defaults,
+// semeada aqui e exposta nos payloads de lista (o dashboard lê e aplica comparadores
+// keyed — a ordem não fica hardcoded no sort). A fatia 5 adiciona a coluna por-tenant
+// (tenant_lead_config.lista_ordenacao) + UI; aqui só servimos o valor semeado.
+const LISTA_ORDENACAO_DEFAULTS = {
+  leads: 'devemos_resposta_antigo',   // devemos resposta primeiro, mais antigo (mais tempo esperando)
+  revisar: 'menor_confianca_antigo',  // menor confiança primeiro, depois mais antigo
+  reativacao: 'sinal_fresco',         // sinal mais fresco / recuperabilidade
+  descartados: 'mais_recente',        // descarte mais recente primeiro
+};
+
 // Leitura: todos os papéis do tenant (ADR-004 §4b) + serviços internos.
 const READ_ROLES = ['TENANT_ADMIN', 'RECEPCAO', 'VISUALIZADOR'];
 // Decidir (aprovar/rejeitar) é ação operacional: TENANT_ADMIN/RECEPCAO + serviços.
@@ -354,7 +365,7 @@ router.get(
         )
       ).rows,
       }));
-      res.json({ tenant_id: req.tenantId, count: leads.length, leads, motivos });
+      res.json({ tenant_id: req.tenantId, count: leads.length, leads, motivos, lista_ordenacao: LISTA_ORDENACAO_DEFAULTS });
     } catch (err) {
       logger.error('tenant.review_queue.error', { tenant_id: req.tenantId, error: err.message });
       res.status(500).json({ error: 'internal error' });
@@ -379,6 +390,7 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
                  l.classification_reasoning AS reasoning, l.intent,
                  l.conversation_state, l.state_reasoning,
                  CASE WHEN l.review_result = 'confirmed_not_lead' THEN 'recepcao' ELSE 'ia' END AS origem_descarte,
+                 coalesce(l.review_em, l.created_at) AS descartado_em,   -- ordenação 'mais_recente'
                  (SELECT min(m.received_at) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT} AND m.role = 'USER') AS received_at,
                  (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
@@ -394,7 +406,10 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
            WHERE l.status = 'NOT_LEAD' AND l.desfecho IS NULL
              AND (l.review_result IS NULL OR l.review_result = 'confirmed_not_lead')
          ORDER BY coalesce(l.review_em, l.created_at) DESC NULLS LAST
-         LIMIT 100`,
+         -- Rede de resgate: NÃO truncar a ponto de esconder leads (invariante: todo
+         -- NOT_LEAD não-terminal tem que aparecer em Descartados). Teto alto, alinhado
+         -- ao /leads (1000), para nenhum lead virar "limbo" invisível em todas as telas.
+         LIMIT 1000`,
         [req.tenantId]
       )
     ).rows,
@@ -604,6 +619,13 @@ router.get(
             `SELECT l.id, l.name, l.phone, l.status, l.intent, l.temperatura_manual,
                     l.created_at, l.updated_at,
                     l.suggested_stage, l.stage_reasoning, l.stage_suggested_at,
+                    -- Card compartilhado (recep-decisao) na Reativação: resumo cacheado + 1ª msg.
+                    l.classification_reasoning AS reasoning, l.classification_confidence AS confidence,
+                    (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                      WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
+                          = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+                        AND m.role = 'USER'
+                      ORDER BY m.received_at ASC LIMIT 1) AS first_message,
                     q.instrument,
                     q.availability,
                     COALESCE(q.qualification_complete, false) AS qualification_complete,
@@ -688,6 +710,7 @@ router.get(
         impersonation: req.impersonation,
         pending_approvals_count: result.pendingTotal,
         review_queue_count: result.reviewTotal,
+        lista_ordenacao: LISTA_ORDENACAO_DEFAULTS,   // ADR-028: ordenação por tenant (seed)
         leads: result.leads,
       });
     } catch (err) {
@@ -1025,7 +1048,14 @@ router.post('/:tenantId/leads/:id/requalificar', authenticate, requireTenantAcce
       const exists = (await c.query('SELECT 1 FROM leads WHERE id = $1', [id])).rowCount > 0;
       if (!exists) return null;
       if (cls === 'not_lead') {
-        await c.query("UPDATE leads SET status = 'NOT_LEAD', updated_at = now() WHERE id = $1", [id]);
+        // Mesma marca canônica de descarte dos outros caminhos (review/ignore): além de
+        // status, grava review_result + review_em (= timestamp do descarte). Sem isso, um
+        // lead re-descartado pela Fila mantinha review_em antigo e afundava na ordenação do
+        // Descartados (coalesce(review_em, created_at) DESC), saindo do LIMIT → "limbo".
+        await c.query(
+          "UPDATE leads SET status = 'NOT_LEAD', review_result = 'confirmed_not_lead', review_em = now(), review_by = $2, updated_at = now() WHERE id = $1",
+          [id, req.tenantRole]
+        );
         await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole, { context: observation });
         return { status: 'NOT_LEAD' };
       }
