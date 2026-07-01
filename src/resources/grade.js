@@ -82,7 +82,9 @@ function intersectLists(a, b) {
  * BURACO classificado por motivo. A varredura percorre TODOS os weekdays abertos do expediente
  * (não só onde há professor) — um dia inteiro sem professor vira buraco 'sem_professor'/'sem_ambos'.
  * vãos ∪ buracos = 100% do expediente, sem sobreposição. Buracos adjacentes de MESMO motivo são
- * fundidos; vãos ficam por-subvão (a granularidade da folga importa pro front).
+ * fundidos; vãos adjacentes com CONTINUIDADE DE RECURSO (interseção de profs E de salas livres ≥1
+ * no bloco inteiro) também são fundidos — os nomes/contagem do bloco = a interseção (só quem cobre
+ * o bloco todo). Sem continuidade real, os vãos ficam separados (folga genuinamente distinta).
  */
 function computeVaos(professores, salas = [], expediente = new Map()) {
   if (!(expediente instanceof Map)) expediente = new Map();
@@ -143,12 +145,11 @@ function computeVaos(professores, salas = [], expediente = new Map()) {
 
       // Classifica os DOIS lados ANTES de decidir (sem sair cedo) — assim o motivo do branco é exato.
       if (profsLivres.size >= 1 && salasLivresIds.length >= 1) {
+        // Cru em MINUTOS (_ini/_fim) — a fusão de vãos adjacentes roda depois, em minutos; hhmm no fim.
         vaos.push({
           weekday,
-          inicio: hhmm(p0),
-          fim: hhmm(p1),
-          profs_livres: profsLivres.size,
-          salas_livres: salasLivresIds.length,
+          _ini: p0,
+          _fim: p1,
           profs_livres_ids: [...profsLivres],
           salas_livres_ids: salasLivresIds,
         });
@@ -159,6 +160,47 @@ function computeVaos(professores, salas = [], expediente = new Map()) {
       }
     }
   }
+
+  // Funde VÃOS adjacentes com CONTINUIDADE DE RECURSO (espelha a fusão de buracos logo abaixo).
+  // A sweep-line fatia um vão contínuo sempre que a COMPOSIÇÃO de quem está livre muda no meio,
+  // mesmo continuando a haver vaga. Dois vãos adjacentes (mesmo weekday, fim==início) fundem SE a
+  // INTERSEÇÃO de profs livres E a INTERSEÇÃO de salas livres do bloco ACUMULADO forem ambas ≥1 —
+  // i.e. existe ≥1 professor E ≥1 sala livres no bloco INTEIRO. TRANSITIVA com interseção acumulada
+  // (o recurso tem que cobrir TODOS os pedaços): se ao estender a cadeia a interseção zera de um
+  // lado, para ali — fecha o bloco no ponto anterior e recomeça em v. Sem continuidade real (ex.:
+  // sala A só na 1ª metade, sala B só na 2ª → interseção vazia) NÃO funde: são vãos distintos.
+  // Não depende de duração de aula (multi-tenant / 45min): junta por continuidade de recurso, e o
+  // bloco contínuo serve pra qualquer duração — quem fatia é o arrasto/digitação da tela.
+  const vaosFundidos = [];
+  for (const v of vaos) {
+    const last = vaosFundidos[vaosFundidos.length - 1];
+    if (last && last.weekday === v.weekday && last._fim === v._ini) {
+      const vProfSet = new Set(v.profs_livres_ids);
+      const vSalaSet = new Set(v.salas_livres_ids);
+      const profInter = last.profs_livres_ids.filter((id) => vProfSet.has(id));
+      const salaInter = last.salas_livres_ids.filter((id) => vSalaSet.has(id));
+      if (profInter.length >= 1 && salaInter.length >= 1) {
+        last._fim = v._fim;
+        last.profs_livres_ids = profInter; // interseção acumulada = livres o bloco INTEIRO
+        last.salas_livres_ids = salaInter;
+        continue;
+      }
+    }
+    vaosFundidos.push({
+      weekday: v.weekday, _ini: v._ini, _fim: v._fim,
+      profs_livres_ids: [...v.profs_livres_ids], salas_livres_ids: [...v.salas_livres_ids],
+    });
+  }
+  // Materializa a saída dos vãos: hhmm + contagem (retrocompat) derivada da interseção final.
+  const vaosOut = vaosFundidos.map((v) => ({
+    weekday: v.weekday,
+    inicio: hhmm(v._ini),
+    fim: hhmm(v._fim),
+    profs_livres: v.profs_livres_ids.length,
+    salas_livres: v.salas_livres_ids.length,
+    profs_livres_ids: v.profs_livres_ids,
+    salas_livres_ids: v.salas_livres_ids,
+  }));
 
   // Funde buracos adjacentes (mesmo weekday + motivo + contíguos) → menos fragmentos pro front.
   buracosRaw.sort((a, b) => a.weekday - b.weekday || a.start - b.start);
@@ -177,7 +219,7 @@ function computeVaos(professores, salas = [], expediente = new Map()) {
     ? { weekday_min: wkMin, weekday_max: wkMax, hora_min: hhmm(horaMin), hora_max: hhmm(horaMax) }
     : emptyJanela;
 
-  return { vaos, buracos: buracosOut, janela };
+  return { vaos: vaosOut, buracos: buracosOut, janela };
 }
 
 module.exports = { computeVaos, mergeIntervals, intersectLists, toMin, hhmm };

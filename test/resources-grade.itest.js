@@ -104,10 +104,11 @@ test('1. DEIXOU DE SER 0: cap com profs + ≥1 sala + expediente → grade retor
 
 test('2. EXPEDIENTE recorta o professor: seg PG1 livre 08:00, mas expediente começa 09:00 → 08:00 não é vão', async () => {
   const { json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra`);
-  // seg subdividido por folga, já recortado pelo expediente (nada antes das 09:00).
+  // seg recortado pelo expediente (nada antes das 09:00). PG1 livre 09–12, PG2 entra às 10:00.
+  // Com a fusão (feat/grade-funde-vaos): PG1 é o professor livre o bloco INTEIRO (interseção = {PG1}),
+  // então 09:00-10:00 e 10:00-12:00 viram UM vão contínuo 09:00-12:00 com profs_livres = interseção = 1.
   assert.deepEqual(diaVaos(json.vaos, 1), [
-    { faixa: '09:00-10:00', p: 1, s: 2 },
-    { faixa: '10:00-12:00', p: 2, s: 2 },
+    { faixa: '09:00-12:00', p: 1, s: 2 },
   ]);
   assert.equal(json.vaos.some((v) => v.weekday === 1 && v.inicio < '09:00'), false);
 });
@@ -132,11 +133,15 @@ test('5. DESMARCAR todas as salas (filtro salas vazio) → 0 vãos', async () =>
   assert.deepEqual(json.vaos, []);
 });
 
-test('6. FOLGA: salas_livres = nº de salas compatíveis (constante); profs_livres varia por subvão', async () => {
+test('6. FOLGA + FUSÃO: seg vira 1 vão contínuo (pg1 livre o bloco todo); salas_livres=2, profs_livres=interseção=1', async () => {
   const { json } = await api('GET', `/tenant/${TENANT_A}/resources/grade-recorrente?capability=cap:guitarra`);
   const seg = json.vaos.filter((v) => v.weekday === 1);
+  // Antes a sweep-line fatiava seg em [09-10 p1] + [10-12 p2] (profs_livres variava por subvão). Com a
+  // fusão por continuidade de recurso, como PG1 está livre o bloco INTEIRO, seg é UM vão só; a folga de
+  // professor exposta é a interseção (só PG1 = 1). salas_livres segue = nº de salas compatíveis (2).
+  assert.deepEqual(seg.map((v) => `${v.inicio}-${v.fim}`), ['09:00-12:00']);
   assert.ok(seg.every((v) => v.salas_livres === 2), 'salas_livres deve ser o nº de salas compatíveis (2)');
-  assert.deepEqual(seg.map((v) => v.profs_livres), [1, 2], 'profs_livres varia por subvão (sweep line)');
+  assert.deepEqual(seg.map((v) => v.profs_livres), [1], 'profs_livres do bloco fundido = interseção (só PG1, livre o bloco todo)');
 });
 
 test('7. filtro professores=PG1 → some a fronteira das 10h; vira 1 vão 09:00–12:00 (1/2)', async () => {

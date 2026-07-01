@@ -112,9 +112,11 @@ test('2. 1 estúdio livre 15-16 (outros 2 ocupados) → vão 15:00-16:00 com sal
 
 test('3. DURAÇÃO REAL (banda 90min, 14:00-15:30): 15:00-15:30 ainda ocupado → vão só a partir de 15:30', async () => {
   const { json } = await grade();
+  // r7 é a ÚNICA sala livre de 15:30 a 17:00 (r8/r9 ocupados até 17:00); a fronteira às 16:00 era só
+  // do slot de r8/r9. Com a fusão (feat/grade-funde-vaos), os subvãos 15:30-16:00 e 16:00-17:00 —
+  // mesmo prof, mesma sala r7 o bloco todo — viram UM vão contínuo 15:30-17:00.
   assert.deepEqual(diaVaos(json.vaos, 3), [
-    { faixa: '15:30-16:00', p: 1, s: 1 },
-    { faixa: '16:00-17:00', p: 1, s: 1 },
+    { faixa: '15:30-17:00', p: 1, s: 1 },
   ]);
   // explícito: nada cobre 15:00-15:30 (chute de 1h liberaria r7 às 15:00 e criaria vão aqui).
   assert.equal(json.vaos.some((v) => v.weekday === 3 && v.inicio === '15:00'), false);
@@ -129,11 +131,13 @@ test('4. aula 45min (17:30-18:15): 18:00-18:15 ainda ocupado → vãos 17:00-17:
   assert.equal(json.vaos.some((v) => v.weekday === 4 && v.inicio === '17:30'), false);
 });
 
-test('5. PROFESSOR ocupado 14-15 (2 profs, salas livres) → profs_livres cai a 1 ali, volta a 2 depois', async () => {
+test('5. PROFESSOR ocupado 14-15 (pb livre o bloco todo, pa entra às 15:00) → funde 14:00-16:00, profs = interseção [pb] (p=1)', async () => {
   const { json } = await grade();
+  // pa ocupado 14-15 e livre 15-16; pb livre 14-16. Antes: dois vãos (p1 depois p2). Com a fusão
+  // (feat/grade-funde-vaos), como pb está livre o bloco INTEIRO (interseção de profs = {pb} ≥1) e as
+  // 3 salas livres o tempo todo, vira UM vão 14:00-16:00 com profs_livres = tamanho da interseção = 1.
   assert.deepEqual(diaVaos(json.vaos, 5), [
-    { faixa: '14:00-15:00', p: 1, s: 3 },
-    { faixa: '15:00-16:00', p: 2, s: 3 },
+    { faixa: '14:00-16:00', p: 1, s: 3 },
   ]);
 });
 
@@ -141,9 +145,10 @@ test('6. DIFF (vigente=false) + LEGADO slot_end NULL (fallback 60min): sáb', as
   const { json } = await grade();
   // 10-11: r8,r9 ocupados (legado [10,11)); r7 vigente livre (último registro = false) → s=1.
   // 11-12: legado terminou às 11 → r8,r9 livres; r7 livre → s=3.
+  // r7 está livre o bloco todo (interseção de salas = {r7} ≥1), então com a fusão (feat/grade-funde-vaos)
+  // os dois subvãos viram UM vão 10:00-12:00 com salas_livres = tamanho da interseção = 1.
   assert.deepEqual(diaVaos(json.vaos, 6), [
-    { faixa: '10:00-11:00', p: 1, s: 1 },
-    { faixa: '11:00-12:00', p: 1, s: 3 },
+    { faixa: '10:00-12:00', p: 1, s: 1 },
   ]);
 });
 
