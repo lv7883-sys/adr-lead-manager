@@ -11,6 +11,7 @@ const notificacao = require('./notificacao');   // Bloco 4: push WhatsApp pra re
 const redisClient = require('./redisClient');
 const gating = require('./gating');
 const { kanbanColuna } = require('./metrics');   // ADR sugestão-de-etapa: travas de posição
+const { gateSaida } = require('./bolaGate');     // ADR-030 Passo 2: gate determinístico da saída
 
 const CONFIDENCE_THRESHOLD = 0.7;
 // Bloco 2 — roteamento por confidence (probabilidade de ser lead):
@@ -768,6 +769,145 @@ async function captureRoutedEstablished(tenantId, channel, externalId, msg, rawB
   }
 }
 
+// ============================================================================
+// ADR-030 Passo 2 — ESTADO SEMÂNTICO DA BOLA (escrita da SAÍDA), fatia SHADOW.
+// classificarSaida NÃO reusa processInbound (não cria lead/rascunho/notificação) e NÃO
+// reescreve conversation_state em prod (o corte sincronizado vem depois da calibração).
+// Só OBSERVA a saída da recepção e loga o estado/relógio SUGERIDOS em bola_shadow_log.
+// ============================================================================
+
+// Marco imutável do CICLO de posse ("desde quando a bola é nossa"). Preserva o valor já
+// fixado (feature 'on'); em shadow, sugere o último inbound do cliente (estável durante
+// todo o ciclo — não muda enquanto o cliente não escreve de novo). Fallback: created_at.
+async function _posseDesde(tenantId, ident, lead) {
+  if (lead.bola_nossa_desde) return lead.bola_nossa_desde;
+  const r = await withTenant(tenantId, (c) => c.query(
+    `SELECT max(m.received_at) AS last_in
+       FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+      WHERE cv.tenant_id = $1
+        AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+        AND m.role = 'USER'`,
+    [tenantId, ident]
+  ).then((rr) => rr.rows[0]));
+  return (r && r.last_in) || lead.created_at || null;
+}
+
+// Carrega a conversa INTEIRA (histórico real, incl. a saída recém-capturada como ASSISTANT)
+// p/ a Camada 2. Mesmo loadRealHistory dos outros pontos.
+async function _carregarConversaSaida(tenantId, ident, leadId) {
+  const conv = await withTenant(tenantId, (c) => c.query(
+    `SELECT id FROM conversations WHERE tenant_id = $1
+       AND regexp_replace(external_id, '[^0-9]', '', 'g') = $2
+     ORDER BY updated_at DESC LIMIT 1`,
+    [tenantId, ident]
+  ).then((r) => r.rows[0]));
+  if (!conv) return [];
+  return loadRealHistory(tenantId, { conversationId: conv.id, ident, leadId });
+}
+
+// Log do modo sombra da bola (append-only, molde do _shadowLog). Best-effort.
+async function _shadowBola(tenantId, {
+  leadId, sampleId, camada, veredito = null, confidence = null, reason = null,
+  estadoAtual = null, estadoSugerido = null, bolaDesdeSug = null, adiamentosSug = null,
+}) {
+  try {
+    await withTenant(tenantId, (c) => c.query(
+      `INSERT INTO bola_shadow_log
+         (tenant_id, lead_id, outbound_sample_id, camada, veredito, confidence, reason,
+          estado_atual, estado_sugerido, bola_nossa_desde_sugerido, adiamentos_sugerido)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [tenantId, leadId || null, sampleId || null, camada, veredito, confidence,
+       reason || null, estadoAtual || null, estadoSugerido || null, bolaDesdeSug || null, adiamentosSug]
+    ));
+  } catch (e) { logger.warn('bola.shadow_log_failed', { tenant_id: tenantId, error: e.message }); }
+}
+
+// Classifica UMA saída da recepção. Best-effort: nunca lança (o webhook já respondeu 200).
+// mediaPendente = mídia (áudio) ainda sem transcrição → adia (classifica quando chegar).
+async function classificarSaida(tenantId, { ident, sampleId, body, mediaPendente = false }, deps = {}) {
+  const classifyConversa = deps.classifyConversa || gemini.classifyConversa;
+  const log = logger.child({ tenant_id: tenantId, fn: 'classificarSaida' });
+  try {
+    if (!ident) return;
+    // Modo por tenant (molde do gate): off = inerte; shadow/on só LOGAM neste pacote (a
+    // escrita do conversation_state — 'on' de verdade — fica pra depois da calibração).
+    const cfg = await withTenant(tenantId, (c) => c.query(
+      'SELECT bola_mode FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]
+    ).then((r) => r.rows[0] || {}));
+    const mode = ['off', 'shadow', 'on'].includes(cfg.bola_mode) ? cfg.bola_mode : 'off';
+    if (mode === 'off') return;
+
+    // Lead + estado atual + marco/contador de posse. Casa por dígitos (como nos outros
+    // pontos). Sem lead → nada a rastrear.
+    const lead = await withTenant(tenantId, (c) => c.query(
+      `SELECT id, conversation_state, bola_nossa_desde, adiamentos, created_at
+         FROM leads
+        WHERE tenant_id = $1
+          AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+        LIMIT 1`,
+      [tenantId, ident]
+    ).then((r) => r.rows[0]));
+    if (!lead) return;
+    const estadoAtual = lead.conversation_state || null;
+
+    // (a) SKIP: mídia sem transcrição (adia) | estado já NÃO-nosso (a bola já era do
+    //     cliente; nossa saída não reabre — evita nos marcar como quem espera).
+    if (mediaPendente) {
+      return _shadowBola(tenantId, { leadId: lead.id, sampleId, camada: 'skip',
+        reason: 'midia_sem_transcricao', estadoAtual });
+    }
+    if (estadoAtual === 'AGUARDANDO_CLIENTE' || estadoAtual === 'RESOLVIDO') {
+      return _shadowBola(tenantId, { leadId: lead.id, sampleId, camada: 'skip',
+        reason: 'estado_ja_nao_nosso', estadoAtual });
+    }
+
+    // (b) Camada 1 — gate determinístico. (c) AMBIGUO → Camada 2 (classifyConversa, Flash).
+    let camada = 'gate', confidence = null, reason = null;
+    let veredito = gateSaida(body);
+    if (veredito === 'ambiguo') {
+      camada = 'modelo_leve';
+      const conversation = await _carregarConversaSaida(tenantId, ident, lead.id);
+      const examples = await _fewShotExamples(tenantId);
+      const { leadDefinition, stageDefinitions } = await _classifierConfig(tenantId);
+      const r = await _classifyConversaRetry(classifyConversa, {
+        conversation, examples, stageDefinitions, leadDefinition, tenant: tenantId,
+      });
+      confidence = r.confidence != null ? r.confidence : null; // GRAVADO p/ calibração, NÃO decide
+      // Veredito pelo ESTADO que a IA devolveu — NUNCA por confidence: confidence é P(é lead),
+      // não a certeza de com quem está a bola (perguntas diferentes; ADR-030 §ajuste). Conservador:
+      // só AGUARDANDO_CLIENTE explícito passa a bola; qualquer outro (AGUARDANDO_RECEPCAO,
+      // INDEFINIDO, RESOLVIDO ambíguo) fica conosco ("na dúvida, nossa").
+      veredito = r.conversation_state === 'AGUARDANDO_CLIENTE' ? 'passou_bola' : 'enrolou';
+      // reason carrega o estado bruto da IA (facilita a leitura na calibração dos ambíguos).
+      reason = `ia:${r.conversation_state}${r.state_reasoning ? ' — ' + r.state_reasoning : ''}`;
+    } else {
+      reason = `gate:${veredito}`;
+    }
+
+    // Relógio + contador SUGERIDOS (em shadow só logam):
+    //  - PASSOU_BOLA: encerra o ciclo (bola vira do cliente).
+    //  - ENROLOU: bola segue nossa; marco PRESERVADO (imutável no ciclo); adiamento do ciclo
+    //    = 1 (binário por posse — rajada de N "vou ver" = 1, não N: não incrementa enquanto
+    //    já era nosso). Aqui cada linha carrega o valor do contador do ciclo (=1), não um +1
+    //    por mensagem, então a rajada loga 1 em toda linha (não 1→2→3).
+    let estadoSugerido, bolaDesdeSug, adiamentosSug;
+    if (veredito === 'passou_bola') {
+      estadoSugerido = 'AGUARDANDO_CLIENTE'; bolaDesdeSug = null; adiamentosSug = 0;
+    } else {
+      estadoSugerido = 'AGUARDANDO_RECEPCAO';
+      bolaDesdeSug = await _posseDesde(tenantId, ident, lead);
+      adiamentosSug = 1;
+    }
+    await _shadowBola(tenantId, {
+      leadId: lead.id, sampleId, camada, veredito, confidence, reason,
+      estadoAtual, estadoSugerido, bolaDesdeSug, adiamentosSug,
+    });
+    log.info('bola.saida_classificada', { camada, veredito, estado_atual: estadoAtual, estado_sugerido: estadoSugerido });
+  } catch (e) {
+    log.warn('bola.classificar_error', { error: e.message });
+  }
+}
+
 /**
  * Processa uma mensagem recebida pelo funil de triagem do ADR-003.
  * Idempotente, assíncrono e tolerante a falhas: qualquer erro é logado e
@@ -1475,4 +1615,6 @@ module.exports = {
   _isTransientAIError, _pendingWindowExpired, _decideConversaRoute, PENDING_CLASSIFICATION_WINDOW_MS,
   // ADR-029 fatia 3 — expostos p/ o teste de isolamento multi-tenant (§7).
   _gateConfig, _lookupRole, _presignalActive, _evaluateGateSuppression, _shadowLog, _shadowOutcome,
+  // ADR-030 Passo 2 — classificação da saída (estado semântico da bola), shadow-only.
+  classificarSaida,
 };

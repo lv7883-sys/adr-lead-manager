@@ -16,7 +16,7 @@ async function captureOutbound(tenantId, msg, rawBody) {
   // front só renderiza player quando há url, então mostra apenas o placeholder.
   const media = msg.media || null;
   const body = msg.body || (media && (media.placeholder || '[mídia]')) || null;
-  if (!body && !media) return; // nada aproveitável (sem texto e sem mídia)
+  if (!body && !media) return null; // nada aproveitável (sem texto e sem mídia)
   try {
     const inserted = await withTenant(tenantId, (c) =>
       c.query(
@@ -34,8 +34,12 @@ async function captureOutbound(tenantId, msg, rawBody) {
     if (inserted.rowCount > 0) {
       logger.info('staff_sample.captured', { tenant_id: tenantId, source: msg.source ?? null });
     }
+    // ADR-030 Passo 2: expõe rowCount/id p/ o enganche da classificação de saída só
+    // disparar em linha NOVA (rowCount>0), nunca no eco duplicado (ON CONFLICT DO NOTHING).
+    return { rowCount: inserted.rowCount, id: inserted.rows[0] ? inserted.rows[0].id : null };
   } catch (err) {
     logger.warn('staff_sample.error', { tenant_id: tenantId, error: err.message });
+    return null;
   }
 }
 

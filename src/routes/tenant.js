@@ -18,7 +18,7 @@ const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
 const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, PERIODS, classificarEngajamento } = require('../metrics');   // G: dashboard de gestão
-const { generateDraftForLead } = require('../engine');   // Bloco 2: rascunho ao confirmar lead
+const { generateDraftForLead, classificarSaida } = require('../engine');   // Bloco 2: rascunho; ADR-030: saída
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
 const multer = require('multer');                        // ADR-016 P1: upload de mídia
@@ -1172,13 +1172,22 @@ router.post('/:tenantId/leads/:id/mensagem-meta', authenticate, requireTenantAcc
     const r = await meta.sendMessage(creds, info.psid, text);
     const msgId = (r && (r.message_id || r.mid)) || null;
     const citada = await _msgCitada(req.tenantId, replyToId);
-    await withTenant(req.tenantId, (c) => c.query(
+    const sample = await withTenant(req.tenantId, (c) => c.query(
       `INSERT INTO staff_outbound_samples
          (tenant_id, channel, external_id, external_message_id, source, sender, body, raw, reply_to_message_id)
        VALUES ($1, $2, $3, $4, 'api', $5, $6, NULL, $7)
-       ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
+       ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING
+       RETURNING id`,
       [req.tenantId, info.channel || 'facebook_messenger', info.psid, msgId, req.tenantRole || 'Recepção', text, citada ? citada.id : null]
-    ));
+    ).then((r) => r.rows[0]));
+    // ADR-030 Passo 2: o Messenger/IG NÃO ecoa pelo fromMe (metaIngest pula is_echo), então
+    // a classificação de saída engancha AQUI (nos outros canais WhatsApp o eco fromMe cobre).
+    // Best-effort, shadow-only. Só em linha nova (sample existe → não foi dedup).
+    if (sample && sample.id) {
+      const ident = String(info.psid || '').replace(/\D/g, '');
+      classificarSaida(req.tenantId, { ident, sampleId: sample.id, body: text })
+        .catch((e) => logger.warn('bola.saida_meta_error', { tenant_id: req.tenantId, lead_id: id, error: e.message }));
+    }
     logger.info('tenant.lead.mensagem_meta_enviada', { tenant_id: req.tenantId, lead_id: id, channel: info.channel, by: req.tenantRole, quoted_persisted: !!citada });
     res.json({ ok: true, message_id: msgId, quoted: false, quoted_native_unsupported: !!citada });
   } catch (err) {
@@ -2131,6 +2140,57 @@ router.put('/:tenantId/gate-config', authenticate, requireTenantAccess(WRITE_ROL
     res.json({ ok: true, mode: r.rows[0].gate_suppression_mode, presignal_ttl_days: r.rows[0].presignal_ttl_days, dormancy_days: r.rows[0].dormancy_days, reactivation_expiry_days: r.rows[0].reactivation_expiry_days });
   } catch (err) {
     logger.error('tenant.gate_config.update_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// ===========================================================================
+// ADR-030 Passo 2 — resumo do modo SOMBRA da bola (molde do GET /gate-config).
+// Read-only agregado: desde-quando observa, contagem por veredito×camada, e o cruzamento
+// de CALIBRAÇÃO — depois de cada decisão, o cliente VOLTOU (inbound) e/ou a recepção
+// RESPONDEU DE NOVO (outbound)? É isso que diz se "passou a bola"/"enrolou" bateu com a
+// realidade. Sem UI de linhas; resumo em números.
+// ===========================================================================
+router.get('/:tenantId/bola-shadow', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      const cfg = (await c.query('SELECT bola_mode FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0] || {};
+      const since = (await c.query('SELECT min(created_at) AS observing_since, count(*)::int AS total FROM bola_shadow_log')).rows[0];
+      // Cruzamento com o movimento SEGUINTE (por lead, após a decisão). ident = dígitos do
+      // phone/psid do lead; janela = tudo que veio depois de created_at.
+      const grupos = (await c.query(
+        `WITH base AS (
+           SELECT b.id, b.veredito, b.camada, b.created_at,
+                  regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g') AS ident
+             FROM bola_shadow_log b JOIN leads l ON l.id = b.lead_id
+         )
+         SELECT veredito, camada, count(*)::int AS n,
+                count(*) FILTER (WHERE EXISTS (
+                  SELECT 1 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                   WHERE cv.tenant_id = $1 AND m.role = 'USER' AND m.received_at > base.created_at
+                     AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = base.ident))::int AS cliente_voltou,
+                count(*) FILTER (WHERE EXISTS (
+                  SELECT 1 FROM staff_outbound_samples s
+                   WHERE s.tenant_id = $1 AND s.received_at > base.created_at
+                     AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = base.ident))::int AS recepcao_respondeu_de_novo
+           FROM base GROUP BY veredito, camada`, [req.tenantId])).rows;
+      return { cfg, since, grupos };
+    });
+    const g = (v) => out.grupos.filter((r) => r.veredito === v).reduce((s, r) => s + r.n, 0);
+    res.json({
+      tenant_id: req.tenantId,
+      mode: ['off', 'shadow', 'on'].includes(out.cfg.bola_mode) ? out.cfg.bola_mode : 'off',
+      observing_since: out.since.observing_since || null,
+      summary: {
+        total: out.since.total,
+        passou_bola: g('passou_bola'),
+        enrolou: g('enrolou'),
+        skip: out.grupos.filter((r) => r.camada === 'skip').reduce((s, r) => s + r.n, 0),
+        por_camada_veredito: out.grupos, // inclui cliente_voltou / recepcao_respondeu_de_novo
+      },
+    });
+  } catch (err) {
+    logger.error('tenant.bola_shadow.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
   }
 });

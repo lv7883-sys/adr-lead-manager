@@ -167,10 +167,43 @@ async function handleZapiWebhook(req, res) {
   }
   if (msg.fromMe) {
     log.info('webhook.skipped', { reason: 'from_me' });
-    // Aprendizado de estilo: guarda a mensagem da recepção (best-effort).
-    staffSamples
-      .captureOutbound(tenant.id, msg, req.body)
-      .catch((err) => log.warn('staff_sample.unhandled', { error: err.message }));
+    // Saída da recepção: (1) aprendizado de estilo (staff_outbound_samples) e (2) ADR-030
+    // Passo 2 — classificação do estado da bola (shadow). Fire-and-forget: erro aqui nunca
+    // afeta o webhook (já respondeu 200) nem o funil.
+    const processarSaida = async () => {
+      // Áudio de saída: transcreve ANTES de capturar (reusa o inbound) pra a transcrição já
+      // entrar como body — o usuário do banco não tem UPDATE em staff_outbound_samples.
+      let mediaPendente = false;
+      if (msg.media) {
+        if (msg.media.kind === 'audio') {
+          mediaPendente = true;
+          try {
+            const cred = await withTenant(tenant.id, async (c) => (
+              await c.query('SELECT evolution_instance, evolution_token_enc FROM tenants WHERE id = $1', [tenant.id])
+            ).rows[0]);
+            const instance = cred && cred.evolution_instance;
+            const apikey = cred && decrypt(cred.evolution_token_enc);
+            if (instance && apikey) {
+              const saved = await media.salvarMidia({ tenantId: tenant.id, instance, apikey, media: msg.media });
+              if (saved) {
+                msg.media.url = saved.media_url;
+                const t = await gemini.transcribeAudio({ base64: saved.base64, mimetype: saved.mimetype });
+                if (t && t.trim()) { msg.body = t.trim(); mediaPendente = false; }
+              }
+            }
+          } catch (e) { log.warn('saida.transcribe_failed', { error: e.message }); }
+        } else {
+          mediaPendente = true; // imagem/doc/vídeo de saída: sem texto p/ classificar
+        }
+      }
+      const cap = await staffSamples.captureOutbound(tenant.id, msg, req.body);
+      // Só classifica em linha NOVA (rowCount>0) — nunca no eco duplicado (dedup por msg id).
+      if (cap && cap.rowCount > 0) {
+        const ident = String(msg.externalId || '').replace(/\D/g, '');
+        await engine.classificarSaida(tenant.id, { ident, sampleId: cap.id, body: msg.body, mediaPendente });
+      }
+    };
+    processarSaida().catch((err) => log.warn('saida.unhandled', { error: err.message }));
     return;
   }
 
