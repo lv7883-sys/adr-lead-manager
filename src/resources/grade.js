@@ -64,25 +64,30 @@ function intersectLists(a, b) {
  *     (occupation_history), intervalos [start,end) em MINUTOS já resolvidos.
  * @param {Array<{id:string, ocup?:Array<{weekday:number,start:number,end:number}>}>} salas
  *   - salas compatíveis SELECIONADAS (lista, não contagem). Cada sala é livre em todo o
- *     expediente MENOS onde sua ocup a cobre. < 1 sala → sem lugar físico → 0 vãos.
+ *     expediente MENOS onde sua ocup a cobre. < 1 sala → sem lugar físico → só buracos.
  * @param {Map<number, Array<{start:number,end:number}>>} expediente
  *   - por weekday (ISO 1=seg..7=dom), faixas do horário de atendimento em MINUTOS.
- * @returns {{ vaos: Array<{weekday:number,inicio:string,fim:string,profs_livres:number,salas_livres:number}>,
+ * @returns {{ vaos: Array<{weekday:number,inicio:string,fim:string,profs_livres:number,salas_livres:number,
+ *                          profs_livres_ids:string[],salas_livres_ids:string[]}>,
+ *             buracos: Array<{weekday:number,inicio:string,fim:string,motivo:'sem_professor'|'sem_sala'|'sem_ambos'}>,
  *             janela: {weekday_min:number|null, weekday_max:number|null, hora_min:string|null, hora_max:string|null} }}
  *
  * FOLGA = CONCORRÊNCIA REAL dos dois lados. Sweep line por weekday nos pontos onde QUALQUER
  * contagem muda: start/end de disponibilidade de prof, de ocupação de prof, de ocupação de sala,
  * e abre/fecha do expediente. Cada SUBVÃO entre dois pontos tem profs_livres / salas_livres
  * CONSTANTES. profs_livres = profs DISPONÍVEIS e NÃO-ocupados ali; salas_livres = salas
- * compatíveis NÃO-ocupadas ali. Só emitimos onde ambos >= 1 E o subvão está DENTRO do expediente.
+ * compatíveis NÃO-ocupadas ali (ids materializados p/ o hover da tela).
+ *
+ * COBERTURA TOTAL do expediente: cada subvão DENTRO do expediente é OU um vão (ambos >= 1) OU um
+ * BURACO classificado por motivo. A varredura percorre TODOS os weekdays abertos do expediente
+ * (não só onde há professor) — um dia inteiro sem professor vira buraco 'sem_professor'/'sem_ambos'.
+ * vãos ∪ buracos = 100% do expediente, sem sobreposição. Buracos adjacentes de MESMO motivo são
+ * fundidos; vãos ficam por-subvão (a granularidade da folga importa pro front).
  */
 function computeVaos(professores, salas = [], expediente = new Map()) {
   if (!(expediente instanceof Map)) expediente = new Map();
   const emptyJanela = { weekday_min: null, weekday_max: null, hora_min: null, hora_max: null };
-  const salasCount = salas.length;
-
-  // Sem sala compatível → sem lugar físico → nunca há vão (independe de professor).
-  if (salasCount < 1) return { vaos: [], janela: emptyJanela };
+  const salaIds = salas.map((s) => s.id);
 
   // Índices por weekday → [{id,start,end}].
   const byDay = (acc, weekday, item) => { if (!acc.has(weekday)) acc.set(weekday, []); acc.get(weekday).push(item); };
@@ -106,51 +111,73 @@ function computeVaos(professores, salas = [], expediente = new Map()) {
   }
 
   const vaos = [];
-  // dias candidatos = onde há disponibilidade de professor (sem prof disponível, nunca há vão).
-  for (const weekday of [...profAvailByDay.keys()].sort((a, b) => a - b)) {
-    const avail = profAvailByDay.get(weekday) || [];
+  const buracosRaw = []; // {weekday,start,end,motivo} em minutos, pré-fusão
+  // Varre TODOS os dias abertos do EXPEDIENTE (não só onde há professor) — assim o branco de um dia
+  // sem professor nenhum também é classificado. Cada subvão dentro do expediente é vão OU buraco.
+  for (const weekday of [...expediente.keys()].sort((a, b) => a - b)) {
     const exp = expediente.get(weekday) || [];
-    if (!avail.length || !exp.length) continue; // dia fechado OU sem professor → sem vão
+    if (!exp.length) continue; // dia fechado → fora do frame
+    const avail = profAvailByDay.get(weekday) || [];
     const profOcup = profOcupByDay.get(weekday) || [];
     const salaOcup = salaOcupByDay.get(weekday) || [];
 
     // Sweep line: fronteiras = todos os start/end (avail ∪ ocup-prof ∪ ocup-sala ∪ expediente).
     // Entre duas fronteiras a cobertura é constante: cada intervalo cobre o subvão inteiro
-    // (start <= p0 && end >= p1) ou não o toca.
+    // (start <= p0 && end >= p1) ou não o toca. O expediente está nas fronteiras → todo instante
+    // dentro do expediente cai em algum subvão (cobertura sem furo).
     const bounds = [...new Set(
       [...avail, ...profOcup, ...salaOcup, ...exp].flatMap((iv) => [iv.start, iv.end]))].sort((a, b) => a - b);
     for (let k = 0; k + 1 < bounds.length; k++) {
       const p0 = bounds[k], p1 = bounds[k + 1];
-      if (!exp.some((f) => f.start <= p0 && f.end >= p1)) continue; // fora do expediente → não é vão
+      if (!exp.some((f) => f.start <= p0 && f.end >= p1)) continue; // fora do expediente → nem vão nem buraco
 
-      // professores LIVRES = disponíveis aqui E não-ocupados aqui.
+      // professores LIVRES = disponíveis aqui E não-ocupados aqui (ids materializados).
       const profsLivres = new Set();
       for (const iv of avail) if (iv.start <= p0 && iv.end >= p1) profsLivres.add(iv.id);
-      if (profsLivres.size === 0) continue;
       for (const iv of profOcup) if (iv.start <= p0 && iv.end >= p1) profsLivres.delete(iv.id);
-      if (profsLivres.size === 0) continue;
 
-      // salas LIVRES = total selecionado − salas ocupadas aqui.
+      // salas LIVRES = selecionadas − ocupadas aqui (ids materializados).
       const salasOcupadas = new Set();
       for (const iv of salaOcup) if (iv.start <= p0 && iv.end >= p1) salasOcupadas.add(iv.id);
-      const salasLivres = salasCount - salasOcupadas.size;
-      if (salasLivres < 1) continue;
+      const salasLivresIds = salaIds.filter((id) => !salasOcupadas.has(id));
 
-      vaos.push({
-        weekday,
-        inicio: hhmm(p0),
-        fim: hhmm(p1),
-        profs_livres: profsLivres.size,
-        salas_livres: salasLivres,
-      });
+      // Classifica os DOIS lados ANTES de decidir (sem sair cedo) — assim o motivo do branco é exato.
+      if (profsLivres.size >= 1 && salasLivresIds.length >= 1) {
+        vaos.push({
+          weekday,
+          inicio: hhmm(p0),
+          fim: hhmm(p1),
+          profs_livres: profsLivres.size,
+          salas_livres: salasLivresIds.length,
+          profs_livres_ids: [...profsLivres],
+          salas_livres_ids: salasLivresIds,
+        });
+      } else {
+        const motivo = profsLivres.size === 0 && salasLivresIds.length === 0 ? 'sem_ambos'
+          : (profsLivres.size === 0 ? 'sem_professor' : 'sem_sala');
+        buracosRaw.push({ weekday, start: p0, end: p1, motivo });
+      }
     }
   }
+
+  // Funde buracos adjacentes (mesmo weekday + motivo + contíguos) → menos fragmentos pro front.
+  buracosRaw.sort((a, b) => a.weekday - b.weekday || a.start - b.start);
+  const buracos = [];
+  for (const b of buracosRaw) {
+    const last = buracos[buracos.length - 1];
+    if (last && last._wd === b.weekday && last.motivo === b.motivo && last._end === b.start) {
+      last._end = b.end;
+    } else {
+      buracos.push({ _wd: b.weekday, _end: b.end, weekday: b.weekday, inicio: b.start, motivo: b.motivo });
+    }
+  }
+  const buracosOut = buracos.map((b) => ({ weekday: b.weekday, inicio: hhmm(b.inicio), fim: hhmm(b._end), motivo: b.motivo }));
 
   const janela = wkMin !== Infinity
     ? { weekday_min: wkMin, weekday_max: wkMax, hora_min: hhmm(horaMin), hora_max: hhmm(horaMax) }
     : emptyJanela;
 
-  return { vaos, janela };
+  return { vaos, buracos: buracosOut, janela };
 }
 
 module.exports = { computeVaos, mergeIntervals, intersectLists, toMin, hhmm };

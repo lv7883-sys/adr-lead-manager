@@ -359,7 +359,18 @@ router.get('/:tenantId/resources/grade-recorrente', authenticate, requireTenantA
       const faixas = faixasDoDia(out.horario, weekday).map((f) => ({ start: grade.toMin(f.inicio), end: grade.toMin(f.fim) }));
       if (faixas.length) expediente.set(weekday, faixas);
     }
-    const { vaos, janela } = grade.computeVaos(professoresGrid, salasGrid, expediente);
+    const { vaos, buracos, janela } = grade.computeVaos(professoresGrid, salasGrid, expediente);
+
+    // Resolve ids→NOMES por vão (tela burra: recebe os nomes prontos no hover, não precisa cruzar
+    // com os arrays globais). Sala não tem "nome" próprio: usa apelido, senão o número.
+    const profNome = new Map(out.profsCompat.map((p) => [p.id, p.nome]));
+    const salaNome = new Map(out.salasCompat.map((s) => [s.id, (s.attributes || {}).apelido || s.numero]));
+    const vaosOut = vaos.map((v) => ({
+      weekday: v.weekday, inicio: v.inicio, fim: v.fim,
+      profs_livres: v.profs_livres, salas_livres: v.salas_livres, // contagem (retrocompat)
+      profs_livres_nomes: v.profs_livres_ids.map((id) => profNome.get(id)).filter(Boolean),
+      salas_livres_nomes: v.salas_livres_ids.map((id) => salaNome.get(id)).filter(Boolean),
+    }));
 
     res.json({
       capability: { id: out.cap.id, external_ref: out.cap.external_ref, name: out.cap.name },
@@ -367,7 +378,8 @@ router.get('/:tenantId/resources/grade-recorrente', authenticate, requireTenantA
       salas: out.salasCompat.map((s) => ({
         id: s.id, numero: s.numero, apelido: (s.attributes || {}).apelido || null, selecionado: salaSel.has(s.id),
       })),
-      vaos,
+      vaos: vaosOut,
+      buracos, // subvãos SEM vão, dentro do expediente, classificados por motivo (branco da tela)
       janela,
     });
   } catch (err) {
