@@ -8,17 +8,27 @@ const { withTenant } = require('./db');
 const logger = require('./logger');
 
 async function captureOutbound(tenantId, msg, rawBody) {
-  if (!msg || !msg.body) return; // só interessa texto
+  if (!msg) return;
+  // Antes só capturava TEXTO. Agora uma saída só-mídia (áudio/imagem/doc) também vira
+  // resposta: o body ganha placeholder legível ('[áudio]'/'[imagem]'/…) e grava media_*
+  // (sem baixar o arquivo nem transcrever aqui — isso fica pro próximo pacote). O que
+  // importa p/ "virar a bola" é ter uma linha com received_at. media_url fica NULL: o
+  // front só renderiza player quando há url, então mostra apenas o placeholder.
+  const media = msg.media || null;
+  const body = msg.body || (media && (media.placeholder || '[mídia]')) || null;
+  if (!body && !media) return; // nada aproveitável (sem texto e sem mídia)
   try {
     const inserted = await withTenant(tenantId, (c) =>
       c.query(
         `INSERT INTO staff_outbound_samples
-           (tenant_id, channel, external_id, external_message_id, source, sender, body, raw)
-         VALUES ($1, 'whatsapp', $2, $3, $4, $5, $6, $7)
+           (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
+            media_type, media_filename)
+         VALUES ($1, 'whatsapp', $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (tenant_id, external_message_id)
            WHERE external_message_id IS NOT NULL DO NOTHING
          RETURNING id`,
-        [tenantId, msg.externalId, msg.externalMessageId, msg.source ?? null, msg.sender ?? null, msg.body, rawBody]
+        [tenantId, msg.externalId, msg.externalMessageId, msg.source ?? null, msg.sender ?? null, body, rawBody,
+         media ? (media.kind || null) : null, media ? (media.filename || null) : null]
       )
     );
     if (inserted.rowCount > 0) {

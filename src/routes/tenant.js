@@ -666,13 +666,20 @@ router.get(
                              WHERE pa.lead_id = l.id AND pa.status = 'APPROVED' AND pa.decided_at >= ${SP_HOJE}) AS approved_today,
                     EXISTS (SELECT 1 FROM pending_approvals pa
                              WHERE pa.lead_id = l.id AND pa.status = 'EDITED' AND pa.decided_at >= ${SP_HOJE}) AS edited_today,
-                    -- D1 — "aguardando resposta" = conversation_state AGUARDANDO_RECEPCAO
-                    -- (independe de termos mandado msg: resposta-promessa NÃO encerra).
-                    -- Fallback p/ a heurística de timestamps quando o estado é NULL (não
-                    -- esconder quem espera). Fora: EXPERIMENTAL_AGENDADA, CONVERTED, desfecho.
+                    -- D1 — "aguardando resposta" = a bola está conosco. AGUARDANDO_RECEPCAO só
+                    -- vale se NÃO houve saída NOSSA posterior ao estado (senão a bola JÁ virou —
+                    -- "estado vencido"). É leitura só: NÃO reescreve conversation_state no banco.
+                    -- state_computed_at NULL cai no fallback por timestamps (não travar). Empate
+                    -- (received_at == state_computed_at) resolve como aguardando (viés conservador).
+                    -- Fora: EXPERIMENTAL_AGENDADA, CONVERTED, desfecho.
                     (l.status <> 'EXPERIMENTAL_AGENDADA' AND l.status <> 'CONVERTED' AND l.desfecho IS NULL AND (
-                      l.conversation_state = 'AGUARDANDO_RECEPCAO'
-                      OR (l.conversation_state IS NULL AND
+                      (l.conversation_state = 'AGUARDANDO_RECEPCAO' AND l.state_computed_at IS NOT NULL
+                        AND NOT EXISTS (SELECT 1 FROM staff_outbound_samples s
+                                         WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
+                                             = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+                                           AND s.received_at > l.state_computed_at))
+                      OR ((l.conversation_state IS NULL
+                           OR (l.conversation_state = 'AGUARDANDO_RECEPCAO' AND l.state_computed_at IS NULL)) AND
                           (SELECT max(m.received_at) FROM messages m
                              JOIN conversations cv ON cv.id = m.conversation_id
                             WHERE cv.external_id = l.phone AND m.role = 'USER')

@@ -118,7 +118,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       await c.query(
         `WITH base AS (
            SELECT l.id, l.name, l.status, l.intent, l.created_at, l.desfecho, l.desfecho_em, l.temperatura_manual,
-                  l.conversation_state, l.origem,
+                  l.conversation_state, l.state_computed_at, l.origem,
                   regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g') AS ident,
                   q.instrument, COALESCE(q.qualification_complete, false) AS qualif
              FROM leads l
@@ -148,7 +148,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
              FROM conversations WHERE tenant_id = $1 GROUP BY 1
          )
          SELECT b.id, b.name, b.status, b.intent, b.created_at, b.desfecho, b.desfecho_em, b.temperatura_manual,
-                b.instrument, b.qualif, b.conversation_state,
+                b.instrument, b.qualif, b.conversation_state, b.state_computed_at,
                 i.first_in, i.last_in, o.first_out, o.last_out, o.first_sender,
                 -- FONTE estável: origem (first-touch, imutável) vence o canal da conversa
                 -- mais recente (que migra pra WhatsApp no 1º reply). Fallback p/ leads legados.
@@ -325,13 +325,17 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       // EXPERIMENTAL_AGENDADA é estado "parado" (aula marcada) — sai dos buckets de
       // espera/silêncio: a última msg de cortesia do cliente NÃO reabre a espera.
       const ativo021 = !l.desfecho && l.status !== 'CONVERTED' && l.status !== 'EXPERIMENTAL_AGENDADA';
-      // D1 — "esperando nossa resposta" = conversation_state AGUARDANDO_RECEPCAO,
-      // INDEPENDENTE de já termos mandado msg (resposta-promessa NÃO encerra). Fallback
-      // pra heurística de timestamps quando o estado ainda é NULL (não esconder quem espera).
+      // D1 — "esperando nossa resposta" = a bola está conosco. AGUARDANDO_RECEPCAO só vale se
+      // NÃO houve saída NOSSA posterior ao estado (senão a bola já virou — "estado vencido";
+      // leitura só, não reescreve conversation_state). state_computed_at NULL cai no fallback
+      // por timestamps. Empate (lout == stateAt) resolve como aguardando (viés conservador).
       const estado = l.conversation_state || null;
+      const stateAt = l.state_computed_at ? new Date(l.state_computed_at).getTime() : null;
+      const saidaPosteriorAoEstado = lout != null && stateAt != null && lout > stateAt;
       const esperandoNos = ativo021 && (
-        estado === 'AGUARDANDO_RECEPCAO' ||
-        (estado == null && lin != null && (lout == null || lin > lout))
+        (estado === 'AGUARDANDO_RECEPCAO' && stateAt != null && !saidaPosteriorAoEstado) ||
+        ((estado == null || (estado === 'AGUARDANDO_RECEPCAO' && stateAt == null))
+          && lin != null && (lout == null || lin > lout))
       );
       // SLA D1: quem espera nós e AINDA não teve 1ª resposta válida entra no denominador
       // como "fora da meta". Split por horário comercial (chegada da 1ª msg) p/ comparabilidade.
@@ -846,7 +850,12 @@ async function computePainel(tenantId) {
       // computado DEPOIS do último inbound (senão está stale → cai no fallback). Segurança:
       // INDEFINIDO/ausente NUNCA esconde — fica visível em bucket calmo.
       const stateAt = l.state_computed_at ? new Date(l.state_computed_at).getTime() : null;
-      const stateFresh = l.conversation_state && (lin == null || (stateAt != null && stateAt >= lin));
+      // "estado vencido": saída NOSSA depois do estado → a bola já virou (não travar em
+      // AGUARDANDO_RECEPCAO). Mesma regra dos outros dois pontos de leitura (awaiting_reply,
+      // esperandoNos). Leitura só: NÃO reescreve conversation_state. Empate → aguardando.
+      const saidaPosteriorAoEstado = lout != null && stateAt != null && lout > stateAt;
+      const stateFresh = l.conversation_state && (lin == null || (stateAt != null && stateAt >= lin))
+        && !(l.conversation_state === 'AGUARDANDO_RECEPCAO' && saidaPosteriorAoEstado);
       let tipo, detalheSeg;
       if (stateFresh) {
         if (l.conversation_state === 'AGUARDANDO_RECEPCAO') {
