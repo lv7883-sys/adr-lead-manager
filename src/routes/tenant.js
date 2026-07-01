@@ -617,10 +617,22 @@ router.get(
         const leads = (
           await c.query(
             `SELECT l.id, l.name, l.phone, l.status, l.intent, l.temperatura_manual,
-                    l.created_at, l.updated_at,
+                    l.created_at, l.updated_at, l.desfecho, l.desfecho_em,
                     l.suggested_stage, l.stage_reasoning, l.stage_suggested_at,
                     -- Card compartilhado (recep-decisao) na Reativação: resumo cacheado + 1ª msg.
                     l.classification_reasoning AS reasoning, l.classification_confidence AS confidence,
+                    -- ADR-027 Reativação Etapa 1 — rastros do CICLO (derivado na leitura, sem status marcado):
+                    -- última retomada ENVIADA (não conta 'pendente'/'ignorado'), se reengajou depois, e se há sugestão pronta.
+                    (SELECT max(rt.enviado_em) FROM reabordagem_tentativas rt
+                       WHERE rt.lead_id = l.id AND rt.status = 'enviado') AS retomada_enviado_em,
+                    EXISTS (SELECT 1 FROM reabordagem_tentativas rt
+                             WHERE rt.lead_id = l.id AND rt.status = 'pendente') AS retomada_sugestao_pendente,
+                    EXISTS (SELECT 1 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                             WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
+                                 = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+                               AND m.role = 'USER'
+                               AND m.received_at > (SELECT max(rt.enviado_em) FROM reabordagem_tentativas rt
+                                                     WHERE rt.lead_id = l.id AND rt.status = 'enviado')) AS retomada_reengajou,
                     (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
                       WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
                           = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
@@ -705,8 +717,8 @@ router.get(
         // ADR-028 — N de dormência (config por tenant; default 7). O dashboard usa p/
         // definir "lead ativo" (única fonte do N), nunca constante no código.
         const dorm = (await c.query(
-          'SELECT dormancy_days FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
-        return { leads, pendingTotal, reviewTotal, dormancyDays: dorm?.dormancy_days ?? 7 };
+          'SELECT dormancy_days, reactivation_expiry_days FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
+        return { leads, pendingTotal, reviewTotal, dormancyDays: dorm?.dormancy_days ?? 7, reactivationExpiryDays: dorm?.reactivation_expiry_days ?? 45 };
       });
       res.json({
         tenant_id: req.tenantId,
@@ -716,6 +728,7 @@ router.get(
         review_queue_count: result.reviewTotal,
         lista_ordenacao: LISTA_ORDENACAO_DEFAULTS,   // ADR-028: ordenação por tenant (seed)
         dormancy_days: result.dormancyDays,
+        reactivation_expiry_days: result.reactivationExpiryDays,   // ADR-027: dias até "Perdido"
         leads: result.leads,
       });
     } catch (err) {
@@ -2043,7 +2056,7 @@ router.get('/:tenantId/gate-config', authenticate, requireTenantAccess(READ_ROLE
   try {
     const out = await withTenant(req.tenantId, async (c) => {
       const cfg = (await c.query(
-        'SELECT gate_suppression_mode, presignal_ttl_days, dormancy_days FROM tenant_lead_config WHERE tenant_id = $1',
+        'SELECT gate_suppression_mode, presignal_ttl_days, dormancy_days, reactivation_expiry_days FROM tenant_lead_config WHERE tenant_id = $1',
         [req.tenantId])).rows[0] || {};
       const since = (await c.query(
         'SELECT min(created_at) AS observing_since, count(*)::int AS total FROM gate_shadow_log')).rows[0];
@@ -2060,6 +2073,7 @@ router.get('/:tenantId/gate-config', authenticate, requireTenantAccess(READ_ROLE
       mode: GATE_MODES.includes(out.cfg.gate_suppression_mode) ? out.cfg.gate_suppression_mode : 'off',
       presignal_ttl_days: Number.isInteger(out.cfg.presignal_ttl_days) ? out.cfg.presignal_ttl_days : 30,
       dormancy_days: Number.isInteger(out.cfg.dormancy_days) ? out.cfg.dormancy_days : 7,
+      reactivation_expiry_days: Number.isInteger(out.cfg.reactivation_expiry_days) ? out.cfg.reactivation_expiry_days : 45,
       observing_since: out.since.observing_since || null,
       summary: {
         total: out.since.total,
@@ -2094,15 +2108,20 @@ router.put('/:tenantId/gate-config', authenticate, requireTenantAccess(WRITE_ROL
     if (!Number.isInteger(d) || d < 1 || d > 365) return res.status(400).json({ error: 'Dormência deve ser 1–365 dias' });
     vals.push(d); sets.push(`dormancy_days = $${vals.length}`);
   }
+  if (b.reactivation_expiry_days !== undefined) {
+    const d = Number(b.reactivation_expiry_days);
+    if (!Number.isInteger(d) || d < 1 || d > 365) return res.status(400).json({ error: 'Dias até Perdido deve ser 1–365' });
+    vals.push(d); sets.push(`reactivation_expiry_days = $${vals.length}`);
+  }
   if (!sets.length) return res.status(400).json({ error: 'nada para atualizar' });
   try {
     const r = await withTenant(req.tenantId, (c) => c.query(
       `UPDATE tenant_lead_config SET ${sets.join(', ')}, updated_at = now()
         WHERE tenant_id = $1
-        RETURNING gate_suppression_mode, presignal_ttl_days, dormancy_days`, vals));
+        RETURNING gate_suppression_mode, presignal_ttl_days, dormancy_days, reactivation_expiry_days`, vals));
     if (!r.rows[0]) return res.status(404).json({ error: 'tenant sem configuração de leads' });
-    logger.info('tenant.gate_config.updated', { tenant_id: req.tenantId, mode: r.rows[0].gate_suppression_mode, ttl: r.rows[0].presignal_ttl_days, dormancy: r.rows[0].dormancy_days, by: req.tenantRole });
-    res.json({ ok: true, mode: r.rows[0].gate_suppression_mode, presignal_ttl_days: r.rows[0].presignal_ttl_days, dormancy_days: r.rows[0].dormancy_days });
+    logger.info('tenant.gate_config.updated', { tenant_id: req.tenantId, mode: r.rows[0].gate_suppression_mode, ttl: r.rows[0].presignal_ttl_days, dormancy: r.rows[0].dormancy_days, expiry: r.rows[0].reactivation_expiry_days, by: req.tenantRole });
+    res.json({ ok: true, mode: r.rows[0].gate_suppression_mode, presignal_ttl_days: r.rows[0].presignal_ttl_days, dormancy_days: r.rows[0].dormancy_days, reactivation_expiry_days: r.rows[0].reactivation_expiry_days });
   } catch (err) {
     logger.error('tenant.gate_config.update_error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
