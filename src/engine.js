@@ -1036,6 +1036,16 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     }
   }
 
+  // ---- ADR-031: reação (emoji) é META-SINAL, não mensagem ----
+  // NUNCA classifica nem gera rascunho (senão um 👍 vira resposta-fantasma na fila).
+  // Só captura pro histórico (bolha não-vazia; o alvo fica no raw p/ exibição grudada
+  // futura) e retorna. Staff já saiu nos gates de internal_contacts/papel acima.
+  if (msg.reaction) {
+    await captureInboundOnly(tenantId, channel, phone || psid, msg, rawBody);
+    log.info('gate0.reaction_captured', { gate: 0, emoji: msg.reaction.emoji });
+    return;
+  }
+
   let cls = null;
 
   // ---- Buffer "aguardando classificação" (resiliência a 503 no Portão 1) ----

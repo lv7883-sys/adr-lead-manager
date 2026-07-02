@@ -46,8 +46,11 @@ function normalizeMessage(body) {
     const jid = data.key.remoteJid || '';
     const m = data.message || {};
     const media = detectarMidia(m);
+    const reaction = detectarReacao(m);   // ADR-031 — reação emoji (não é mídia)
     let texto = m.conversation ?? m.extendedTextMessage?.text ?? null;
     if (!texto && media) texto = media.placeholder;   // body legível p/ histórico
+    if (!texto && reaction) texto = `[reação] ${reaction.emoji}`;   // ADR-031: não vira bolha vazia
+    if (!texto && ehViewOnce(m)) texto = '[mensagem de visualização única]';   // ADR-031 (cifrada, não baixável)
     return {
       externalId: jid.split('@')[0] || jid,
       externalMessageId: data.key.id ? String(data.key.id) : null,
@@ -57,6 +60,10 @@ function normalizeMessage(body) {
       source: data.source ?? body.source ?? null,
       body: texto,
       media: media ? { ...media, rawMessage: m, messageKey: data.key } : null,
+      // ADR-031 — reação é META-SINAL, não mensagem: o engine NÃO classifica nem gera
+      // rascunho (senão um 👍 vira resposta-fantasma). `targetId` = msg-alvo (p/ exibição
+      // grudada futura; já preservado no raw). null quando não é reação.
+      reaction,
       // grupo nunca é um lead (vale p/ qualquer tenant) — sinaliza p/ o guard.
       isGroup: /@g\.us$/.test(jid),
     };
@@ -85,7 +92,29 @@ function detectarMidia(m) {
     return { kind: 'document', mimetype: (d && d.mimetype) || 'application/octet-stream', filename: nome,
              placeholder: `[documento: ${nome}]` };
   }
+  // ADR-031 — figurinha = webp; tratada como imagem (baixa via getBase64FromMediaMessage e
+  // renderiza no <img> já existente). O raw preserva stickerMessage p/ quem quiser distinguir.
+  if (m.stickerMessage) {
+    return { kind: 'image', mimetype: m.stickerMessage.mimetype || 'image/webp', filename: null,
+             placeholder: '[figurinha]' };
+  }
   return null;
+}
+
+// ADR-031 — reação emoji (WhatsApp). NÃO é mídia (nada a baixar): o emoji vive em
+// reactionMessage.text e o alvo em reactionMessage.key.id. Uma "des-reação" chega com text
+// vazio → devolve null (não vira bolha). Retorna { emoji, targetId } ou null.
+function detectarReacao(m) {
+  const r = m && m.reactionMessage;
+  if (!r || !r.text) return null;
+  return { emoji: String(r.text), targetId: (r.key && r.key.id) ? String(r.key.id) : null };
+}
+
+// ADR-031 — view-once (visualização única). A forma nova (secretEncryptedMessage) é cifrada
+// e não baixável; os wrappers viewOnce* embrulham a mídia real. Aqui só sinalizamos p/ o
+// placeholder — decodificar/baixar view-once é frente futura, fora deste ADR.
+function ehViewOnce(m) {
+  return !!(m && (m.secretEncryptedMessage || m.viewOnceMessage || m.viewOnceMessageV2 || m.viewOnceMessageV2Extension));
 }
 
 // 200 silencioso: reconhece o webhook sem revelar nada nem processar.
@@ -198,7 +227,8 @@ async function handleZapiWebhook(req, res) {
       }
       const cap = await staffSamples.captureOutbound(tenant.id, msg, req.body);
       // Só classifica em linha NOVA (rowCount>0) — nunca no eco duplicado (dedup por msg id).
-      if (cap && cap.rowCount > 0) {
+      // ADR-031: reação de saída é capturada (bolha), mas NÃO classifica a bola (meta-sinal).
+      if (cap && cap.rowCount > 0 && !msg.reaction) {
         const ident = String(msg.externalId || '').replace(/\D/g, '');
         await engine.classificarSaida(tenant.id, { ident, sampleId: cap.id, body: msg.body, mediaPendente });
       }
@@ -244,3 +274,7 @@ async function handleZapiWebhook(req, res) {
 router.post('/zapi/:tenantId', authenticateTenant, handleZapiWebhook);
 
 module.exports = router;
+// Exportados p/ teste de unidade do parse (sem DB). ADR-031.
+module.exports.normalizeMessage = normalizeMessage;
+module.exports.detectarMidia = detectarMidia;
+module.exports.detectarReacao = detectarReacao;
