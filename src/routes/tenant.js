@@ -802,25 +802,59 @@ router.get(
         const timelineRows = ident
           ? (
               await c.query(
-                `SELECT t.id, t.received_at, t.kind, t.sender, t.body,
-                        t.media_url, t.media_type, t.media_filename, t.media_transcription,
-                        t.reply_to_id, rt.role AS rt_role, rt.body AS rt_body, rt.media_type AS rt_media_type
-                   FROM (
-                   -- Entrada do LEAD (USER). Rascunhos da IA (ASSISTANT) NÃO entram na
-                   -- conversa: os pendentes pertencem ao bloco "Resposta sugerida".
-                   SELECT m.id, m.reply_to_message_id AS reply_to_id, m.received_at, 'lead' AS kind, m.sender, m.body,
-                          m.media_url, m.media_type, m.media_filename, m.media_transcription
+                `WITH reac AS (
+                   -- ADR-031 item 3: reações em escopo, com emoji e id da mensagem-alvo.
+                   SELECT m.raw#>>'{data,message,reactionMessage,text}'   AS emoji,
+                          m.raw#>>'{data,message,reactionMessage,key,id}'  AS target_key,
+                          m.received_at
                      FROM messages m
                      JOIN conversations cv ON cv.id = m.conversation_id
                     WHERE cv.tenant_id = $1
                       AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
                       AND m.role = 'USER'
+                      AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') <> ''
+                 ),
+                 bubkeys AS (
+                   -- external_message_ids das bolhas que podem RECEBER reação
+                   -- (recepção + mensagem do lead que NÃO é reação).
+                   SELECT s.external_message_id AS k
+                     FROM staff_outbound_samples s
+                    WHERE s.tenant_id = $1 AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
+                      AND s.external_message_id IS NOT NULL
+                   UNION
+                   SELECT m.external_message_id
+                     FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                      AND m.role = 'USER' AND m.external_message_id IS NOT NULL
+                      AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') = ''
+                 )
+                 SELECT t.id, t.received_at, t.kind, t.sender, t.body,
+                        t.media_url, t.media_type, t.media_filename, t.media_transcription, t.reactions,
+                        t.reply_to_id, rt.role AS rt_role, rt.body AS rt_body, rt.media_type AS rt_media_type
+                   FROM (
+                   -- Entrada do LEAD (USER). Rascunhos da IA (ASSISTANT) NÃO entram na
+                   -- conversa: os pendentes pertencem ao bloco "Resposta sugerida".
+                   SELECT m.id, m.reply_to_message_id AS reply_to_id, m.received_at, 'lead' AS kind, m.sender, m.body,
+                          m.media_url, m.media_type, m.media_filename, m.media_transcription,
+                          (SELECT array_agg(r.emoji ORDER BY r.received_at) FROM reac r
+                            WHERE r.target_key = m.external_message_id) AS reactions
+                     FROM messages m
+                     JOIN conversations cv ON cv.id = m.conversation_id
+                    WHERE cv.tenant_id = $1
+                      AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                      AND m.role = 'USER'
+                      -- ADR-031 item 3: some da lista a reação QUE GRUDOU num alvo visível; a
+                      -- que não casou (sem alvo capturado) permanece como bolha "[reação] X".
+                      AND NOT ( coalesce(m.raw#>>'{data,message,reactionMessage,text}','') <> ''
+                                AND m.raw#>>'{data,message,reactionMessage,key,id}' IN (SELECT k FROM bubkeys) )
                    UNION ALL
                    -- Respostas REAIS da recepção (fromMe). Exclui GRUPOS (@g.us — nunca
                    -- são conversa com o lead) e os textos que a IA já enviou (mostrados
                    -- abaixo como 'ia', pra não duplicar).
                    SELECT s.id, s.reply_to_message_id AS reply_to_id, s.received_at, 'recepcao' AS kind, s.sender, s.body,
-                          s.media_url, s.media_type, s.media_filename, NULL AS media_transcription
+                          s.media_url, s.media_type, s.media_filename, NULL AS media_transcription,
+                          (SELECT array_agg(r.emoji ORDER BY r.received_at) FROM reac r
+                            WHERE r.target_key = s.external_message_id) AS reactions
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
                       AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
@@ -835,7 +869,8 @@ router.get(
                    -- Respostas da IA que foram APROVADAS/ENVIADAS ao cliente (tag "IA").
                    SELECT pa.id, pa.reply_to_message_id AS reply_to_id, pa.created_at AS received_at, 'ia' AS kind, NULL AS sender,
                           pa.suggested_response AS body,
-                          NULL AS media_url, NULL AS media_type, NULL AS media_filename, NULL AS media_transcription
+                          NULL AS media_url, NULL AS media_type, NULL AS media_filename, NULL AS media_transcription,
+                          NULL::text[] AS reactions
                      FROM pending_approvals pa
                     WHERE pa.tenant_id = $1 AND pa.lead_id = $3
                       AND pa.status IN ('APPROVED', 'EDITED')
@@ -853,7 +888,9 @@ router.get(
           const row = {
             id: r.id, received_at: r.received_at, kind: r.kind, sender: r.sender, body: r.body,
             media_url: r.media_url, media_type: r.media_type, media_filename: r.media_filename,
-            media_transcription: r.media_transcription, reply_to: null,
+            media_transcription: r.media_transcription,
+            reactions: Array.isArray(r.reactions) ? r.reactions : null,   // ADR-031 item 3
+            reply_to: null,
           };
           if (r.reply_to_id) {
             const txt = r.rt_body && r.rt_body.trim() ? r.rt_body.trim() : null;
