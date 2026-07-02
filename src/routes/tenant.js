@@ -1526,6 +1526,64 @@ router.put('/:tenantId/horario-comercial', authenticate, requireTenantAccess(WRI
   }
 });
 
+// ---------------------------------------------------------------------------
+// ADR-032 — períodos de ocupação (manhã/tarde/noite/sábado…). Config-as-data por
+// tenant, coluna própria (NÃO no horario_comercial, que canonicaliza e apaga).
+// Estrutura: { "<nome>": { faixa:["HH:MM","HH:MM"], dias:[1..7] }, ... }. Nomes livres.
+// ---------------------------------------------------------------------------
+const _HM_PERIODO_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+// Valida + canonicaliza o objeto de períodos. Retorna { ok, value } ou { ok:false, error }.
+function _validaPeriodos(obj) {
+  if (obj == null) return { ok: true, value: null };
+  if (typeof obj !== 'object' || Array.isArray(obj)) return { ok: false, error: 'períodos: objeto esperado' };
+  const out = {};
+  for (const nome of Object.keys(obj)) {
+    const p = obj[nome];
+    if (!p || typeof p !== 'object') return { ok: false, error: `período "${nome}": objeto esperado` };
+    const faixa = p.faixa;
+    if (!Array.isArray(faixa) || faixa.length !== 2 || !_HM_PERIODO_RE.test(String(faixa[0])) || !_HM_PERIODO_RE.test(String(faixa[1]))) {
+      return { ok: false, error: `período "${nome}": faixa inválida (use ["HH:MM","HH:MM"])` };
+    }
+    const [ini, fim] = faixa;
+    if (String(ini) >= String(fim)) return { ok: false, error: `período "${nome}": início deve ser antes do fim` };
+    const dias = [...new Set((Array.isArray(p.dias) ? p.dias.map(Number) : [])
+      .filter((d) => Number.isInteger(d) && d >= 1 && d <= 7))].sort((a, b) => a - b);
+    if (!dias.length) return { ok: false, error: `período "${nome}": selecione ao menos um dia (1..7)` };
+    out[nome] = { faixa: [String(ini), String(fim)], dias };
+  }
+  return { ok: true, value: Object.keys(out).length ? out : null };
+}
+
+// GET /tenant/:tid/periodos-ocupacao — { periodos } (null se não configurado).
+router.get('/:tenantId/periodos-ocupacao', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const row = await withTenant(req.tenantId, (c) => c.query(
+      `SELECT periodos_ocupacao FROM tenants WHERE id = $1`, [req.tenantId]).then((r) => r.rows[0] || {}));
+    res.json({ periodos: row.periodos_ocupacao || null });
+  } catch (err) {
+    logger.error('tenant.periodos.get_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// PUT /tenant/:tid/periodos-ocupacao — grava o objeto de períodos. Body { periodos: {...} }.
+router.put('/:tenantId/periodos-ocupacao', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const body = req.body || {};
+  const v = _validaPeriodos(body.periodos !== undefined ? body.periodos : body);
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  try {
+    await withTenant(req.tenantId, (c) => c.query(
+      `UPDATE tenants SET periodos_ocupacao = $2 WHERE id = $1`,
+      [req.tenantId, v.value ? JSON.stringify(v.value) : null]));
+    logger.info('tenant.periodos.updated', { tenant_id: req.tenantId, by: req.tenantRole });
+    res.json({ ok: true, periodos: v.value });
+  } catch (err) {
+    logger.error('tenant.periodos.put_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // ADR-018 — contatos internos (equipe/parceiros que nunca viram lead).
 const _TIPOS_INTERNO = ['gestor', 'recepcionista', 'professor', 'funcionario', 'parceiro', 'outro'];
 

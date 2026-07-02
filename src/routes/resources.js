@@ -23,6 +23,10 @@ const router = express.Router();
 const READ_ROLES = ['TENANT_ADMIN', 'RECEPCAO', 'VISUALIZADOR'];
 const WRITE_ROLES = ['TENANT_ADMIN', 'RECEPCAO'];   // VISUALIZADOR não grava
 
+// Dashboard de ocupação (ADR-025, Bloco A). Limiares nomeados p/ ajuste fácil.
+const LIMIAR_BAIXA_PCT = 20;      // taxa < isso = "baixa ocupação" (conta em faixas_baixa)
+const SATURACAO_OCUP_PCT = 70;    // ocupação média dos profs do instrumento >= isso = saturado (gargalo)
+
 // Timeout CURTO do lock p/ consulta de recepção (humano esperando): se a Extranet está sendo
 // usada (diária/scheduler), aquela data volta 'indisponivel' (sistema ocupado) em vez de travar.
 const LOCK_TIMEOUT_MS = Number(process.env.RESOURCES_LIVE_LOCK_TIMEOUT_MS ?? 9000);
@@ -385,6 +389,248 @@ router.get('/:tenantId/resources/grade-recorrente', authenticate, requireTenantA
   } catch (err) {
     logger.error('resources.grade_recorrente.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'falha ao montar a grade recorrente' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /tenant/:tenantId/resources/ocupacao — BLOCO A do dashboard de ocupação.
+// Taxa = ocupado / disponível, por SALA (denom = expediente) e por PROFESSOR
+// (denom = ocupado + livre = jornada; a disponibilidade sozinha são só as janelas
+// LIVRES, daria >100%). + resumo + gargalo (sala vs professor) por instrumento
+// saturado, reusando os buracos classificados do grade.computeVaos. Só leitura de
+// banco (sem Extranet). RLS confina ao tenant.
+// ---------------------------------------------------------------------------
+router.get('/:tenantId/resources/ocupacao', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const data = await withTenant(req.tenantId, async (c) => {
+      const hrow = (await c.query(
+        `SELECT horario_comercial AS jsonb, to_char(horario_comercial_inicio,'HH24:MI') AS inicio,
+                to_char(horario_comercial_fim,'HH24:MI') AS fim, horario_comercial_dias AS dias
+           FROM tenants WHERE id = $1`, [req.tenantId])).rows[0] || {};
+      const horario = hrow.jsonb || fromLegacy(hrow.inicio, hrow.fim, hrow.dias);
+      const rooms = (await c.query(
+        `SELECT id, external_ref, name FROM resources.resource WHERE type='ROOM' AND active ORDER BY external_ref::int`)).rows;
+      const teachers = (await c.query(
+        `SELECT id, name FROM resources.resource WHERE type='TEACHER' AND active ORDER BY name`)).rows;
+      const caps = (await c.query(
+        `SELECT id, external_ref, name FROM resources.capability ORDER BY name`)).rows;
+      const links = (await c.query(
+        `SELECT rc.resource_id, rc.capability_id, r.type
+           FROM resources.resource_capability rc JOIN resources.resource r ON r.id = rc.resource_id
+          WHERE r.active`)).rows;
+      const avail = (await c.query(
+        `SELECT resource_id, weekday, start_time, end_time FROM resources.resource_availability`)).rows;
+      // Estado vigente por (recurso, weekday, slot): maior changed_at. Colapsa o fanout de capability.
+      const occ = (await c.query(
+        `SELECT DISTINCT ON (resource_id, weekday, slot_time)
+                resource_id, weekday, to_char(slot_time,'HH24:MI') AS st, to_char(slot_end,'HH24:MI') AS en, occupied
+           FROM resources.occupation_history
+          ORDER BY resource_id, weekday, slot_time, changed_at DESC`)).rows;
+      return { horario, rooms, teachers, caps, links, avail, occ };
+    });
+
+    // Expediente do tenant → Map<weekday,[{start,end}]> (min) + total.
+    const expediente = new Map();
+    let expedienteMin = 0;
+    for (let wd = 1; wd <= 7; wd++) {
+      const faixas = faixasDoDia(data.horario, wd).map((f) => ({ start: grade.toMin(f.inicio), end: grade.toMin(f.fim) }));
+      if (faixas.length) { expediente.set(wd, faixas); for (const f of faixas) expedienteMin += f.end - f.start; }
+    }
+
+    // Ocupação vigente e disponibilidade → Map<resource_id,[{weekday,start,end}]> (min).
+    const ocupByRes = new Map();
+    for (const r of data.occ) {
+      if (!r.occupied) continue;
+      const start = grade.toMin(r.st);
+      const end = r.en ? grade.toMin(r.en) : start + 60;   // legado slot_end NULL → 60min
+      if (!(end > start)) continue;
+      if (!ocupByRes.has(r.resource_id)) ocupByRes.set(r.resource_id, []);
+      ocupByRes.get(r.resource_id).push({ weekday: r.weekday, start, end });
+    }
+    const availByRes = new Map();
+    for (const a of data.avail) {
+      if (!availByRes.has(a.resource_id)) availByRes.set(a.resource_id, []);
+      availByRes.get(a.resource_id).push({ weekday: a.weekday, start: grade.toMin(a.start_time), end: grade.toMin(a.end_time) });
+    }
+
+    // Minutos: soma (funde sobreposições) por weekday; versão "clamp" recorta ao expediente.
+    const sumMinByDay = (ivs, clamp) => {
+      const byDay = new Map();
+      for (const iv of (ivs || [])) { if (!byDay.has(iv.weekday)) byDay.set(iv.weekday, []); byDay.get(iv.weekday).push({ start: iv.start, end: iv.end }); }
+      let total = 0;
+      for (const [wd, list] of byDay) {
+        let merged = grade.mergeIntervals(list);
+        if (clamp) {
+          const exp = expediente.get(wd);
+          if (!exp) continue;
+          merged = grade.intersectLists(merged, grade.mergeIntervals(exp));
+        }
+        for (const s of merged) total += s.end - s.start;
+      }
+      return total;
+    };
+    const pct = (n, d) => (d > 0 ? Math.round((100 * n) / d) : 0);
+
+    // Caps por recurso; profs/salas por cap.
+    const capsByRes = new Map();
+    const teacherByCap = new Map();
+    const roomByCap = new Map();
+    for (const l of data.links) {
+      if (!capsByRes.has(l.resource_id)) capsByRes.set(l.resource_id, []);
+      capsByRes.get(l.resource_id).push(l.capability_id);
+      const bucket = l.type === 'TEACHER' ? teacherByCap : (l.type === 'ROOM' ? roomByCap : null);
+      if (bucket) { if (!bucket.has(l.capability_id)) bucket.set(l.capability_id, []); bucket.get(l.capability_id).push(l.resource_id); }
+    }
+
+    // 1) SALAS — ocupado (clamp ao expediente) / expediente.
+    const salas = data.rooms.map((r) => ({
+      external_ref: r.external_ref, name: r.name, taxa: pct(sumMinByDay(ocupByRes.get(r.id), true), expedienteMin),
+    }));
+
+    // 2) PROFESSORES — ocupado / (ocupado + livre). Livre = janelas de resource_availability.
+    const professores = data.teachers.map((t) => {
+      const occ = sumMinByDay(ocupByRes.get(t.id), false);
+      const livre = sumMinByDay(availByRes.get(t.id), false);
+      const den = occ + livre;
+      return { id: t.id, name: t.name, taxa: pct(occ, den), capabilities: capsByRes.get(t.id) || [], _den: den };
+    });
+
+    // 3) INSTRUMENTOS — cap + professores que o dão (pro dropdown de filtro).
+    const instrumentos = data.caps.map((cp) => ({
+      id: cp.id, external_ref: cp.external_ref, name: cp.name, professores: teacherByCap.get(cp.id) || [],
+    }));
+
+    // 4) RESUMO.
+    const media = (arr) => (arr.length ? Math.round(arr.reduce((a, x) => a + x, 0) / arr.length) : 0);
+    const profsComJornada = professores.filter((p) => p._den > 0);
+    const resumo = {
+      ocup_media_salas: media(salas.map((s) => s.taxa)),
+      ocup_media_profs: media(profsComJornada.map((p) => p.taxa)),
+      faixas_baixa: salas.filter((s) => s.taxa < LIMIAR_BAIXA_PCT).length
+                  + profsComJornada.filter((p) => p.taxa < LIMIAR_BAIXA_PCT).length,
+    };
+
+    // 5) GARGALO — instrumento saturado (profs compat ocupados >= SATURACAO) → falta sala/professor
+    //    pela predominância dos buracos classificados do grade.computeVaos.
+    const taxaProf = new Map(professores.map((p) => [p.id, p.taxa]));
+    const gargalo = [];
+    for (const cp of data.caps) {
+      const profIds = teacherByCap.get(cp.id) || [];
+      if (!profIds.length) continue;
+      const avgOcup = media(profIds.map((id) => taxaProf.get(id) || 0));
+      if (avgOcup < SATURACAO_OCUP_PCT) continue;
+      const professoresGrid = profIds.map((id) => ({ id, avail: availByRes.get(id) || [], ocup: ocupByRes.get(id) || [] }));
+      const salasGrid = (roomByCap.get(cp.id) || []).map((id) => ({ id, ocup: ocupByRes.get(id) || [] }));
+      const { buracos } = grade.computeVaos(professoresGrid, salasGrid, expediente);
+      const min = { sem_professor: 0, sem_sala: 0, sem_ambos: 0 };
+      for (const b of buracos) min[b.motivo] += grade.toMin(b.fim) - grade.toMin(b.inicio);
+      const faltaProf = min.sem_professor + min.sem_ambos;
+      const faltaSala = min.sem_sala + min.sem_ambos;
+      if (faltaProf === 0 && faltaSala === 0) continue;   // saturado, mas sem buraco no expediente
+      const falta = faltaProf >= faltaSala ? 'professor' : 'sala';
+      const horasFalta = Math.round((falta === 'professor' ? faltaProf : faltaSala) / 60);
+      gargalo.push({ instrumento: cp.name, falta, detalhe: `profs ${avgOcup}% ocupados · ${horasFalta}h/sem sem ${falta}` });
+    }
+
+    res.json({
+      salas,
+      professores: professores.map(({ _den, ...p }) => p),   // _den é interno
+      instrumentos,
+      resumo,
+      gargalo,
+    });
+  } catch (err) {
+    logger.error('resources.ocupacao.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao calcular ocupação' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /tenant/:tenantId/resources/ocupacao/grade — BLOCO B (grades por período/hora).
+// Devolve POR-RECURSO (o front COMBINA o conjunto marcado, sem roundtrip): intervalos
+// ocupados vigentes de cada sala/prof + disponibilidade dos profs + expediente + os
+// períodos do tenant + o de-para instrumento→recursos. Payload pequeno (~33 recursos).
+// Medição é sempre por resource_id (nunca por capability → sem fanout). Só leitura, RLS.
+// ---------------------------------------------------------------------------
+router.get('/:tenantId/resources/ocupacao/grade', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const data = await withTenant(req.tenantId, async (c) => {
+      const hrow = (await c.query(
+        `SELECT horario_comercial AS jsonb, to_char(horario_comercial_inicio,'HH24:MI') AS inicio,
+                to_char(horario_comercial_fim,'HH24:MI') AS fim, horario_comercial_dias AS dias,
+                periodos_ocupacao AS periodos
+           FROM tenants WHERE id = $1`, [req.tenantId])).rows[0] || {};
+      const horario = hrow.jsonb || fromLegacy(hrow.inicio, hrow.fim, hrow.dias);
+      const rooms = (await c.query(
+        `SELECT id, external_ref, name FROM resources.resource WHERE type='ROOM' AND active ORDER BY external_ref::int`)).rows;
+      const teachers = (await c.query(
+        `SELECT id, name FROM resources.resource WHERE type='TEACHER' AND active ORDER BY name`)).rows;
+      const caps = (await c.query(
+        `SELECT id, external_ref, name FROM resources.capability ORDER BY name`)).rows;
+      const links = (await c.query(
+        `SELECT rc.resource_id, rc.capability_id, r.type
+           FROM resources.resource_capability rc JOIN resources.resource r ON r.id = rc.resource_id
+          WHERE r.active`)).rows;
+      const avail = (await c.query(
+        `SELECT resource_id, weekday, start_time, end_time FROM resources.resource_availability`)).rows;
+      const occ = (await c.query(
+        `SELECT DISTINCT ON (resource_id, weekday, slot_time)
+                resource_id, weekday, to_char(slot_time,'HH24:MI') AS st, to_char(slot_end,'HH24:MI') AS en, occupied
+           FROM resources.occupation_history
+          ORDER BY resource_id, weekday, slot_time, changed_at DESC`)).rows;
+      return { horario, periodos: hrow.periodos || null, rooms, teachers, caps, links, avail, occ };
+    });
+
+    // Expediente por weekday (min).
+    const expediente = {};
+    for (let wd = 1; wd <= 7; wd++) {
+      const faixas = faixasDoDia(data.horario, wd).map((f) => ({ start: grade.toMin(f.inicio), end: grade.toMin(f.fim) }));
+      if (faixas.length) expediente[wd] = faixas;
+    }
+    // Ocupação vigente e disponibilidade por recurso (min).
+    const ocupBy = new Map();
+    for (const r of data.occ) {
+      if (!r.occupied) continue;
+      const start = grade.toMin(r.st);
+      const end = r.en ? grade.toMin(r.en) : start + 60;
+      if (!(end > start)) continue;
+      if (!ocupBy.has(r.resource_id)) ocupBy.set(r.resource_id, []);
+      ocupBy.get(r.resource_id).push({ weekday: r.weekday, start, end });
+    }
+    const availBy = new Map();
+    for (const a of data.avail) {
+      if (!availBy.has(a.resource_id)) availBy.set(a.resource_id, []);
+      availBy.get(a.resource_id).push({ weekday: a.weekday, start: grade.toMin(a.start_time), end: grade.toMin(a.end_time) });
+    }
+    const capsBy = new Map();
+    const teacherByCap = new Map();
+    const roomByCap = new Map();
+    for (const l of data.links) {
+      if (!capsBy.has(l.resource_id)) capsBy.set(l.resource_id, []);
+      capsBy.get(l.resource_id).push(l.capability_id);
+      const bucket = l.type === 'TEACHER' ? teacherByCap : (l.type === 'ROOM' ? roomByCap : null);
+      if (bucket) { if (!bucket.has(l.capability_id)) bucket.set(l.capability_id, []); bucket.get(l.capability_id).push(l.resource_id); }
+    }
+
+    res.json({
+      expediente,                     // { weekday: [{start,end}] } em minutos
+      periodos: data.periodos,        // { nome: {faixa:["HH:MM","HH:MM"], dias:[iso]} } ou null
+      salas: data.rooms.map((r) => ({
+        id: r.id, external_ref: r.external_ref, name: r.name,
+        capabilities: capsBy.get(r.id) || [], ocup: ocupBy.get(r.id) || [],
+      })),
+      professores: data.teachers.map((t) => ({
+        id: t.id, name: t.name,
+        capabilities: capsBy.get(t.id) || [], ocup: ocupBy.get(t.id) || [], avail: availBy.get(t.id) || [],
+      })),
+      instrumentos: data.caps.map((cp) => ({
+        id: cp.id, external_ref: cp.external_ref, name: cp.name,
+        professores: teacherByCap.get(cp.id) || [], salas: roomByCap.get(cp.id) || [],
+      })),
+    });
+  } catch (err) {
+    logger.error('resources.ocupacao_grade.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao montar a grade de ocupação' });
   }
 });
 

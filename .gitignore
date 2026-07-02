@@ -6,6 +6,10 @@
 .app-secret
 .user-token
 
+# Mídia recebida (runtime) + sessão da Extranet (segredo) — NUNCA versionar.
+# Evita que um `git add -A` arraste mídia pesada e o extranet-session.json.
+uploads/
+
 # Dependências
 node_modules/
 
