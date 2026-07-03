@@ -27,6 +27,34 @@ const WRITE_ROLES = ['TENANT_ADMIN', 'RECEPCAO'];   // VISUALIZADOR não grava
 const LIMIAR_BAIXA_PCT = 20;      // taxa < isso = "baixa ocupação" (conta em faixas_baixa)
 const SATURACAO_OCUP_PCT = 70;    // ocupação média dos profs do instrumento >= isso = saturado (gargalo)
 
+// Ocupação FÍSICA vigente por (recurso, weekday, slot) — DESAMARRADA da vocação.
+// A occupation_history é chaveada por (recurso, capability, weekday, slot): a captura grava 1 linha
+// por vocação (fanout). Ocupação de sala é FÍSICA (tem aula ali, qualquer instrumento) e NÃO deve
+// depender de vocação — a vocação só decide ELEGIBILIDADE (quais salas atendem X), fora daqui.
+// Leitura correta: (1) estado vigente de CADA capability = maior changed_at (DISTINCT ON interno);
+// (2) o recurso está OCUPADO no slot se QUALQUER capability vigente marca ocupado (bool_or por slot).
+// O DISTINCT ON (recurso, weekday, slot) por changed_at antigo pegava só a última linha e PERDIA
+// ocupação real: ao remover uma vocação, a captura grava 'livre' para a cap retirada (changed_at
+// mais novo) e essa linha vencia, zerando a ocupação ainda registrada em outra cap. NÃO é o bool_or
+// ingênuo (que somaria linhas/versões e inflaria ~8×): é bool_or só do estado VIGENTE por cap.
+// slot_end = o MAIOR entre as caps ocupadas (conservador; espelha a destilação da captura). SÓ
+// RECUPERA ocupação (livre→ocupado); nunca remove (ocupado→livre) — provado. Serve sala E professor
+// (professor é consistente entre caps → resultado idêntico ao anterior). filterByRes=true recorta
+// a $1::uuid[] (usado pela grade de disponibilidade, que passa os recursos selecionados).
+const occVigenteSql = (filterByRes) => `
+  SELECT resource_id, weekday,
+         to_char(slot_time,'HH24:MI') AS st,
+         to_char(max(slot_end) FILTER (WHERE occupied),'HH24:MI') AS en,
+         bool_or(occupied) AS occupied
+    FROM (
+      SELECT DISTINCT ON (resource_id, capability_id, weekday, slot_time)
+             resource_id, capability_id, weekday, slot_time, slot_end, occupied
+        FROM resources.occupation_history
+        ${filterByRes ? 'WHERE resource_id = ANY($1::uuid[])' : ''}
+       ORDER BY resource_id, capability_id, weekday, slot_time, changed_at DESC
+    ) latest
+   GROUP BY resource_id, weekday, slot_time`;
+
 // Timeout CURTO do lock p/ consulta de recepção (humano esperando): se a Extranet está sendo
 // usada (diária/scheduler), aquela data volta 'indisponivel' (sistema ocupado) em vez de travar.
 const LOCK_TIMEOUT_MS = Number(process.env.RESOURCES_LIVE_LOCK_TIMEOUT_MS ?? 9000);
@@ -310,26 +338,21 @@ router.get('/:tenantId/resources/grade-recorrente', authenticate, requireTenantA
         }
       }
 
-      // e. OCUPAÇÃO vigente (occupation_history) dos PROFESSORES e SALAS selecionados → desconto.
-      // Estado vigente por (resource_id, weekday, slot_time) = registro de MAIOR changed_at
-      // (DISTINCT ON ... changed_at DESC). occupied=true → intervalo ocupado [slot_time, slot_end).
-      // slot_end NULL (legado pré-050) → fallback [slot_time, slot_time+60min) (some na recaptura).
-      // capability_id colapsa: occupied/slot_end são do RECURSO (iguais entre as caps no mesmo slot).
+      // e. OCUPAÇÃO FÍSICA vigente (occupation_history) dos PROFESSORES e SALAS selecionados → desconto.
+      // DESAMARRADA de vocação: sala ocupada = tem aula ali (qualquer instrumento), lida por
+      // occVigenteSql (estado vigente por cap → bool_or por slot). Antes o DISTINCT ON por changed_at
+      // perdia a ocupação quando uma vocação era removida (a cap liberada vencia). Vocação segue só na
+      // ELEGIBILIDADE (quais salas/profs entram por instrumento — passo b/c acima). occupied=true →
+      // intervalo [st, en); en NULL (legado) → fallback [st, st+60min).
       const ocupByResource = new Map();
       const allSelIds = [...profIdsSel, ...salaIdsSel];
       if (allSelIds.length) {
-        const rows = (await c.query(
-          `SELECT DISTINCT ON (resource_id, weekday, slot_time)
-                  resource_id, weekday,
-                  to_char(slot_time,'HH24:MI') AS slot_time, to_char(slot_end,'HH24:MI') AS slot_end, occupied
-             FROM resources.occupation_history
-            WHERE resource_id = ANY($1::uuid[])
-            ORDER BY resource_id, weekday, slot_time, changed_at DESC`, [allSelIds])).rows;
+        const rows = (await c.query(occVigenteSql(true), [allSelIds])).rows;
         for (const r of rows) {
           if (!r.occupied) continue; // estado vigente LIVRE → não desconta
-          const start = grade.toMin(r.slot_time);
-          const end = r.slot_end ? grade.toMin(r.slot_end) : start + 60; // legado NULL → fallback 60min
-          if (!(end > start)) continue; // defensivo (slot_end <= slot_time)
+          const start = grade.toMin(r.st);
+          const end = r.en ? grade.toMin(r.en) : start + 60; // legado NULL → fallback 60min
+          if (!(end > start)) continue; // defensivo (en <= st)
           if (!ocupByResource.has(r.resource_id)) ocupByResource.set(r.resource_id, []);
           ocupByResource.get(r.resource_id).push({ weekday: r.weekday, start, end });
         }
@@ -420,12 +443,8 @@ router.get('/:tenantId/resources/ocupacao', authenticate, requireTenantAccess(RE
           WHERE r.active`)).rows;
       const avail = (await c.query(
         `SELECT resource_id, weekday, start_time, end_time FROM resources.resource_availability`)).rows;
-      // Estado vigente por (recurso, weekday, slot): maior changed_at. Colapsa o fanout de capability.
-      const occ = (await c.query(
-        `SELECT DISTINCT ON (resource_id, weekday, slot_time)
-                resource_id, weekday, to_char(slot_time,'HH24:MI') AS st, to_char(slot_end,'HH24:MI') AS en, occupied
-           FROM resources.occupation_history
-          ORDER BY resource_id, weekday, slot_time, changed_at DESC`)).rows;
+      // Ocupação física vigente por (recurso, weekday, slot) — desamarrada de vocação.
+      const occ = (await c.query(occVigenteSql(false))).rows;
       return { horario, rooms, teachers, caps, links, avail, occ };
     });
 
@@ -573,11 +592,7 @@ router.get('/:tenantId/resources/ocupacao/grade', authenticate, requireTenantAcc
           WHERE r.active`)).rows;
       const avail = (await c.query(
         `SELECT resource_id, weekday, start_time, end_time FROM resources.resource_availability`)).rows;
-      const occ = (await c.query(
-        `SELECT DISTINCT ON (resource_id, weekday, slot_time)
-                resource_id, weekday, to_char(slot_time,'HH24:MI') AS st, to_char(slot_end,'HH24:MI') AS en, occupied
-           FROM resources.occupation_history
-          ORDER BY resource_id, weekday, slot_time, changed_at DESC`)).rows;
+      const occ = (await c.query(occVigenteSql(false))).rows;   // ocupação física, desamarrada de vocação
       return { horario, periodos: hrow.periodos || null, rooms, teachers, caps, links, avail, occ };
     });
 
