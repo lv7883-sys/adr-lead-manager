@@ -398,12 +398,18 @@ async function captureForReview(tenantId, channel, externalId, msg, rawBody, cls
 // já cobre os demais intents; só a NOVA_OPORTUNIDADE depende deste sinal).
 async function _isRelationshipContact(identDigits) {
   if (!identDigits) return false;
+  // Match BR-aware (telBR.matchKeys), IDÊNTICO aos lookups de opt-out (gate0.opted_out) e de
+  // dedup (findByPhone) deste arquivo: o lead chega com DDI 55 (ex.: 5519994301015) e o cadastro
+  // guarda sem 55 (ex.: 19994301015) — a igualdade EXATA de dígitos deixava o professor escapar
+  // e virar lead. matchKeys faz as duas formas (com/sem 55, com/sem 9º dígito) convergirem.
+  const keys = telBR.matchKeys(identDigits);
+  if (!keys.length) return false;
   try {
     const r = await pool.query(
       `SELECT 1 FROM app.professor_notificacao
-        WHERE regexp_replace(coalesce(telefone_override, telefone), '[^0-9]', '', 'g') = $1
+        WHERE regexp_replace(coalesce(telefone_override, telefone), '[^0-9]', '', 'g') = ANY($1::text[])
         LIMIT 1`,
-      [identDigits]
+      [keys]
     );
     return r.rowCount > 0;
   } catch (e) {
