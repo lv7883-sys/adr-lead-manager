@@ -409,9 +409,12 @@ async function _isRelationshipContact(identDigits) {
   const keys = telBR.matchKeys(identDigits);
   if (!keys.length) return false;
   try {
+    // TODO(binding tenant↔franquia): franquia_id=1 cravado provisoriamente até a tabela de binding
+    //   existir (ver DEBT-binding-tenant-franquia). Trocar por resolução via tenant.
     const r = await pool.query(
       `SELECT 1 FROM app.professor_notificacao
         WHERE regexp_replace(coalesce(telefone_override, telefone), '[^0-9]', '', 'g') = ANY($1::text[])
+          AND franquia_id = 1
         LIMIT 1`,
       [keys]
     );
