@@ -1,5 +1,5 @@
 # ADR-037 — Cadastro-mestre de pessoas (multi-tenant)
-**Status:** Proposta · fundação de dados compartilhada; 1ª fatia (037.1) = o antigo E1.3a | **Data:** 2026-07-07
+**Status:** Proposta · schema concreto consolidado (contrato=conta, read-only fechado) · pronto pra migration do 037.1 | **Data:** 2026-07-07
 **Número:** ADR-037 (provisório — confirmar a próxima casa livre no índice do repo)
 **Relação:** ADR-036 (política de lead por papel) passa a **consumir** este cadastro. Migram pra cá do 036: **E1.9** (unidade de contato), **E1.10** (provedor plugável), **E1.3a/b** (população). O 036 mantém só a lógica de decisão (papel→política, perguntas de resgate, supressão/criação).
 **Não reescreve fontes:** `professor_notificacao`, `internal_contacts`, exports da Extranet e conversas do WhatsApp continuam existindo — viram **provedores**. Nada é arrancado.
@@ -22,6 +22,18 @@ Um único **cadastro-mestre de pessoas** por tenant — pessoa + contatos + pap�
 | **Contato** | telefone/email de uma pessoa | 1 pessoa → N contatos; cada um com `source` e **confiança** (alegado/provado) |
 | **Papel** | professor, aluno, responsável, equipe… | 1 pessoa → N papéis (aluno numa conta e responsável na do irmão); **definidos por vertical**; a política de lead (036) pendura no papel |
 | **Conta** | a unidade de serviço/contrato | pessoas ligadas via `account_member` com `bond` (titular/responsável); expansão/indicação atribuem **à conta** |
+
+### Estrutura real da fonte (read-only do contrato, 2026-07-07)
+
+Confirmado abrindo um contrato real (`id_contrato=1096`):
+
+- **Contrato = grão (aluno × curso × período).** Um contrato aponta **um** `id_aluno`, **um** `id_curso`, uma turma, um professor, vigência (`ini/fim`), plano e status. Aluno com N instrumentos ⇒ **N contratos**.
+- **Não existe entidade "matrícula" com FK.** O próprio contrato **é** a inscrição persistida; `mod_matriculas_beta` é só o wizard (evento). ⇒ o cadastro **não** precisa de tabela `matricula` — some um nível.
+- **Pagador ≠ beneficiário, e o pagador está um nível acima.** O contrato só aponta `id_aluno`; o pagador/responsável vem do vínculo `id_responsavel`+`tpresp` na **ficha do aluno**, não do contrato.
+- **`status_renovacao`** (Prometeu Renovar / Em Negociação / Stand By…) já existe no contrato — **âncora pronta do futuro módulo de renovação/comunicação**.
+- Refs úteis que vieram de brinde: `curso`→id_curso (casa com o de-para de disciplinas do adapter) e `turma`→id_turma.
+
+⇒ A **conta = contrato**; aluno/pagador/professor entram como `account_member` (bond); ids da Extranet em `external_ref`. Ver Schema.
 
 ## As duas formas de popular (decisão-chave)
 
@@ -67,6 +79,48 @@ Não há fonte única entre tenants. Há **dois arquétipos de provedor**, ambos
 | **037.3** | Cruzamento WhatsApp → contatos **provados** + medida de cobertura. | Destrava o descarte silencioso do 036. |
 | **037.later** | Superfície de **entrada nativa** (UI/API) pra tenants não-ADR; provedor **API-Extranet**. | Dívida prevista; não construída agora. |
 
+## Schema concreto (037.1) — greenfield
+
+Cinco tabelas novas + um `ALTER` aditivo. Toda tabela: `tenant_id` + RLS `ENABLE` + policy padrão (`tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid`) + **`FORCE`** se posse do `lead_manager_user`.
+
+```sql
+-- 1) PESSOA — âncora. Dedup por telefone (matchKeys, tenant-scoped).
+person(id, tenant_id, display_name, created_at, updated_at)
+
+-- 2) CONTATO — telefone/email; alegado (Extranet) vs provado (WhatsApp), LINHAS SEPARADAS.
+contact_point(id, tenant_id, person_id→person,
+              kind 'phone'|'email', value_raw, source, confidence 'alegado'|'provado', proven_at, created_at)
+--   guarda CRU; match por matchKeys no lookup. cobertura = match tenant-scoped alegado×provado.
+
+-- 3) CONTA = CONTRATO (grão aluno×curso×período).
+service_account(id, tenant_id,
+                status,             -- ativo|inativo|cancelado (espelho)
+                servico_label,      -- "Baixo","Bateria" (linha de serviço legível, espelho)
+                plano_label,        -- "Mensal 1h/sem"... (espelho)
+                periodicidade,      -- mensal|trimestral|semestral|anual|outro (de-para do adapter)
+                ini_vigencia, fim_vigencia,
+                status_renovacao,   -- âncora do módulo de renovação
+                created_at, updated_at)
+
+-- 4) ACCOUNT_MEMBER — pessoas ↔ conta com vínculo.
+account_member(id, tenant_id, account_id→service_account, person_id→person,
+               bond 'beneficiario'|'pagador'|'professor',
+               UNIQUE(tenant_id, account_id, person_id, bond))
+
+-- 5) EXTERNAL_REF — ids externos, genérico (anti-leakage).
+external_ref(id, tenant_id, entity_kind 'person'|'account', entity_id,
+             source, external_type 'contrato'|'aluno'|'professor'|'curso'|'turma', external_id,
+             UNIQUE(tenant_id, source, external_type, external_id))
+
+-- 6) CONTACT_ROLE_MEMBER (já existe; o gate lê) — aditivo:
+ALTER TABLE contact_role_member ADD COLUMN person_id uuid REFERENCES person(id) ON DELETE SET NULL;
+-- + criar papéis 'aluno' e 'responsavel' (eixo 'known') em contact_role.
+```
+
+**Ligações:** pessoa é o centro; telefone (via `contact_point`, matchKeys tenant-scoped) dedup a pessoa. Aluno=`account_member(beneficiario)`, responsável=`account_member(pagador)`, professor=`account_member(professor)` → "alunos do professor X" é query, sem coluna de Extranet no core. IDs da Extranet em `external_ref` tipado.
+
+**População (custo):** pessoa/contato/contrato/vigência/plano/curso = **lote** (exports); vínculo **pagador** (aluno→responsável via `tpresp`) = **varredura por-aluno** (caro); contato **provado** = conversas do WhatsApp (interno). Constrói o schema já (037.1); popula depois num passo único (D14).
+
 ## Isolamento de tenant (invariante testado — não "usamos RLS")
 
 Como o cadastro é compartilhado entre features e cresce pra multi-tenant, isolamento não é uma frase — é um invariante com condições verificáveis e um teste que prova.
@@ -79,6 +133,15 @@ Como o cadastro é compartilhado entre features e cresce pra multi-tenant, isola
 | D10 | **Todo acesso pelo contexto de tenant** (`withTenant`); nenhum `pool.query` cru sem escopo. |
 | D11 | **Vetor novo do cadastro — casamento por telefone é tenant-scoped.** A mesma pessoa cliente de dois tenants (duas escolas) tem **duas pessoas separadas, nunca ligadas**. `matchKeys`/lookup de contato **sempre** filtra por `tenant_id`. O enriquecimento "provado" do WhatsApp idem: conversa do tenant A só prova contato do tenant A. |
 | D12 | **Teste de isolamento no CI:** uma query cross-tenant sobre o cadastro retorna **ZERO**. Verificação automática, não manual. |
+
+## Referências externas (ids de matrícula / contrato / aluno)
+
+| # | Decisão |
+|---|---|
+| D13 | **IDs externos ficam numa tabela genérica, não em colunas da Extranet no core.** Outras aplicações precisam dos ids da Extranet (id_aluno, matrícula, contrato…). Guardar como `external_ref(tenant_id, entity_kind, entity_id, source, external_type, external_id)` — não como `id_aluno_extranet` cravado nas entidades. O core fica **neutro** (só sabe "esta conta/pessoa tem refs de tal `source`"); o significado de cada `external_type` vive no provedor. A outra app consulta por `external_type`; quando vier a API-Extranet ou outro tenant, é só outro `source` — modelo não muda. É o de-para de sempre. |
+| D13.1 | **Capturar os três** (`aluno`, `matricula`, `contrato`) **+ `professor`**, todos como `external_ref` tipado — Leo confirmou que existem na Extranet e que a outra app chaveia pelos três. Falta entender a **estrutura** (como aluno/matrícula/contrato se relacionam, cardinalidade, onde cada ID vive — export vs ficha): **read-only de entendimento**, não de existência. |
+| D14 | **037 constrói o schema greenfield COMPLETO primeiro** (pessoa/contato/conta/`account_member`/`external_ref`/`contact_role_member`); a **população vem depois, num único passo completo** — decisão de Leo: popular **uma vez, certo, com tudo** (papéis + contatos + os 3 IDs + vínculo pela varredura por-aluno), evitando estado parcial e re-scraping. Essa população única é o que **arma os relógios de shadow**. (Cancela o antigo "barato agora / caro depois".) |
+| D15 | **Um só cadastro pra TODAS as pessoas — inclusive não-alunos** (professor, equipe). `external_ref` é **esparso e tipado**: professor carrega ref `professor` (tem id no `professor_notificacao`), não carrega matrícula/contrato/aluno; aluno carrega aluno/matrícula/contrato. Papel e refs são atributos **independentes** pendurados na Pessoa; a ausência de um tipo é normal, não buraco. **Nada de lista separada por tipo** — recriaria a fragmentação, quebraria o multi-papel (professor que também é responsável = 1 pessoa, 2 papéis), forçaria comunicação/CRM a consultar dois lugares e furaria a dedup por telefone. |
 
 ## Invariantes
 
