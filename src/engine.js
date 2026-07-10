@@ -83,17 +83,21 @@ async function _gateConfig(tenantId) {
 }
 
 // Papel EXPLÍCITO do contato (contact_role_member ⋈ contact_role). RLS isola por tenant.
+// Casa por DÍGITOS BR-aware (matchKeys), IDÊNTICO a _presignalActive/_isRelationshipContact:
+// um papel gravado em formato divergente (com/sem 55, com/sem 9º dígito) não pode escapar do
+// match só por diferença de formato (mesmo bug que a Camada 1 corrigiu no _isRelationshipContact).
 async function _lookupRole(tenantId, phone) {
-  if (!String(phone || '').replace(/\D/g, '')) return null;
+  const keys = phone ? telBR.matchKeys(phone) : [];
+  if (!keys.length) return null;
   try {
     const r = await withTenant(tenantId, (c) => c.query(
       `SELECT cr.id AS role_id, cr.key, cr.suppression
          FROM contact_role_member m
          JOIN contact_role cr ON cr.id = m.role_id
         WHERE m.tenant_id = $1
-          AND regexp_replace(m.phone, '[^0-9]', '', 'g') = regexp_replace($2, '[^0-9]', '', 'g')
+          AND regexp_replace(m.phone, '[^0-9]', '', 'g') = ANY($2::text[])
         LIMIT 1`,
-      [tenantId, phone]));
+      [tenantId, keys]));
     return r.rows[0] || null;
   } catch { return null; }
 }
@@ -999,14 +1003,18 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   }
 
   // ---- ADR-018: contato interno (equipe/parceiro) nunca vira lead ----
-  if (phone) {
+  // Casa por DÍGITOS BR-aware (matchKeys), IDÊNTICO ao opt-out acima e a _isRelationshipContact:
+  // um interno gravado em formato divergente (com/sem 55, com/sem 9º dígito) não pode escapar do
+  // descarte só por diferença de formato.
+  const intKeys = phone ? telBR.matchKeys(phone) : [];
+  if (intKeys.length) {
     const interno = await withTenant(tenantId, (c) =>
       c.query(
         `SELECT 1 FROM internal_contacts
           WHERE tenant_id = $1
-            AND regexp_replace(phone, '[^0-9]', '', 'g') = regexp_replace($2, '[^0-9]', '', 'g')
+            AND regexp_replace(phone, '[^0-9]', '', 'g') = ANY($2::text[])
           LIMIT 1`,
-        [tenantId, phone]
+        [tenantId, intKeys]
       )
     );
     if (interno.rowCount > 0) {
