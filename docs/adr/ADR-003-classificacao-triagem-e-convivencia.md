@@ -6,6 +6,8 @@
 - **Relacionados:** ADR-001 (isolamento Lead Manager × Scheduler), ADR-002 (multi-tenant + RLS), E6-02 (webhook Z-API), E7-01 (config por tenant)
 - **Decisores:** Plataforma / Produto / Engenharia
 
+> Superado em parte por ADR-036 e ADR-037 (known_contacts/Portão 0 estão mortos; a classificação por papel e o cadastro-mestre de pessoas passam a valer).
+
 ---
 
 ## 1. Contexto
