@@ -516,6 +516,11 @@ async function transcribeAudio({ base64, mimetype }) {
 function _dentroDoAcervo(valor, permitidos) {
   return Array.isArray(permitidos) && permitidos.includes(valor) ? valor : null;
 }
+// Tom — lista fechada (cifra). Só aceita um dos 24; senão null (não força).
+const _TONS = ['C', 'Cm', 'C#', 'C#m', 'D', 'Dm', 'D#', 'D#m', 'E', 'Em', 'F', 'Fm', 'F#', 'F#m', 'G', 'Gm', 'G#', 'G#m', 'A', 'Am', 'A#', 'A#m', 'B', 'Bm'];
+function _tomNaLista(valor) {
+  return typeof valor === 'string' && _TONS.includes(valor) ? valor : null;
+}
 
 async function classifySongGenres({ musicas = [], generos = [], subgeneros = [] }) {
   if (!musicas.length) return [];
@@ -538,16 +543,32 @@ Responda SOMENTE JSON: {"resultados":[{"ref":"...","genero":str|null,"subgenero"
 
 async function extractAndClassifySongs({ texto = '', generos = [], subgeneros = [] }) {
   if (!String(texto).trim()) return [];
-  const prompt = `Você recebe uma LISTA DE MÚSICAS em texto — pode ser TAB-separado (colado de planilha)
-ou texto extraído de arquivo, COM cabeçalho (em qualquer idioma/ordem) ou SEM cabeçalho.
-Para CADA música, identifique os campos pelo conteúdo/cabeçalho e classifique o gênero:
-- nome (título), artista (intérprete/compositor), versao (versão/álbum, se houver), link (url, se houver).
-  Identifique as colunas em QUALQUER idioma e ordem. Se uma coluna não existir/não for identificável, retorne null nela.
+  const prompt = `Você recebe o DESPEJO de uma planilha em texto (TAB-separado) ou texto de arquivo, em
+LAYOUT DESCONHECIDO e QUALQUER idioma. Pode ser orientada a música (1 linha por música), orientada a
+ALUNO (1 linha por aluno, com as músicas numa coluna tipo "Músicas Preferidas"), ou texto livre.
+Sua tarefa tem DUAS partes: (1) DESCOBRIR a estrutura e EXTRAIR TODAS AS MÚSICAS (nome + artista) que aparecerem, onde quer que estejam;
+(2) para CADA música extraída, CLASSIFICAR gênero/subgênero (dentro do acervo) e extrair o tom quando houver coluna.
+Regras de extração:
+- IGNORE colunas que NÃO são música: nome do aluno, idade, instrumento, banda, telefone, e-mail etc.
+  NUNCA transforme nome de aluno / idade / instrumento numa "música".
+- Uma célula pode juntar música e artista: "Título - Artista", "Título (Artista)", "Artista: Título" →
+  separe em nome e artista. Se não der pra separar com confiança, ponha tudo em nome e deixe artista null (não chute).
+- Uma célula ou linha pode listar VÁRIAS músicas (separadas por vírgula, ";", "/", quebra de linha ou numeração) →
+  emita UM registro por música.
+- Células mescladas: os dados do aluno podem vir em branco nas linhas seguintes — colha as músicas de TODAS as linhas.
+- versao (versão/álbum, se houver) e link (url, se houver): preencha só se existirem; senão null.
+- Se a primeira linha for cabeçalho (rótulos de coluna, em qualquer idioma), use-a só como REFERÊNCIA das colunas e NÃO a extraia como música.
+- tom: SE houver uma coluna de TOM/tonalidade/key na planilha (em qualquer formato/idioma: "C", "Cm", "Dó",
+  "Ré menor", "Am", "F#m"…), EXTRAIA e NORMALIZE para a cifra desta lista fechada (os únicos 24 válidos):
+  ${JSON.stringify(_TONS)}
+  Exemplos: "Dó"→"C", "Ré menor"→"Dm", "Lá menor"/"Am"→"Am", "C#m"→"C#m", "Fá#"→"F#".
+  Se o valor não casar com nenhum dos 24, retorne null. NÃO invente nem infira tom que não esteja na planilha —
+  se NÃO houver coluna de tom, retorne null em TODAS.
 - genero e subgenero: escolha ESTRITAMENTE dentro das listas abaixo; se incerto → null (NÃO invente).
   generos: ${JSON.stringify(generos)}
   subgeneros: ${JSON.stringify(subgeneros)}
 NÃO transforme a linha de cabeçalho numa "música".
-Responda SOMENTE JSON: {"resultados":[{"nome":str,"artista":str|null,"versao":str|null,"link":str|null,"genero":str|null,"subgenero":str|null}]}
+Responda SOMENTE JSON: {"resultados":[{"nome":str,"artista":str|null,"versao":str|null,"link":str|null,"tom":str|null,"genero":str|null,"subgenero":str|null}]}
 Texto:
 """${String(texto).slice(0, 20000)}"""`;
   return withModelFallback(async (modelName) => {
@@ -558,6 +579,7 @@ Texto:
       .filter((r) => r && r.nome)
       .map((r) => ({
         nome: String(r.nome), artista: r.artista || null, versao: r.versao || null, link: r.link || null,
+        tom: _tomNaLista(r.tom),
         genero: _dentroDoAcervo(r.genero, generos), subgenero: _dentroDoAcervo(r.subgenero, subgeneros),
       }));
   });
