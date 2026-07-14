@@ -2290,4 +2290,25 @@ router.get('/:tenantId/bola-shadow', authenticate, requireTenantAccess(READ_ROLE
   }
 });
 
+// Rock Hour (ADR-039) — classificação de gênero. STATELESS: recebe o acervo do
+// tenant + texto colado/extraído OU músicas, devolve classificação. NÃO toca o
+// schema/DB do LM (nada de shadows/leads). Gate por tenant como as demais rotas.
+router.post('/:tenantId/rockhour/classify-genres', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { generos = [], subgeneros = [], texto, musicas } = req.body || {};
+  try {
+    let resultados;
+    if (typeof texto === 'string' && texto.trim()) {
+      resultados = await gemini.extractAndClassifySongs({ texto, generos, subgeneros });
+    } else if (Array.isArray(musicas)) {
+      resultados = await gemini.classifySongGenres({ musicas, generos, subgeneros });
+    } else {
+      return res.status(400).json({ error: 'envie "texto" (colado/arquivo) ou "musicas"' });
+    }
+    res.json({ resultados });
+  } catch (err) {
+    logger.warn('rockhour.classify_genres.error', { error: err.message });
+    res.status(502).json({ error: 'classificação indisponível' });
+  }
+});
+
 module.exports = router;

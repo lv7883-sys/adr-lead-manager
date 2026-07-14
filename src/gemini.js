@@ -505,6 +505,64 @@ async function transcribeAudio({ base64, mimetype }) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────
+// Rock Hour (ADR-039) — classificação de gênero restrita ao ACERVO do tenant.
+// Aditivo: funções novas, não tocam nada existente. Stateless (não acessa o DB).
+//  - classifySongGenres: já tem nome+artista (ex.: botão "sugerir" no manual).
+//  - extractAndClassifySongs: recebe TEXTO cru (colado/extraído) → identifica as
+//    colunas (qualquer idioma/ordem) E classifica o gênero, numa só chamada.
+// Regra: genero/subgenero SEMPRE dentro das listas recebidas; incerto → null.
+// ─────────────────────────────────────────────────────────────
+function _dentroDoAcervo(valor, permitidos) {
+  return Array.isArray(permitidos) && permitidos.includes(valor) ? valor : null;
+}
+
+async function classifySongGenres({ musicas = [], generos = [], subgeneros = [] }) {
+  if (!musicas.length) return [];
+  const prompt = `Classifique o GÊNERO e SUBGÊNERO de cada música.
+Escolha ESTRITAMENTE dentro destas listas (nunca fora delas):
+- generos: ${JSON.stringify(generos)}
+- subgeneros: ${JSON.stringify(subgeneros)}
+Se não tiver certeza, retorne null (NÃO invente categoria).
+Músicas: ${JSON.stringify(musicas.map((m, i) => ({ ref: m.ref ?? String(i), nome: m.nome, artista: m.artista || null })))}
+Responda SOMENTE JSON: {"resultados":[{"ref":"...","genero":str|null,"subgenero":str|null}]}`;
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({ model: modelName, generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
+    const res = await model.generateContent(prompt);
+    const parsed = JSON.parse(res.response.text());
+    return (parsed.resultados || []).map((r) => ({
+      ref: String(r.ref), genero: _dentroDoAcervo(r.genero, generos), subgenero: _dentroDoAcervo(r.subgenero, subgeneros),
+    }));
+  });
+}
+
+async function extractAndClassifySongs({ texto = '', generos = [], subgeneros = [] }) {
+  if (!String(texto).trim()) return [];
+  const prompt = `Você recebe uma LISTA DE MÚSICAS em texto — pode ser TAB-separado (colado de planilha)
+ou texto extraído de arquivo, COM cabeçalho (em qualquer idioma/ordem) ou SEM cabeçalho.
+Para CADA música, identifique os campos pelo conteúdo/cabeçalho e classifique o gênero:
+- nome (título), artista (intérprete/compositor), versao (versão/álbum, se houver), link (url, se houver).
+  Identifique as colunas em QUALQUER idioma e ordem. Se uma coluna não existir/não for identificável, retorne null nela.
+- genero e subgenero: escolha ESTRITAMENTE dentro das listas abaixo; se incerto → null (NÃO invente).
+  generos: ${JSON.stringify(generos)}
+  subgeneros: ${JSON.stringify(subgeneros)}
+NÃO transforme a linha de cabeçalho numa "música".
+Responda SOMENTE JSON: {"resultados":[{"nome":str,"artista":str|null,"versao":str|null,"link":str|null,"genero":str|null,"subgenero":str|null}]}
+Texto:
+"""${String(texto).slice(0, 20000)}"""`;
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({ model: modelName, generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
+    const res = await model.generateContent(prompt);
+    const parsed = JSON.parse(res.response.text());
+    return (parsed.resultados || [])
+      .filter((r) => r && r.nome)
+      .map((r) => ({
+        nome: String(r.nome), artista: r.artista || null, versao: r.versao || null, link: r.link || null,
+        genero: _dentroDoAcervo(r.genero, generos), subgenero: _dentroDoAcervo(r.subgenero, subgeneros),
+      }));
+  });
+}
+
 module.exports = {
   classify,
   classifyConversa,
@@ -515,6 +573,8 @@ module.exports = {
   sugestaoRetomada,
   classifyIntent,
   extractQualification,
+  classifySongGenres,        // Rock Hour (ADR-039)
+  extractAndClassifySongs,   // Rock Hour (ADR-039)
   INTENTS,
   CANDIDATES,
   getActiveModel,
