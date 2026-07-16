@@ -231,6 +231,43 @@ router.get('/:tenantId/resources/professores', authenticate, requireTenantAccess
   }
 });
 
+// GET /tenant/:tenantId/resources/:resourceId/ocupacao-recorrente — ocupação FÍSICA vigente e
+// RECORRENTE de UM recurso (professor ou sala), lida do occupation_history via occVigenteSql — a
+// MESMA base da grade de /disponibilidade (idêntica por construção), SEM scrape/SSE. Devolve os
+// intervalos ocupados por weekday ISO (1=seg…7=dom), em HH:MM, já mesclados. Leitura pura, RLS.
+router.get('/:tenantId/resources/:resourceId/ocupacao-recorrente', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  const { resourceId } = req.params;
+  if (!isUuid(resourceId)) return res.status(400).json({ error: 'resourceId inválido' });
+  try {
+    const rows = await withTenant(req.tenantId, async (c) => {
+      const r = (await c.query(`SELECT id FROM resources.resource WHERE id=$1`, [resourceId])).rows[0];
+      if (!r) return null;                                  // RLS já confina ao tenant; 404 amigável
+      return (await c.query(occVigenteSql(true), [[resourceId]])).rows;
+    });
+    if (rows === null) return res.status(404).json({ error: 'recurso não encontrado neste tenant' });
+    // ocupados → intervalos {weekday,start,end} (min); merge de adjacentes/sobrepostos por weekday.
+    const raw = [];
+    for (const r of rows) {
+      if (!r.occupied) continue;                            // estado vigente LIVRE não pinta
+      const start = grade.toMin(r.st);
+      const end = r.en ? grade.toMin(r.en) : start + 60;    // legado NULL → fallback 60min
+      if (end > start) raw.push({ weekday: r.weekday, start, end });
+    }
+    raw.sort((a, b) => a.weekday - b.weekday || a.start - b.start);
+    const merged = [];
+    for (const iv of raw) {
+      const last = merged[merged.length - 1];
+      if (last && last.weekday === iv.weekday && iv.start <= last.end) last.end = Math.max(last.end, iv.end);
+      else merged.push({ weekday: iv.weekday, start: iv.start, end: iv.end });
+    }
+    const hm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    res.json({ ocupacao: merged.map((iv) => ({ weekday: iv.weekday, inicio: hm(iv.start), fim: hm(iv.end) })) });
+  } catch (err) {
+    logger.error('resources.ocupacao_recorrente.error', { tenant_id: req.tenantId, resource_id: resourceId, error: err.message });
+    res.status(500).json({ error: 'falha ao carregar ocupação do recurso' });
+  }
+});
+
 // PUT /tenant/:tenantId/resources/salas/:resourceId/capabilities — substitui (replace) o
 // conjunto de capabilities de uma sala. Body { capability_ids: string[] } (vazio = limpa).
 router.put('/:tenantId/resources/salas/:resourceId/capabilities', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
