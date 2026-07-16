@@ -217,6 +217,20 @@ router.get('/:tenantId/resources/salas', authenticate, requireTenantAccess(READ_
   }
 });
 
+// GET /tenant/:tenantId/resources/professores — lista os PROFESSORES (type='TEACHER') ativos do
+// tenant, cru (id + nome), para seleção em outros módulos (ex.: recursos do Rock Hour). Leitura pura;
+// isolamento por tenant garantido pelo withTenant (RLS). Espelha a query já usada em ocupacao/grade.
+router.get('/:tenantId/resources/professores', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const rows = await withTenant(req.tenantId, async (c) => (await c.query(
+      `SELECT id, name FROM resources.resource WHERE type='TEACHER' AND active ORDER BY name`)).rows);
+    res.json({ professores: rows.map((r) => ({ id: r.id, nome: r.name })) });
+  } catch (err) {
+    logger.error('resources.professores.list.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao listar professores' });
+  }
+});
+
 // PUT /tenant/:tenantId/resources/salas/:resourceId/capabilities — substitui (replace) o
 // conjunto de capabilities de uma sala. Body { capability_ids: string[] } (vazio = limpa).
 router.put('/:tenantId/resources/salas/:resourceId/capabilities', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
