@@ -2311,4 +2311,133 @@ router.post('/:tenantId/rockhour/classify-genres', authenticate, requireTenantAc
   }
 });
 
+// ---------------------------------------------------------------------------
+// Cadastro-mestre — INGESTÃO de contratos (ADR-037 fatia 037.2). ADITIVO, idempotente.
+// O dashboard raspa a extranet (3 exports) e ENTREGA aqui um lote já casado por ID Aluno.
+// Popula person(aluno)+data_nascimento, contact_point (aluno/responsável), service_account
+// (status + servico_label=instrumento + vigência) e account_member (aluno=beneficiario ↔
+// responsável=pagador = o elo). Idempotência = external_ref (source+type+external_id): re-ingerir
+// o mesmo lote não duplica; renovação = contrato novo no mesmo aluno. Só escrita; RLS confina ao tenant.
+// ---------------------------------------------------------------------------
+const CADASTRO_SOURCE = 'extranet';
+const PERIODICIDADES = new Set(['mensal', 'trimestral', 'semestral', 'anual', 'outro']);
+const _isoDate = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? String(s) : null); // não-ISO → null (não quebra)
+
+// upsert Pessoa por external_ref(person, type, id). Atualiza nome/nascimento quando vierem.
+async function _upsertPersonByRef(c, tid, type, extId, nome, dataNascimento) {
+  const dn = _isoDate(dataNascimento);
+  const ex = (await c.query(
+    `SELECT entity_id FROM lead_manager.external_ref
+      WHERE tenant_id=$1 AND entity_kind='person' AND source=$2 AND external_type=$3 AND external_id=$4`,
+    [tid, CADASTRO_SOURCE, type, extId])).rows[0];
+  if (ex) {
+    await c.query(
+      `UPDATE lead_manager.person
+          SET display_name = COALESCE($2, display_name),
+              data_nascimento = COALESCE($3::date, data_nascimento),
+              updated_at = now()
+        WHERE id=$1`, [ex.entity_id, nome || null, dn]);
+    return { id: ex.entity_id, novo: false };
+  }
+  const pid = (await c.query(
+    `INSERT INTO lead_manager.person (tenant_id, display_name, data_nascimento)
+     VALUES ($1,$2,$3::date) RETURNING id`, [tid, nome || null, dn])).rows[0].id;
+  await c.query(
+    `INSERT INTO lead_manager.external_ref (tenant_id, entity_kind, entity_id, source, external_type, external_id)
+     VALUES ($1,'person',$2,$3,$4,$5)
+     ON CONFLICT (tenant_id, source, external_type, external_id) DO NOTHING`,
+    [tid, pid, CADASTRO_SOURCE, type, extId]);
+  return { id: pid, novo: true };
+}
+
+// telefone: não duplica por dígitos p/ a mesma pessoa (idempotente). Guarda o valor cru.
+async function _upsertPhone(c, tid, personId, telefone) {
+  const digits = String(telefone || '').replace(/[^0-9]/g, '');
+  if (!digits) return false;
+  const has = (await c.query(
+    `SELECT 1 FROM lead_manager.contact_point
+      WHERE tenant_id=$1 AND person_id=$2 AND kind='phone'
+        AND regexp_replace(value_raw,'[^0-9]','','g') = $3 LIMIT 1`,
+    [tid, personId, digits])).rows[0];
+  if (has) return false;
+  await c.query(
+    `INSERT INTO lead_manager.contact_point (tenant_id, person_id, kind, value_raw, source, confidence)
+     VALUES ($1,$2,'phone',$3,$4,'alegado')`, [tid, personId, String(telefone).trim(), CADASTRO_SOURCE]);
+  return true;
+}
+
+// upsert Contrato (service_account) por external_ref(account,'contrato',id).
+async function _upsertAccountByRef(c, tid, contrato) {
+  const extId = String(contrato.idExterno);
+  const per = PERIODICIDADES.has(contrato.periodicidade) ? contrato.periodicidade : null;
+  const ini = _isoDate(contrato.ini); const fim = _isoDate(contrato.fim);
+  const ex = (await c.query(
+    `SELECT entity_id FROM lead_manager.external_ref
+      WHERE tenant_id=$1 AND entity_kind='account' AND source=$2 AND external_type='contrato' AND external_id=$3`,
+    [tid, CADASTRO_SOURCE, extId])).rows[0];
+  if (ex) {
+    await c.query(
+      `UPDATE lead_manager.service_account
+          SET status=$2, servico_label=$3, periodicidade=$4, ini_vigencia=$5::date, fim_vigencia=$6::date, updated_at=now()
+        WHERE id=$1`,
+      [ex.entity_id, contrato.status || null, contrato.instrumento || null, per, ini, fim]);
+    return { id: ex.entity_id, novo: false };
+  }
+  const aid = (await c.query(
+    `INSERT INTO lead_manager.service_account (tenant_id, status, servico_label, periodicidade, ini_vigencia, fim_vigencia)
+     VALUES ($1,$2,$3,$4,$5::date,$6::date) RETURNING id`,
+    [tid, contrato.status || null, contrato.instrumento || null, per, ini, fim])).rows[0].id;
+  await c.query(
+    `INSERT INTO lead_manager.external_ref (tenant_id, entity_kind, entity_id, source, external_type, external_id)
+     VALUES ($1,'account',$2,$3,'contrato',$4)
+     ON CONFLICT (tenant_id, source, external_type, external_id) DO NOTHING`,
+    [tid, aid, CADASTRO_SOURCE, extId]);
+  return { id: aid, novo: true };
+}
+
+async function _link(c, tid, accountId, personId, bond) {
+  const r = await c.query(
+    `INSERT INTO lead_manager.account_member (tenant_id, account_id, person_id, bond)
+     VALUES ($1,$2,$3,$4) ON CONFLICT (tenant_id, account_id, person_id, bond) DO NOTHING RETURNING id`,
+    [tid, accountId, personId, bond]);
+  return r.rowCount > 0;
+}
+
+// POST /tenant/:tenantId/cadastro/contratos  — body { itens: [{ aluno, responsavel?, contrato }] }
+router.post('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const itens = Array.isArray(req.body && req.body.itens) ? req.body.itens : null;
+  if (!itens) return res.status(400).json({ error: 'envie { itens: [...] }' });
+  if (itens.length > 5000) return res.status(413).json({ error: 'lote grande demais (máx 5000 itens)' });
+  const resumo = { itens: itens.length, pessoas_novas: 0, contratos_novos: 0, telefones_novos: 0, vinculos_novos: 0, pulados: 0 };
+  const erros = [];
+  try {
+    await withTenant(req.tenantId, async (c) => {
+      for (let i = 0; i < itens.length; i++) {
+        const it = itens[i] || {};
+        const aluno = it.aluno || {}; const contrato = it.contrato || {};
+        if (!aluno.idExterno || !contrato.idExterno) {
+          resumo.pulados++; erros.push({ i, motivo: 'aluno.idExterno e contrato.idExterno obrigatórios' }); continue;
+        }
+        const pa = await _upsertPersonByRef(c, req.tenantId, 'aluno', String(aluno.idExterno), aluno.nome, aluno.dataNascimento);
+        if (pa.novo) resumo.pessoas_novas++;
+        if (await _upsertPhone(c, req.tenantId, pa.id, aluno.telefone)) resumo.telefones_novos++;
+        const acc = await _upsertAccountByRef(c, req.tenantId, contrato);
+        if (acc.novo) resumo.contratos_novos++;
+        if (await _link(c, req.tenantId, acc.id, pa.id, 'beneficiario')) resumo.vinculos_novos++;
+        const resp = it.responsavel;
+        if (resp && resp.idExterno) {
+          const pr = await _upsertPersonByRef(c, req.tenantId, 'responsavel', String(resp.idExterno), resp.nome, null);
+          if (pr.novo) resumo.pessoas_novas++;
+          if (await _upsertPhone(c, req.tenantId, pr.id, resp.telefone)) resumo.telefones_novos++;
+          if (await _link(c, req.tenantId, acc.id, pr.id, 'pagador')) resumo.vinculos_novos++;
+        }
+      }
+    });
+    res.json({ ok: true, resumo, erros: erros.slice(0, 50) });
+  } catch (err) {
+    logger.error('cadastro.contratos.ingest.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao ingerir contratos' });
+  }
+});
+
 module.exports = router;
