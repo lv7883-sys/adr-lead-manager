@@ -877,7 +877,17 @@ router.get(
                       )
                    UNION ALL
                    -- Respostas da IA que foram APROVADAS/ENVIADAS ao cliente (tag "IA").
-                   SELECT pa.id, pa.reply_to_message_id AS reply_to_id, pa.created_at AS received_at, 'ia' AS kind, NULL AS sender,
+                   -- received_at = hora do ENVIO real (eco, mesmo JOIN por corpo do ack/edited/
+                   -- deleted); só cai em pa.created_at se ainda não houver eco (rascunho não
+                   -- enviado). Isso alinha a janela de 15min do editar, o horário exibido e a
+                   -- ordenação cronológica ao envio real, não à geração do rascunho.
+                   SELECT pa.id, pa.reply_to_message_id AS reply_to_id,
+                          COALESCE((SELECT so.received_at FROM staff_outbound_samples so
+                                     WHERE so.tenant_id = $1
+                                       AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
+                                       AND so.body = pa.suggested_response
+                                     ORDER BY so.received_at DESC LIMIT 1), pa.created_at) AS received_at,
+                          'ia' AS kind, NULL AS sender,
                           pa.suggested_response AS body,
                           NULL AS media_url, NULL AS media_type, NULL AS media_filename, NULL AS media_transcription,
                           NULL::text[] AS reactions,
