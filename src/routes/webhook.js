@@ -176,6 +176,60 @@ async function authenticateTenant(req, res, next) {
  * funil (ADR-003) de forma assíncrona. Falhas no processamento são logadas,
  * nunca propagadas — o provedor não deve receber erro nem reentregar.
  */
+// ── Fatia 1 WhatsApp-like: status de entrega/leitura das NOSSAS mensagens ──────────
+// Espelha o mapStatus do scheduler (dashboard/routes/webhook.js): ack Baileys/Evolution
+// (string ou numérico) → 'sent'|'delivered'|'read'. Só o que vira check; pending/failed
+// não avançam. NULL = ainda sem ack.
+function _mapAck(s) {
+  const v = String(s == null ? '' : s).toUpperCase();
+  const m = {
+    SERVER_ACK: 'sent', SENT: 'sent', '2': 'sent',
+    DELIVERY_ACK: 'delivered', DELIVERED: 'delivered', '3': 'delivered',
+    READ: 'read', PLAYED: 'read', '4': 'read', '5': 'read',
+  };
+  return m[v] || null;
+}
+
+// Extrai [{ id, ack }] do payload de status (espelha collectUpdates do scheduler: aceita
+// formatos variados). id = key.id da Evolution → casa com staff_outbound_samples.external_message_id.
+function _collectAckUpdates(body) {
+  const out = [];
+  const data = body && body.data != null ? body.data : body;
+  const arr = Array.isArray(data) ? data : [data];
+  for (const d of arr) {
+    if (!d || typeof d !== 'object') continue;
+    const id = (d.key && d.key.id) || d.keyId || d.id || (d.message && d.message.key && d.message.key.id);
+    const ack = _mapAck(d.status || (d.update && d.update.status) || d.messageStatus);
+    if (id && ack) out.push({ id: String(id), ack });
+  }
+  return out;
+}
+
+// Grava o ack na saída correspondente (staff_outbound_samples) por external_message_id.
+// MONOTÔNICO (nunca regride: read>delivered>sent) e IDEMPOTENTE (mesmo ack = no-op).
+// Ignora se não achar a mensagem (WHERE não casa → 0 linhas; nunca cria linha nova).
+async function atualizarAckStatus(tenantId, body, log) {
+  const updates = _collectAckUpdates(body);
+  if (!updates.length) return;
+  const n = await withTenant(tenantId, async (c) => {
+    let tot = 0;
+    for (const u of updates) {
+      const r = await c.query(
+        `UPDATE staff_outbound_samples
+            SET ack_status = $2
+          WHERE tenant_id = $1 AND external_message_id = $3
+            AND (ack_status IS NULL OR
+                 (CASE ack_status WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END)
+                 < (CASE $2       WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END))`,
+        [tenantId, u.ack, u.id]
+      );
+      tot += r.rowCount;
+    }
+    return tot;
+  });
+  if (log) log.info('ack.updated', { recebidos: updates.length, aplicados: n });
+}
+
 async function handleZapiWebhook(req, res) {
   const tenant = req.tenant;
   const log = req.log;
@@ -183,6 +237,13 @@ async function handleZapiWebhook(req, res) {
 
   // ACK imediato (processamento é assíncrono).
   res.status(200).json({ status: 'ok' });
+
+  // Fatia 1 — MESSAGES_UPDATE de status (entregue/lido das NOSSAS msgs): NÃO é mensagem
+  // nova; casa pelo id e grava o check. Edição (update sem status mapeável) cai aqui e vira no-op.
+  if (String(req.body?.event || '').toLowerCase() === 'messages.update') {
+    atualizarAckStatus(tenant.id, req.body, log).catch((e) => log.warn('ack.unhandled', { error: e.message }));
+    return;
+  }
 
   if (!msg || !msg.externalId) {
     log.info('webhook.no_message', { reason: 'unparseable_payload' });

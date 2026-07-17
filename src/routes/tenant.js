@@ -833,7 +833,7 @@ router.get(
                       AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') = ''
                  )
                  SELECT t.id, t.received_at, t.kind, t.sender, t.body,
-                        t.media_url, t.media_type, t.media_filename, t.media_transcription, t.reactions,
+                        t.media_url, t.media_type, t.media_filename, t.media_transcription, t.reactions, t.ack_status,
                         t.reply_to_id, rt.role AS rt_role, rt.body AS rt_body, rt.media_type AS rt_media_type
                    FROM (
                    -- Entrada do LEAD (USER). Rascunhos da IA (ASSISTANT) NÃO entram na
@@ -841,7 +841,8 @@ router.get(
                    SELECT m.id, m.reply_to_message_id AS reply_to_id, m.received_at, 'lead' AS kind, m.sender, m.body,
                           m.media_url, m.media_type, m.media_filename, m.media_transcription,
                           (SELECT array_agg(r.emoji ORDER BY r.received_at) FROM reac r
-                            WHERE r.target_key = m.external_message_id) AS reactions
+                            WHERE r.target_key = m.external_message_id) AS reactions,
+                          NULL::text AS ack_status   -- inbound (lead) não tem check
                      FROM messages m
                      JOIN conversations cv ON cv.id = m.conversation_id
                     WHERE cv.tenant_id = $1
@@ -858,7 +859,8 @@ router.get(
                    SELECT s.id, s.reply_to_message_id AS reply_to_id, s.received_at, 'recepcao' AS kind, s.sender, s.body,
                           s.media_url, s.media_type, s.media_filename, NULL AS media_transcription,
                           (SELECT array_agg(r.emoji ORDER BY r.received_at) FROM reac r
-                            WHERE r.target_key = s.external_message_id) AS reactions
+                            WHERE r.target_key = s.external_message_id) AS reactions,
+                          s.ack_status   -- check da recepção (direto da saída)
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
                       AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
@@ -874,7 +876,14 @@ router.get(
                    SELECT pa.id, pa.reply_to_message_id AS reply_to_id, pa.created_at AS received_at, 'ia' AS kind, NULL AS sender,
                           pa.suggested_response AS body,
                           NULL AS media_url, NULL AS media_type, NULL AS media_filename, NULL AS media_transcription,
-                          NULL::text[] AS reactions
+                          NULL::text[] AS reactions,
+                          -- check da IA: o id da Evolution está na saída (eco), deduplicada
+                          -- fora da timeline; casa pelo corpo (mesmo critério do NOT IN acima).
+                          (SELECT so.ack_status FROM staff_outbound_samples so
+                            WHERE so.tenant_id = $1
+                              AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
+                              AND so.body = pa.suggested_response
+                            ORDER BY so.received_at DESC LIMIT 1) AS ack_status
                      FROM pending_approvals pa
                     WHERE pa.tenant_id = $1 AND pa.lead_id = $3
                       AND pa.status IN ('APPROVED', 'EDITED')
@@ -894,6 +903,7 @@ router.get(
             media_url: r.media_url, media_type: r.media_type, media_filename: r.media_filename,
             media_transcription: r.media_transcription,
             reactions: Array.isArray(r.reactions) ? r.reactions : null,   // ADR-031 item 3
+            ack_status: r.ack_status || null,   // Fatia 1 — check só nas saídas (null no inbound)
             reply_to: null,
           };
           if (r.reply_to_id) {
