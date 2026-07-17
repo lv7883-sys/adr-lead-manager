@@ -1036,7 +1036,9 @@ async function enviarRespostaAprovada(tenantId, leadId, texto, quoted) {
   const st = await evolution.status({ instance, apikey });
   if (st.state !== 'open') return { sent: false, reason: 'instancia=' + st.state };
   const res = await evolution.sendText({ instance, apikey }, dados.phone, texto, quoted);
-  return { sent: true, messageId: evolution.pickMessageId(res) };
+  // phone volta p/ o chamador registrar a saída SÍNCRONA em staff_outbound_samples
+  // (mesma linha que o eco fromMe deduplica por external_message_id).
+  return { sent: true, messageId: evolution.pickMessageId(res), phone: dados.phone };
 }
 
 // ADR-016 P1 / item C — telefone do lead + creds Evolution (mesma tx, RLS).
@@ -1672,6 +1674,26 @@ router.post(
       try {
         const quoted = citada && citada.wa_key ? { key: citada.wa_key } : undefined;
         envio = await enviarRespostaAprovada(req.tenantId, id, r.approval.suggested_response, quoted);
+        // #8 — grava a saída em staff_outbound_samples de forma SÍNCRONA (espelha o texto
+        // livre em /mensagem): tira o lead da fila NA HORA (awaiting_reply casa por
+        // telefone + received_at), sem depender do eco fromMe. Quando o eco chega depois,
+        // cai no ON CONFLICT (mesmo external_message_id) e NÃO duplica. Só registra com id
+        // da Evolution presente — sem id, external_message_id NULL não deduplicaria o eco
+        // (duplicaria), então deixa o eco criar a linha (comportamento anterior). Best-effort
+        // e isolado: falha aqui não invalida o envio (a mensagem JÁ foi enviada).
+        if (envio.sent && envio.messageId) {
+          try {
+            await _registrarSaida(req.tenantId, {
+              phone: envio.phone,
+              externalMessageId: envio.messageId,
+              sender: req.tenantRole,
+              body: r.approval.suggested_response,
+              replyToMessageId: citada ? citada.id : null,
+            });
+          } catch (regErr) {
+            logger.warn('tenant.lead.approve_registrar_saida_error', { tenant_id: req.tenantId, lead_id: id, error: regErr.message });
+          }
+        }
       } catch (sendErr) {
         envio = { sent: false, reason: 'error', error: sendErr.message };
         logger.error('tenant.lead.send_error', { tenant_id: req.tenantId, lead_id: id, error: sendErr.message });
