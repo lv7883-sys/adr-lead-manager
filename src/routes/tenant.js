@@ -833,7 +833,7 @@ router.get(
                       AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') = ''
                  )
                  SELECT t.id, t.received_at, t.kind, t.sender, t.body,
-                        t.media_url, t.media_type, t.media_filename, t.media_transcription, t.reactions, t.ack_status, t.edited_at,
+                        t.media_url, t.media_type, t.media_filename, t.media_transcription, t.reactions, t.ack_status, t.edited_at, t.deleted_at,
                         t.reply_to_id, rt.role AS rt_role, rt.body AS rt_body, rt.media_type AS rt_media_type
                    FROM (
                    -- Entrada do LEAD (USER). Rascunhos da IA (ASSISTANT) NÃO entram na
@@ -843,7 +843,8 @@ router.get(
                           (SELECT array_agg(r.emoji ORDER BY r.received_at) FROM reac r
                             WHERE r.target_key = m.external_message_id) AS reactions,
                           NULL::text AS ack_status,   -- inbound (lead) não tem check
-                          m.edited_at                 -- Fatia 2: marcador "editada"
+                          m.edited_at,                -- Fatia 2: marcador "editada"
+                          m.deleted_at                -- Fatia 3: marcador "apagada"
                      FROM messages m
                      JOIN conversations cv ON cv.id = m.conversation_id
                     WHERE cv.tenant_id = $1
@@ -862,7 +863,8 @@ router.get(
                           (SELECT array_agg(r.emoji ORDER BY r.received_at) FROM reac r
                             WHERE r.target_key = s.external_message_id) AS reactions,
                           s.ack_status,   -- check da recepção (direto da saída)
-                          NULL::timestamptz AS edited_at   -- edição de outbound fora do escopo (Fatia 2 = inbound)
+                          NULL::timestamptz AS edited_at,   -- edição de outbound fora do escopo (Fatia 2 = inbound)
+                          NULL::timestamptz AS deleted_at   -- exclusão de outbound fora do escopo (Fatia 3 = inbound)
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
                       AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
@@ -886,7 +888,8 @@ router.get(
                               AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
                               AND so.body = pa.suggested_response
                             ORDER BY so.received_at DESC LIMIT 1) AS ack_status,
-                          NULL::timestamptz AS edited_at   -- edição de outbound fora do escopo (Fatia 2 = inbound)
+                          NULL::timestamptz AS edited_at,   -- edição de outbound fora do escopo (Fatia 2 = inbound)
+                          NULL::timestamptz AS deleted_at   -- exclusão de outbound fora do escopo (Fatia 3 = inbound)
                      FROM pending_approvals pa
                     WHERE pa.tenant_id = $1 AND pa.lead_id = $3
                       AND pa.status IN ('APPROVED', 'EDITED')
@@ -908,6 +911,7 @@ router.get(
             reactions: Array.isArray(r.reactions) ? r.reactions : null,   // ADR-031 item 3
             ack_status: r.ack_status || null,   // Fatia 1 — check só nas saídas (null no inbound)
             edited_at: r.edited_at || null,      // Fatia 2 — marcador "editada" (inbound)
+            deleted_at: r.deleted_at || null,    // Fatia 3 — marcador "apagada" (inbound)
             reply_to: null,
           };
           if (r.reply_to_id) {

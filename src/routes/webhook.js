@@ -285,6 +285,56 @@ async function aplicarEdicao(tenantId, edit, log) {
   if (log) log.info('edit.applied', { id: edit.id, aplicados: n });
 }
 
+// ── Fatia 3 WhatsApp-like: EXCLUSÃO de mensagem ("apagar para todos") ───────────────
+// Baileys 2.3.7 manda a exclusão em DUAS formas — o handler cobre as duas:
+//  (1) evento dedicado 'messages.delete' → data.keys:[{id,...}] (ou data.key / array direto);
+//  (2) protocolMessage type REVOKE embutido em 'messages.update'/'messages.upsert' →
+//      protocolMessage.key.id é o id da mensagem apagada.
+// Retorna [ids do ALVO] (dedup). DISTINÇÃO de status/edição: só REVOKE ou o evento delete
+// disparam → não colide (status tem data.status; edição tem type EDIT).
+function _detectDelete(body) {
+  const ev = String(body && body.event || '').toLowerCase();
+  const data = body && body.data != null ? body.data : body;
+  const arr = Array.isArray(data) ? data : [data];
+  const ids = new Set();
+  for (const d of arr) {
+    if (!d || typeof d !== 'object') continue;
+    // (1) evento dedicado messages.delete
+    if (ev === 'messages.delete') {
+      const keys = Array.isArray(d.keys) ? d.keys : (d.key ? [d.key] : [d]);
+      for (const k of keys) { const id = k && (k.id || (k.key && k.key.id)); if (id) ids.add(String(id)); }
+    }
+    // (2) protocolMessage REVOKE (via update/upsert): id do ALVO em protocolMessage.key.id
+    const m = d.message || {};
+    const proto = m.protocolMessage
+               || (m.editedMessage && m.editedMessage.message && m.editedMessage.message.protocolMessage);
+    if (proto && /REVOKE/i.test(String(proto.type || '')) && proto.key && proto.key.id) {
+      ids.add(String(proto.key.id));
+    }
+  }
+  return [...ids];
+}
+
+// Marca a(s) mensagem(ns) como apagada(s) — SETA deleted_at, NÃO apaga a linha nem o body
+// (auditoria; a UI mostra a frase de apagada). Idempotente (COALESCE mantém o 1º timestamp).
+// Ignora se não achar (0 linhas; nunca cria). Só INBOUND casa (outbound tem external_message_id NULL).
+async function marcarApagada(tenantId, ids, log) {
+  if (!ids.length) return;
+  const n = await withTenant(tenantId, async (c) => {
+    let tot = 0;
+    for (const id of ids) {
+      const r = await c.query(
+        `UPDATE messages SET deleted_at = COALESCE(deleted_at, now())
+          WHERE tenant_id = $1 AND external_message_id = $2`,
+        [tenantId, id]
+      );
+      tot += r.rowCount;
+    }
+    return tot;
+  });
+  if (log) log.info('delete.applied', { ids: ids.length, aplicados: n });
+}
+
 async function handleZapiWebhook(req, res) {
   const tenant = req.tenant;
   const log = req.log;
@@ -292,6 +342,15 @@ async function handleZapiWebhook(req, res) {
 
   // ACK imediato (processamento é assíncrono).
   res.status(200).json({ status: 'ok' });
+
+  // Fatia 3 — EXCLUSÃO (apagar p/ todos): evento dedicado messages.delete OU protocolMessage
+  // REVOKE embutido em update/upsert. NÃO é mensagem nova — marca deleted_at e retorna, ANTES
+  // de ack/edição/ingestão (evita ingerir um revoke-upsert como mensagem-lixo). No-op se vazio.
+  const apagadas = _detectDelete(req.body);
+  if (apagadas.length) {
+    marcarApagada(tenant.id, apagadas, log).catch((e) => log.warn('delete.unhandled', { error: e.message }));
+    return;
+  }
 
   // MESSAGES_UPDATE: NÃO é mensagem nova. Dois sub-casos independentes (sem colisão):
   //  - Fatia 1: status (entregue/lido) → ack na saída (no-op se não houver data.status);
