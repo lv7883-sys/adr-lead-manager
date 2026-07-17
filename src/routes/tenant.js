@@ -864,7 +864,7 @@ router.get(
                             WHERE r.target_key = s.external_message_id) AS reactions,
                           s.ack_status,   -- check da recepção (direto da saída)
                           NULL::timestamptz AS edited_at,   -- edição de outbound fora do escopo (Fatia 2 = inbound)
-                          NULL::timestamptz AS deleted_at   -- exclusão de outbound fora do escopo (Fatia 3 = inbound)
+                          s.deleted_at   -- AÇÃO-1: exclusão da recepção (direto da saída)
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
                       AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
@@ -889,7 +889,12 @@ router.get(
                               AND so.body = pa.suggested_response
                             ORDER BY so.received_at DESC LIMIT 1) AS ack_status,
                           NULL::timestamptz AS edited_at,   -- edição de outbound fora do escopo (Fatia 2 = inbound)
-                          NULL::timestamptz AS deleted_at   -- exclusão de outbound fora do escopo (Fatia 3 = inbound)
+                          -- AÇÃO-1: exclusão da IA — deleted_at vive no eco (mesmo JOIN por corpo do ack)
+                          (SELECT so.deleted_at FROM staff_outbound_samples so
+                            WHERE so.tenant_id = $1
+                              AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
+                              AND so.body = pa.suggested_response
+                            ORDER BY so.received_at DESC LIMIT 1) AS deleted_at
                      FROM pending_approvals pa
                     WHERE pa.tenant_id = $1 AND pa.lead_id = $3
                       AND pa.status IN ('APPROVED', 'EDITED')
@@ -1072,6 +1077,40 @@ async function _credsLead(tenantId, leadId) {
   });
 }
 
+// Fatia AÇÃO-1 — resolve a KEY do WhatsApp de uma bolha OUTBOUND nossa a partir do `mid`
+// (o id-da-linha que a bolha carrega). Cobre os 2 tipos de saída:
+//   - recepcao: mid = linha de staff_outbound_samples (id direto);
+//   - ia:       mid = pending_approvals; o id da Evolution vive no ECO (staff_outbound
+//               deduplicado por corpo — mesmo critério do NOT IN / ack da IA na timeline).
+// key = { id: external_message_id, remoteJid: do raw OU reconstruído (<tel>@s.whatsapp.net
+// p/ as ~80 linhas síncronas sem raw), fromMe: true }. Devolve { key, soId, deleted_at } ou
+// null (mid não é nossa saída — ex.: bolha do LEAD → nunca apagável — ou sem id da Evolution).
+async function _resolverKeyApagar(c, tenantId, mid) {
+  let r = (await c.query(
+    `SELECT id AS so_id, external_message_id AS msg_id,
+            raw#>>'{data,key,remoteJid}' AS remote_jid,
+            regexp_replace(external_id, '[^0-9]', '', 'g') AS phone,
+            deleted_at
+       FROM staff_outbound_samples
+      WHERE tenant_id = $1 AND id = $2`, [tenantId, mid])).rows[0];
+  if (!r) {
+    r = (await c.query(
+      `SELECT s.id AS so_id, s.external_message_id AS msg_id,
+              s.raw#>>'{data,key,remoteJid}' AS remote_jid,
+              regexp_replace(s.external_id, '[^0-9]', '', 'g') AS phone,
+              s.deleted_at
+         FROM pending_approvals pa
+         JOIN staff_outbound_samples s
+           ON s.tenant_id = pa.tenant_id AND s.body = pa.suggested_response
+        WHERE pa.tenant_id = $1 AND pa.id = $2 AND pa.status IN ('APPROVED', 'EDITED')
+        ORDER BY s.received_at DESC LIMIT 1`, [tenantId, mid])).rows[0];
+  }
+  if (!r || !r.msg_id) return null;   // não é saída nossa / sem id da Evolution → não apagável
+  const remoteJid = r.remote_jid || (r.phone ? `${r.phone}@s.whatsapp.net` : null);
+  if (!remoteJid) return null;
+  return { key: { id: r.msg_id, remoteJid, fromMe: true }, soId: r.so_id, deleted_at: r.deleted_at };
+}
+
 // Registra a saída da recepção em staff_outbound_samples (timeline 'recepcao').
 // O eco fromMe do webhook deduplica pela unique (tenant_id, external_message_id).
 async function _registrarSaida(tenantId, { phone, externalMessageId, sender, body, media, replyToMessageId }) {
@@ -1197,6 +1236,36 @@ router.post('/:tenantId/leads/:id/mensagem', authenticate, requireTenantAccess(W
   } catch (err) {
     logger.error('tenant.lead.mensagem_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
     res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
+
+// POST /tenant/:tid/leads/:id/mensagem/:mid/apagar — Fatia AÇÃO-1: apaga NOSSA mensagem no
+// WhatsApp (deleteMessageForEveryone) e reflete "apagada" na timeline. Só bolhas outbound
+// (o resolver não casa bolha do LEAD → 404). Idempotente. Falha da Evolution (janela do
+// WhatsApp expirada etc.) → NÃO marca deleted_at, devolve erro traduzível.
+router.post('/:tenantId/leads/:id/mensagem/:mid/apagar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id, mid } = req.params;
+  if (!isUuid(id) || !isUuid(mid)) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const alvo = await withTenant(req.tenantId, (c) => _resolverKeyApagar(c, req.tenantId, mid));
+    if (!alvo) return res.status(404).json({ error: 'nao_apagavel' });   // bloqueia lead/inbound
+    if (alvo.deleted_at) return res.json({ ok: true, ja_apagada: true }); // idempotente (re-apagar)
+    const d = await _credsLead(req.tenantId, id);
+    if (!d.instance || !d.apikey) return res.status(400).json({ error: 'tenant_sem_evolution' });
+    const del = await evolution.deleteMessage({ instance: d.instance, apikey: d.apikey }, alvo.key);
+    if (!del.ok) {
+      logger.warn('tenant.lead.apagar_falhou', { tenant_id: req.tenantId, lead_id: id, mid, error: del.error });
+      return res.status(502).json({ error: 'nao_apagou', detail: del.error });
+    }
+    await withTenant(req.tenantId, (c) => c.query(
+      'UPDATE staff_outbound_samples SET deleted_at = COALESCE(deleted_at, now()) WHERE tenant_id = $1 AND id = $2',
+      [req.tenantId, alvo.soId]
+    ));
+    logger.info('tenant.lead.apagada', { tenant_id: req.tenantId, lead_id: id, mid, by: req.tenantRole });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error('tenant.lead.apagar_error', { tenant_id: req.tenantId, lead_id: id, mid, error: err.message });
+    res.status(500).json({ error: 'internal error' });
   }
 });
 

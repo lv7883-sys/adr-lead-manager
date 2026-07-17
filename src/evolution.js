@@ -130,4 +130,20 @@ async function sendMedia({ instance, apikey }, number, opts) {
   }
 }
 
-module.exports = { status, sendText, sendMedia, pickMessageId, getBase64FromMediaMessage, _toggle9BR };
+// Fatia AÇÃO-1 — APAGAR para todos (deleteMessageForEveryone). `key` = a key do WhatsApp
+// da mensagem NOSSA: { id, remoteJid, fromMe:true, participant? }. O body É a key crua
+// (a Evolution 2.3.7 faz sendMessage(key.remoteJid, { delete: key })). Best-effort: NÃO
+// estoura — devolve { ok:false, error } p/ a rota traduzir (ex.: janela do WhatsApp expirada).
+async function deleteMessage({ instance, apikey }, key) {
+  try {
+    const d = await req('DELETE', `/chat/deleteMessageForEveryone/${encodeURIComponent(instance)}`, apikey, key);
+    return { ok: true, raw: d };
+  } catch (e) {
+    const b = e && e.body;
+    const detail = (b && (b.response?.message || b.message || b.error))
+      || (e && e.message) || 'erro ao apagar';
+    return { ok: false, error: Array.isArray(detail) ? detail.join('; ') : String(detail), status: e && e.status };
+  }
+}
+
+module.exports = { status, sendText, sendMedia, pickMessageId, getBase64FromMediaMessage, deleteMessage, _toggle9BR };
