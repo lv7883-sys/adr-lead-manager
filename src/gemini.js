@@ -303,6 +303,9 @@ const REGRAS_REDACAO = {
   // Tom natural de WhatsApp.
   tom:
     '\n- Tom natural de WhatsApp: cordial e humano, espelhando o jeito (formal/informal) das mensagens anteriores. Nada de robótico ou formal demais.',
+  // Uso do nome: proibição por padrão no fluxo; abertura imperativa (gatilho objetivo, não vaza).
+  nome:
+    '\n- NOME DO CLIENTE: por padrão, responda SEM o nome. NÃO abra a resposta com o nome quando a conversa JÁ está em andamento — nada de "Certo, {Nome}", "Entendi, {Nome}", "{Nome}, ..." como prefixo no meio da conversa; isso soa robótico e repetitivo. No fluxo normal da conversa, NÃO use o nome. As exceções em que o nome aparece: (1) ABERTURA — SEMPRE cumprimente pelo nome na PRIMEIRA resposta da conversa (ex.: "Olá, {Nome}!"). (2) RETOMADA — quando a conversa volta depois de um tempo parada, reancore com o nome logo no começo. Fora desses dois momentos, no fluxo normal da conversa, NÃO use o nome.',
   // Não re-oferecer o que JÁ foi enviado (apresentação, tabela de valores, documento...).
   naoReoferecer:
     '\n- ANTES de sugerir, confira o histórico: se você JÁ enviou o que o cliente pede (apresentação, tabela de valores, documento, fotos, link — no histórico aparece como "[documento: ...]", "[imagem]", ou você já disse que ia enviar), NÃO ofereça mandar de novo nem diga "posso reenviar". Reconheça que já enviou e siga a conversa: pergunte se recebeu, se ficou claro ou se tem alguma dúvida. Só ofereça enviar o que AINDA não aparece como enviado no histórico.',
@@ -345,7 +348,7 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
     '\n\nCOMO ESCREVER A RESPOSTA (você é a própria recepcionista continuando a conversa no WhatsApp):' +
     REGRAS_REDACAO.fluidez +
     '\n- Responda direto ao que a última mensagem pede. Sem rodeios, sem resumir o que já foi dito, sem repetir informação que a pessoa já tem.' +
-    '\n- Use o nome do lead no máximo de forma esporádica e natural; jamais em toda mensagem.' +
+    REGRAS_REDACAO.nome +
     REGRAS_REDACAO.tom +
     REGRAS_REDACAO.naoReoferecer +
     REGRAS_REDACAO.posturaComercial +
@@ -390,6 +393,7 @@ async function improveReply({ systemPrompt, history = [], draft }) {
     // Mesmas regras da sugestão (constante compartilhada) — não divergir de novo.
     'COMO ESCREVER (mesmas regras da sugestão da escola):' +
     REGRAS_REDACAO.fluidez +
+    REGRAS_REDACAO.nome +
     REGRAS_REDACAO.tom +
     REGRAS_REDACAO.naoReoferecer +
     REGRAS_REDACAO.posturaComercial +
