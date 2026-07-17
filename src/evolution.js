@@ -146,4 +146,21 @@ async function deleteMessage({ instance, apikey }, key) {
   }
 }
 
-module.exports = { status, sendText, sendMedia, pickMessageId, getBase64FromMediaMessage, deleteMessage, _toggle9BR };
+// Fatia AÇÃO-2 — EDITAR nossa mensagem (updateMessage). `key` = a key do WhatsApp da NOSSA
+// mensagem { id, remoteJid, fromMe:true }; `number` = telefone do destinatário (deve casar
+// com key.remoteJid); `text` = texto novo. A Evolution valida a janela de 15 min e text-only
+// server-side → fora da janela volta como erro. Best-effort: NÃO estoura — { ok:false, error }.
+async function editMessage({ instance, apikey }, key, number, text) {
+  const n = String(number || '').replace(/\D+/g, '');
+  try {
+    const d = await req('POST', `/chat/updateMessage/${encodeURIComponent(instance)}`, apikey, { number: n, key, text });
+    return { ok: true, raw: d };
+  } catch (e) {
+    const b = e && e.body;
+    const detail = (b && (b.response?.message || b.message || b.error))
+      || (e && e.message) || 'erro ao editar';
+    return { ok: false, error: Array.isArray(detail) ? detail.join('; ') : String(detail), status: e && e.status };
+  }
+}
+
+module.exports = { status, sendText, sendMedia, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, _toggle9BR };

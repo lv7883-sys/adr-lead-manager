@@ -863,7 +863,7 @@ router.get(
                           (SELECT array_agg(r.emoji ORDER BY r.received_at) FROM reac r
                             WHERE r.target_key = s.external_message_id) AS reactions,
                           s.ack_status,   -- check da recepção (direto da saída)
-                          NULL::timestamptz AS edited_at,   -- edição de outbound fora do escopo (Fatia 2 = inbound)
+                          s.edited_at,   -- AÇÃO-2: edição da recepção (direto da saída)
                           s.deleted_at   -- AÇÃO-1: exclusão da recepção (direto da saída)
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
@@ -888,7 +888,12 @@ router.get(
                               AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
                               AND so.body = pa.suggested_response
                             ORDER BY so.received_at DESC LIMIT 1) AS ack_status,
-                          NULL::timestamptz AS edited_at,   -- edição de outbound fora do escopo (Fatia 2 = inbound)
+                          -- AÇÃO-2: edição da IA — edited_at vive no eco (mesmo JOIN por corpo)
+                          (SELECT so.edited_at FROM staff_outbound_samples so
+                            WHERE so.tenant_id = $1
+                              AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
+                              AND so.body = pa.suggested_response
+                            ORDER BY so.received_at DESC LIMIT 1) AS edited_at,
                           -- AÇÃO-1: exclusão da IA — deleted_at vive no eco (mesmo JOIN por corpo do ack)
                           (SELECT so.deleted_at FROM staff_outbound_samples so
                             WHERE so.tenant_id = $1
@@ -1077,20 +1082,22 @@ async function _credsLead(tenantId, leadId) {
   });
 }
 
-// Fatia AÇÃO-1 — resolve a KEY do WhatsApp de uma bolha OUTBOUND nossa a partir do `mid`
-// (o id-da-linha que a bolha carrega). Cobre os 2 tipos de saída:
+// Fatia AÇÃO-1/2 — resolve a KEY do WhatsApp de uma bolha OUTBOUND nossa a partir do `mid`
+// (o id-da-linha que a bolha carrega). Serve p/ APAGAR e EDITAR (mesma key). Cobre os 2
+// tipos de saída:
 //   - recepcao: mid = linha de staff_outbound_samples (id direto);
 //   - ia:       mid = pending_approvals; o id da Evolution vive no ECO (staff_outbound
 //               deduplicado por corpo — mesmo critério do NOT IN / ack da IA na timeline).
 // key = { id: external_message_id, remoteJid: do raw OU reconstruído (<tel>@s.whatsapp.net
-// p/ as ~80 linhas síncronas sem raw), fromMe: true }. Devolve { key, soId, deleted_at } ou
-// null (mid não é nossa saída — ex.: bolha do LEAD → nunca apagável — ou sem id da Evolution).
-async function _resolverKeyApagar(c, tenantId, mid) {
+// p/ as ~80 linhas síncronas sem raw), fromMe: true }. Devolve { key, soId, deleted_at, phone }
+// (phone = número do destinatário, p/ o updateMessage do editar) ou null (mid não é nossa
+// saída — ex.: bolha do LEAD → nunca apagável/editável — ou sem id da Evolution).
+async function _resolverKeyMensagem(c, tenantId, mid) {
   let r = (await c.query(
     `SELECT id AS so_id, external_message_id AS msg_id,
             raw#>>'{data,key,remoteJid}' AS remote_jid,
             regexp_replace(external_id, '[^0-9]', '', 'g') AS phone,
-            deleted_at
+            deleted_at, NULL::uuid AS pa_id
        FROM staff_outbound_samples
       WHERE tenant_id = $1 AND id = $2`, [tenantId, mid])).rows[0];
   if (!r) {
@@ -1098,17 +1105,19 @@ async function _resolverKeyApagar(c, tenantId, mid) {
       `SELECT s.id AS so_id, s.external_message_id AS msg_id,
               s.raw#>>'{data,key,remoteJid}' AS remote_jid,
               regexp_replace(s.external_id, '[^0-9]', '', 'g') AS phone,
-              s.deleted_at
+              s.deleted_at, pa.id AS pa_id
          FROM pending_approvals pa
          JOIN staff_outbound_samples s
            ON s.tenant_id = pa.tenant_id AND s.body = pa.suggested_response
         WHERE pa.tenant_id = $1 AND pa.id = $2 AND pa.status IN ('APPROVED', 'EDITED')
         ORDER BY s.received_at DESC LIMIT 1`, [tenantId, mid])).rows[0];
   }
-  if (!r || !r.msg_id) return null;   // não é saída nossa / sem id da Evolution → não apagável
+  if (!r || !r.msg_id) return null;   // não é saída nossa / sem id da Evolution → não apagável/editável
   const remoteJid = r.remote_jid || (r.phone ? `${r.phone}@s.whatsapp.net` : null);
   if (!remoteJid) return null;
-  return { key: { id: r.msg_id, remoteJid, fromMe: true }, soId: r.so_id, deleted_at: r.deleted_at };
+  // paId (≠ null) = bolha IA: o corpo vem de pending_approvals; ao editar, atualiza-se lá também
+  // p/ manter o dedup-por-corpo da timeline consistente (senão a msg duplicaria).
+  return { key: { id: r.msg_id, remoteJid, fromMe: true }, soId: r.so_id, deleted_at: r.deleted_at, phone: r.phone, paId: r.pa_id };
 }
 
 // Registra a saída da recepção em staff_outbound_samples (timeline 'recepcao').
@@ -1247,7 +1256,7 @@ router.post('/:tenantId/leads/:id/mensagem/:mid/apagar', authenticate, requireTe
   const { id, mid } = req.params;
   if (!isUuid(id) || !isUuid(mid)) return res.status(400).json({ error: 'invalid id' });
   try {
-    const alvo = await withTenant(req.tenantId, (c) => _resolverKeyApagar(c, req.tenantId, mid));
+    const alvo = await withTenant(req.tenantId, (c) => _resolverKeyMensagem(c, req.tenantId, mid));
     if (!alvo) return res.status(404).json({ error: 'nao_apagavel' });   // bloqueia lead/inbound
     if (alvo.deleted_at) return res.json({ ok: true, ja_apagada: true }); // idempotente (re-apagar)
     const d = await _credsLead(req.tenantId, id);
@@ -1265,6 +1274,48 @@ router.post('/:tenantId/leads/:id/mensagem/:mid/apagar', authenticate, requireTe
     res.json({ ok: true });
   } catch (err) {
     logger.error('tenant.lead.apagar_error', { tenant_id: req.tenantId, lead_id: id, mid, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tid/leads/:id/mensagem/:mid/editar { text } — Fatia AÇÃO-2: edita NOSSA
+// mensagem no WhatsApp (updateMessage) e reflete o texto novo + "editada" na timeline. Só
+// bolhas outbound (resolver não casa bolha do LEAD → 404). A janela de 15 min é validada
+// pela Evolution (server-side): expirada → 502 traduzível SEM alterar. Idempotente.
+router.post('/:tenantId/leads/:id/mensagem/:mid/editar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id, mid } = req.params;
+  if (!isUuid(id) || !isUuid(mid)) return res.status(400).json({ error: 'invalid id' });
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  if (!text) return res.status(400).json({ error: 'empty text' });
+  try {
+    const alvo = await withTenant(req.tenantId, (c) => _resolverKeyMensagem(c, req.tenantId, mid));
+    if (!alvo) return res.status(404).json({ error: 'nao_editavel' });   // bloqueia lead/inbound
+    const d = await _credsLead(req.tenantId, id);
+    if (!d.instance || !d.apikey) return res.status(400).json({ error: 'tenant_sem_evolution' });
+    const ed = await evolution.editMessage({ instance: d.instance, apikey: d.apikey }, alvo.key, alvo.phone, text);
+    if (!ed.ok) {
+      logger.warn('tenant.lead.editar_falhou', { tenant_id: req.tenantId, lead_id: id, mid, error: ed.error });
+      return res.status(502).json({ error: 'nao_editou', detail: ed.error });
+    }
+    // Só altera o NOSSO lado após a Evolution confirmar. original_body guarda o 1º corpo (auditoria).
+    await withTenant(req.tenantId, async (c) => {
+      await c.query(
+        `UPDATE staff_outbound_samples
+            SET original_body = COALESCE(original_body, body), body = $3, edited_at = now()
+          WHERE tenant_id = $1 AND id = $2`,
+        [req.tenantId, alvo.soId, text]
+      );
+      // Bolha IA: o corpo exibido vem de pending_approvals + a timeline deduplica por corpo.
+      // Atualiza suggested_response p/ o texto novo, senão a msg duplicaria e o "editada" não colaria.
+      if (alvo.paId) {
+        await c.query('UPDATE pending_approvals SET suggested_response = $3 WHERE tenant_id = $1 AND id = $2',
+          [req.tenantId, alvo.paId, text]);
+      }
+    });
+    logger.info('tenant.lead.editada', { tenant_id: req.tenantId, lead_id: id, mid, by: req.tenantRole });
+    res.json({ ok: true, body: text });
+  } catch (err) {
+    logger.error('tenant.lead.editar_error', { tenant_id: req.tenantId, lead_id: id, mid, error: err.message });
     res.status(500).json({ error: 'internal error' });
   }
 });
