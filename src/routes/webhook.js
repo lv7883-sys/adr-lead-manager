@@ -230,6 +230,61 @@ async function atualizarAckStatus(tenantId, body, log) {
   if (log) log.info('ack.updated', { recebidos: updates.length, aplicados: n });
 }
 
+// ── Fatia 2 WhatsApp-like: EDIÇÃO de mensagem (cliente edita o que mandou) ──────────
+// Baileys 2.3.7: a edição chega como protocolMessage type MESSAGE_EDIT, carregando o id
+// da mensagem ORIGINAL (protocolMessage.key.id) + o texto novo (editedMessage). DISTINÇÃO
+// do status (Fatia 1): edição TEM corpo novo e NÃO tem data.status mapeável → sem colisão.
+// Retorna { id: <id do ALVO>, body: <texto novo> } ou null.
+function _detectEdit(body) {
+  const data = body && body.data != null ? body.data : body;
+  const arr = Array.isArray(data) ? data : [data];
+  const novoTexto = (em) => {
+    if (!em || typeof em !== 'object') return null;
+    const inner = em.message || em;   // editedMessage às vezes embrulha .message
+    return inner.conversation
+        ?? inner.extendedTextMessage?.text
+        ?? inner.imageMessage?.caption
+        ?? inner.videoMessage?.caption
+        ?? null;
+  };
+  for (const d of arr) {
+    if (!d || typeof d !== 'object') continue;
+    const m = d.message || {};
+    // protocolMessage MESSAGE_EDIT (forma canônica do Baileys), em vários aninhamentos.
+    const proto = m.protocolMessage
+               || (m.editedMessage && m.editedMessage.message && m.editedMessage.message.protocolMessage)
+               || (m.editedMessage && m.editedMessage.protocolMessage);
+    if (proto && /EDIT/i.test(String(proto.type || '')) && proto.editedMessage) {
+      const id = (proto.key && proto.key.id) || (d.key && d.key.id) || d.keyId || d.id;
+      const novo = novoTexto(proto.editedMessage);
+      if (id && novo != null) return { id: String(id), body: String(novo) };
+    }
+    // forma achatada (algumas versões): message.editedMessage direto, sem protocolMessage.
+    if (m.editedMessage && !proto) {
+      const id = (d.key && d.key.id) || d.keyId || d.id;
+      const novo = novoTexto(m.editedMessage);
+      if (id && novo != null) return { id: String(id), body: String(novo) };
+    }
+  }
+  return null;
+}
+
+// Aplica a edição na mensagem existente (casa pelo external_message_id = id do alvo).
+// Guarda o 1º corpo em original_body (auditoria, idempotente via COALESCE), troca o body
+// e seta edited_at. Idempotente (reeditar atualiza de novo). Ignora se não achar a mensagem
+// (0 linhas; nunca cria). Só INBOUND casa (outbound tem external_message_id NULL em messages).
+async function aplicarEdicao(tenantId, edit, log) {
+  const n = await withTenant(tenantId, (c) => c.query(
+    `UPDATE messages
+        SET original_body = COALESCE(original_body, body),
+            body = $2,
+            edited_at = now()
+      WHERE tenant_id = $1 AND external_message_id = $3`,
+    [tenantId, edit.body, edit.id]
+  ).then((r) => r.rowCount));
+  if (log) log.info('edit.applied', { id: edit.id, aplicados: n });
+}
+
 async function handleZapiWebhook(req, res) {
   const tenant = req.tenant;
   const log = req.log;
@@ -238,10 +293,13 @@ async function handleZapiWebhook(req, res) {
   // ACK imediato (processamento é assíncrono).
   res.status(200).json({ status: 'ok' });
 
-  // Fatia 1 — MESSAGES_UPDATE de status (entregue/lido das NOSSAS msgs): NÃO é mensagem
-  // nova; casa pelo id e grava o check. Edição (update sem status mapeável) cai aqui e vira no-op.
+  // MESSAGES_UPDATE: NÃO é mensagem nova. Dois sub-casos independentes (sem colisão):
+  //  - Fatia 1: status (entregue/lido) → ack na saída (no-op se não houver data.status);
+  //  - Fatia 2: edição → troca o body da mensagem + marca "editada" (no-op se não houver).
   if (String(req.body?.event || '').toLowerCase() === 'messages.update') {
     atualizarAckStatus(tenant.id, req.body, log).catch((e) => log.warn('ack.unhandled', { error: e.message }));
+    const edit = _detectEdit(req.body);
+    if (edit) aplicarEdicao(tenant.id, edit, log).catch((e) => log.warn('edit.unhandled', { error: e.message }));
     return;
   }
 
