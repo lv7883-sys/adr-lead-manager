@@ -291,6 +291,23 @@ function _horasDesdeUltimoTurno(history) {
   return (Date.now() - ultimo) / 3.6e6;
 }
 
+// Regras de redação COMPARTILHADAS entre a sugestão (generateReply) e o "Melhorar"
+// (improveReply). Centralizadas aqui para as duas nunca divergirem: ao mudar uma regra
+// (brevidade, tom, não-re-oferecer), ambas herdam automaticamente. Cada item já vem como
+// bullet formatado ("\n- ..."); generateReply os intercala com suas regras ESPECÍFICAS de
+// geração (responder à última msg, saudação/retomada) preservando a ordem original.
+const REGRAS_REDACAO = {
+  // Fluidez/brevidade: espelhar o tamanho, responder curto quando cabe, sem virar frieza.
+  fluidez:
+    '\n- ESPELHE o tamanho das mensagens recentes e responda como no WhatsApp: quando a conversa é de mensagens curtas ou a pergunta tem resposta direta (horário, valor, "tem vaga?"), responda em UMA ou DUAS frases — natural, como a recepcionista digitaria no celular. Não faça parágrafo quando cabe uma linha; não repita o que já foi dito nem encha de formalidade. MAS não seja seca: mantenha o tom cordial e humano — brevidade não é frieza. Escreva mais só quando o assunto realmente exigir (cliente indeciso, várias perguntas juntas).',
+  // Tom natural de WhatsApp.
+  tom:
+    '\n- Tom natural de WhatsApp: cordial e humano, espelhando o jeito (formal/informal) das mensagens anteriores. Nada de robótico ou formal demais.',
+  // Não re-oferecer o que JÁ foi enviado (apresentação, tabela de valores, documento...).
+  naoReoferecer:
+    '\n- ANTES de sugerir, confira o histórico: se você JÁ enviou o que o cliente pede (apresentação, tabela de valores, documento, fotos, link — no histórico aparece como "[documento: ...]", "[imagem]", ou você já disse que ia enviar), NÃO ofereça mandar de novo nem diga "posso reenviar". Reconheça que já enviou e siga a conversa: pergunte se recebeu, se ficou claro ou se tem alguma dúvida. Só ofereça enviar o que AINDA não aparece como enviado no histórico.',
+};
+
 async function generateReply({ systemPrompt, history = [], message, clarification, retomada }) {
   let sys = systemPrompt;
   const primeiroContato = history.length === 0;
@@ -322,11 +339,11 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
   // e compridas, o oposto do que a recepção precisa.
   sys +=
     '\n\nCOMO ESCREVER A RESPOSTA (você é a própria recepcionista continuando a conversa no WhatsApp):' +
-    '\n- ESPELHE o tamanho das mensagens recentes e responda como no WhatsApp: quando a conversa é de mensagens curtas ou a pergunta tem resposta direta (horário, valor, "tem vaga?"), responda em UMA ou DUAS frases — natural, como a recepcionista digitaria no celular. Não faça parágrafo quando cabe uma linha; não repita o que já foi dito nem encha de formalidade. MAS não seja seca: mantenha o tom cordial e humano — brevidade não é frieza. Escreva mais só quando o assunto realmente exigir (cliente indeciso, várias perguntas juntas).' +
+    REGRAS_REDACAO.fluidez +
     '\n- Responda direto ao que a última mensagem pede. Sem rodeios, sem resumir o que já foi dito, sem repetir informação que a pessoa já tem.' +
     '\n- Use o nome do lead no máximo de forma esporádica e natural; jamais em toda mensagem.' +
-    '\n- Tom natural de WhatsApp: cordial e humano, espelhando o jeito (formal/informal) das mensagens anteriores. Nada de robótico ou formal demais.' +
-    '\n- ANTES de sugerir, confira o histórico: se você JÁ enviou o que o cliente pede (apresentação, tabela de valores, documento, fotos, link — no histórico aparece como "[documento: ...]", "[imagem]", ou você já disse que ia enviar), NÃO ofereça mandar de novo nem diga "posso reenviar". Reconheça que já enviou e siga a conversa: pergunte se recebeu, se ficou claro ou se tem alguma dúvida. Só ofereça enviar o que AINDA não aparece como enviado no histórico.' +
+    REGRAS_REDACAO.tom +
+    REGRAS_REDACAO.naoReoferecer +
     (permitirSaudacao
       ? (primeiroContato
           ? '\n- É a PRIMEIRA mensagem: pode cumprimentar e se apresentar brevemente (uma linha), conforme a referência de voz da escola.'
@@ -356,17 +373,27 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
 // D — "Melhorar com IA": revisa um rascunho escrito/editado pela recepcionista,
 // mantendo a INTENÇÃO e as informações dela. Não inventa dados. Retorna só o texto.
 async function improveReply({ systemPrompt, history = [], draft }) {
+  // Histórico COMPLETO (mesma fonte da sugestão: o /improve já entrega loadRealHistory —
+  // messages USER + staff_outbound_samples + drafts aprovados, sem LIMIT). Sem slice: é
+  // o que faz o "Melhorar" ENXERGAR o que já enviamos e não re-oferecer.
   const ctx = history.length
-    ? '\n\nContexto recente da conversa (mais antigo -> mais novo):\n' +
-      history.slice(-6).map((m) => `${m.role === 'ASSISTANT' ? 'Escola' : 'Lead'}: ${m.content ?? m.body ?? ''}`).join('\n')
+    ? '\n\nHISTÓRICO DA CONVERSA (mais antigo -> mais novo):\n' +
+      history.map((m) => `${m.role === 'ASSISTANT' ? 'Escola' : 'Lead'}: ${m.content ?? m.body ?? ''}`).join('\n')
     : '';
   const prompt =
     `${systemPrompt}\n\n` +
-    'TAREFA: revise e melhore o RASCUNHO de resposta abaixo, escrito pela recepcionista. ' +
-    'Corrija o português, ajuste ao tom da escola (sem emojis, "você", cordial e claro) e deixe natural — ' +
-    'MAS mantenha a intenção e as informações que ela colocou. NÃO invente dados (endereço, preço, nomes, ' +
-    'horários) que não estejam no contexto/prompt. Responda SOMENTE com a mensagem final melhorada, ' +
-    `sem comentários nem aspas.${ctx}\n\nRASCUNHO:\n${draft ?? ''}`;
+    // Mesmas regras da sugestão (constante compartilhada) — não divergir de novo.
+    'COMO ESCREVER (mesmas regras da sugestão da escola):' +
+    REGRAS_REDACAO.fluidez +
+    REGRAS_REDACAO.tom +
+    REGRAS_REDACAO.naoReoferecer +
+    '\n\nTAREFA: revise e melhore o RASCUNHO de resposta abaixo, escrito pela recepcionista. ' +
+    'Corrija o português e ajuste ao tom natural de WhatsApp da escola ("você", cordial e claro), ' +
+    'deixando a mensagem fluida — MAS mantenha a intenção e as informações que ela colocou. ' +
+    'Se o rascunho oferecer enviar algo que o HISTÓRICO mostra que JÁ foi enviado, corrija a AÇÃO ' +
+    '(troque "vou te enviar" por "já enviei, você recebeu?") preservando a informação — não re-ofereça o já enviado. ' +
+    'NÃO invente dados (endereço, preço, nomes, horários) que não estejam no histórico/prompt. ' +
+    `Responda SOMENTE com a mensagem final melhorada, sem comentários nem aspas.${ctx}\n\nRASCUNHO:\n${draft ?? ''}`;
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
       model: modelName,
