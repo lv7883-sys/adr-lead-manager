@@ -587,6 +587,12 @@ function _decideConversaRoute(r, isRelationship) {
     return { cls: { confidence: r.confidence, reasoning: `[vivo] ${r.reasoning || 'nova oportunidade'}`,
       profile_signals: [r.intent], is_lead: true, suggested_stage: sugEtapa, stage_reasoning: sugMotivo, ...estado } };
   }
+  if (r.intent === 'CANDIDATO') {
+    // Candidato a VAGA de trabalho (quer DAR aula, não estudar/contratar) → Descartados,
+    // com rótulo "Candidato a vaga". Mesma forma do não-lead claro (NOT_LEAD, reviewável).
+    return { route: { status: 'NOT_LEAD', reviewQueue: true, intent: 'CANDIDATO',
+      reasoning: `[vivo] candidato a vaga — ${r.reasoning || 'quer trabalhar/dar aula'}`, confidence: r.confidence, ...estado } };
+  }
   if (r.intent === 'ROTINA_CLIENTE' || r.intent === 'INTERNO') {
     // não-lead CLARO → não-classificadas (rede reviewável).
     return { route: { status: 'NOT_LEAD', reviewQueue: true, intent: r.intent,

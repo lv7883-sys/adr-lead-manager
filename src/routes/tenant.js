@@ -387,7 +387,11 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
       await c.query(
         `SELECT 'lead' AS kind, l.id::text AS id, coalesce(l.phone, l.meta_psid) AS phone, l.name,
                  l.classification_confidence AS confidence, 'low_confidence' AS reason,
-                 l.classification_reasoning AS reasoning, l.intent,
+                 l.classification_reasoning AS reasoning,
+                 -- intent não é gravado na coluna no caminho roteado (fica em
+                 -- classification_signals); p/ o chip "Candidato a vaga", surfaça CANDIDATO
+                 -- de lá quando a coluna estiver vazia. Aditivo e restrito a CANDIDATO.
+                 COALESCE(l.intent, CASE WHEN l.classification_signals->>0 = 'CANDIDATO' THEN 'CANDIDATO' END) AS intent,
                  l.conversation_state, l.state_reasoning,
                  CASE WHEN l.review_result = 'confirmed_not_lead' THEN 'recepcao' ELSE 'ia' END AS origem_descarte,
                  coalesce(l.review_em, l.created_at) AS descartado_em,   -- ordenação 'mais_recente'

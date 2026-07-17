@@ -136,7 +136,7 @@ async function classify({ message, examples, presignalNote }) {
 //   examples:     few-shot (mesmo formato de classify)
 // Retorna { is_lead, confidence (0-1), reasoning, intent }.
 // ============================================================================
-const CONVERSA_INTENTS = ['NOVA_OPORTUNIDADE', 'ROTINA_CLIENTE', 'INTERNO', 'INDEFINIDO'];
+const CONVERSA_INTENTS = ['NOVA_OPORTUNIDADE', 'ROTINA_CLIENTE', 'INTERNO', 'CANDIDATO', 'INDEFINIDO'];
 const CONVERSA_STATES = ['AGUARDANDO_RECEPCAO', 'AGUARDANDO_CLIENTE', 'RESOLVIDO', 'INDEFINIDO'];
 
 // Definição genérica padrão quando o tenant não setou `lead_definition` (multi-tenant
@@ -168,6 +168,7 @@ NÃO é lead (is_lead=false):
 - Cliente já existente tratando de ROTINA/pós-venda (conforme a definição acima): assuntos
   administrativos do dia a dia, remarcação, renovação, cobrança/pagamento, agradecimento, recado.
 - Conversa interna/operacional da equipe do negócio.
+- Candidato a VAGA de trabalho: pessoa se oferecendo para DAR aula / trabalhar no negócio (envia currículo, pergunta se há vaga/processo seletivo, quer ser professor/funcionário). Ela quer TRABALHAR — NÃO contratar o serviço nem estudar. (intent CANDIDATO)
 - Assunto sem nenhuma relação com a oportunidade de negócio descrita na definição acima.
 
 É lead (is_lead=true):
@@ -188,12 +189,12 @@ SEGURANÇA: na dúvida entre RESOLVIDO e esperar resposta, escolha AGUARDANDO_RE
 NUNCA marque RESOLVIDO sem certeza (não podemos esconder um cliente que ainda espera).
 
 Responda SOMENTE com JSON:
-{"is_lead":<true|false>,"confidence":<0.0-1.0>,"reasoning":"<1-2 frases em pt-BR citando o contexto da conversa>","intent":"NOVA_OPORTUNIDADE"|"ROTINA_CLIENTE"|"INTERNO"|"INDEFINIDO","conversation_state":"AGUARDANDO_RECEPCAO"|"AGUARDANDO_CLIENTE"|"RESOLVIDO"|"INDEFINIDO","state_reasoning":"<1 frase: com quem está a bola e por quê>"}
+{"is_lead":<true|false>,"confidence":<0.0-1.0>,"reasoning":"<1-2 frases em pt-BR citando o contexto da conversa>","intent":"NOVA_OPORTUNIDADE"|"ROTINA_CLIENTE"|"INTERNO"|"CANDIDATO"|"INDEFINIDO","conversation_state":"AGUARDANDO_RECEPCAO"|"AGUARDANDO_CLIENTE"|"RESOLVIDO"|"INDEFINIDO","state_reasoning":"<1 frase: com quem está a bola e por quê>"}
 
 REGRAS:
 - "confidence" = PROBABILIDADE de a conversa CORRENTE ser uma oportunidade de novo negócio (0.0 = certeza que NÃO; 1.0 = certeza que SIM). Use a escala toda; na dúvida real, ~0.5.
 - "is_lead" = true quando confidence >= 0.5.
-- "intent": NOVA_OPORTUNIDADE (novo negócio), ROTINA_CLIENTE (cliente em assunto de rotina), INTERNO (equipe/operacional), INDEFINIDO (não dá pra decidir).
+- "intent": NOVA_OPORTUNIDADE (novo negócio), ROTINA_CLIENTE (cliente em assunto de rotina), INTERNO (equipe/operacional), CANDIDATO (candidato a vaga de trabalho — quer trabalhar/dar aula, não estudar nem contratar), INDEFINIDO (não dá pra decidir).
 - "reasoning": curto, citando o que na conversa justifica a decisão.
 - "conversation_state": o estado ATUAL pela regra acima. "state_reasoning": 1 frase curta.`;
 }
