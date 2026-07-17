@@ -18,7 +18,7 @@ const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
 const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, PERIODS, classificarEngajamento } = require('../metrics');   // G: dashboard de gestão
-const { generateDraftForLead, classificarSaida } = require('../engine');   // Bloco 2: rascunho; ADR-030: saída
+const { generateDraftForLead, classificarSaida, _isTransientAIError } = require('../engine');   // Bloco 2: rascunho; ADR-030: saída; _isTransientAIError: resiliência 503
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
 const multer = require('multer');                        // ADR-016 P1: upload de mídia
@@ -1758,7 +1758,27 @@ router.post(
       const systemPrompt = resolveSystemPrompt(
         ctx.config || { school_name: ctx.tname || 'Escola', system_prompt_override: null }
       );
-      const improved = await gemini.improveReply({ systemPrompt, history: ctx.history, draft: text });
+      // Resiliência a soluço transiente do Gemini (503/500/429/timeout): mesmo estilo do
+      // _classifyRetry do Portão 1 — 3 tentativas, backoff curto, só re-tenta transiente.
+      // Erro NÃO-transiente (ex.: modelo inválido) sobe na hora p/ o catch → 500 limpo, sem loop.
+      let improved, ultimoErro;
+      for (let i = 0; i < 3; i += 1) {
+        try {
+          improved = await gemini.improveReply({ systemPrompt, history: ctx.history, draft: text });
+          ultimoErro = null;
+          break;
+        } catch (e) {
+          ultimoErro = e;
+          if (!_isTransientAIError(e)) throw e;
+          if (i < 2) await new Promise((s) => setTimeout(s, 800 * (i + 1)));
+        }
+      }
+      if (ultimoErro) {
+        // Esgotou as tentativas por erro transiente → 503 "tente de novo" (NÃO 500 duro).
+        // O proxy /melhorar já traduz !ok em 502 e o botão preserva o texto e avisa.
+        logger.warn('tenant.lead.improve_unavailable', { tenant_id: req.tenantId, lead_id: id, error: ultimoErro.message });
+        return res.status(503).json({ error: 'ia_indisponivel', detail: 'IA temporariamente indisponível, tente de novo' });
+      }
       logger.info('tenant.lead.improved', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
       res.json({ ok: true, improved });
     } catch (err) {
