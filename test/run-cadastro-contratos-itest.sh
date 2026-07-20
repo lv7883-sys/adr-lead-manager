@@ -45,6 +45,15 @@ for m in 051_contact_roles 060_cadastro_mestre 061_person_data_nascimento; do
   docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest < "$ROOT/db/migrations/${m}.sql" >/dev/null
 done
 
+# 060 semeia os papéis (aluno/responsavel) só p/ Valinhos (FK hardcoded). Pros tenants de
+# teste, semeia igual — _upsertRole exige a linha em contact_role (não inventa papel).
+docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest >/dev/null <<SQL
+INSERT INTO lead_manager.contact_role (tenant_id, key, label, axis, suppression, lead_weight) VALUES
+  ('${TENANT_A}','aluno','Aluno','known','hard',0), ('${TENANT_A}','responsavel','Responsável','known','hard',0),
+  ('${TENANT_B}','aluno','Aluno','known','hard',0), ('${TENANT_B}','responsavel','Responsável','known','hard',0)
+ON CONFLICT (tenant_id, key) DO NOTHING;
+SQL
+
 echo "[itest] rodando node --test…"
 cd "$ROOT"
 DATABASE_URL="postgres://lead_manager_user:itest@127.0.0.1:${PORT}/lm_itest" \

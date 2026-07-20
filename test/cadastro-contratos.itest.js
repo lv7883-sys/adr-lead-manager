@@ -57,7 +57,8 @@ after(async () => {
 test('(a) ingestão popula os 4 alvos + external_ref + nascimento + o elo', async () => {
   const r = await post(TENANT_A, LOTE);
   assert.equal(r.status, 200);
-  assert.deepEqual(r.json.resumo, { itens: 2, pessoas_novas: 3, contratos_novos: 2, telefones_novos: 3, vinculos_novos: 3, pulados: 0 });
+  // papeis_novos = 3: aluno(Ana) + responsavel(Pai) + aluno(Bruno) — cada telefone ganha 1 papel.
+  assert.deepEqual(r.json.resumo, { itens: 2, pessoas_novas: 3, contratos_novos: 2, telefones_novos: 3, vinculos_novos: 3, papeis_novos: 3, pulados: 0 });
 
   const [{ n: nPerson }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.person`);
   const [{ n: nCp }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.contact_point WHERE kind='phone'`);
@@ -91,16 +92,45 @@ test('(a) ingestão popula os 4 alvos + external_ref + nascimento + o elo', asyn
     { bond: 'beneficiario', display_name: 'Ana Aluna' },
     { bond: 'pagador', display_name: 'Pai da Ana' },
   ]);
+
+  // ADR-036 E1.3a — o PAPEL (contact_role_member) que o Gate 0 lê foi escrito:
+  //  3 papéis (Ana=aluno, Pai=responsavel, Bruno=aluno), cada um ligado à pessoa certa.
+  const [{ n: nRole }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.contact_role_member`);
+  assert.equal(Number(nRole), 3, '3 papéis (2 aluno + 1 responsavel)');
+  const papeis = await q(TENANT_A, `
+    SELECT p.display_name, cr.key AS papel
+      FROM lead_manager.contact_role_member m
+      JOIN lead_manager.contact_role cr ON cr.id = m.role_id
+      JOIN lead_manager.person p ON p.id = m.person_id
+     ORDER BY p.display_name`);
+  assert.deepEqual(papeis, [
+    { display_name: 'Ana Aluna', papel: 'aluno' },
+    { display_name: 'Bruno Aluno', papel: 'aluno' },
+    { display_name: 'Pai da Ana', papel: 'responsavel' },
+  ]);
+
+  // (6) _lookupRole (Gate 0) AGORA resolve o papel por dígitos BR-aware — mesmo com o gate
+  // em shadow/off, o papel tem que estar lá. Reproduz o match de engine._lookupRole.
+  const lk = await q(TENANT_A, `
+    SELECT cr.key, cr.suppression
+      FROM lead_manager.contact_role_member m
+      JOIN lead_manager.contact_role cr ON cr.id = m.role_id
+     WHERE regexp_replace(m.phone,'[^0-9]','','g') = regexp_replace($1,'[^0-9]','','g')
+     LIMIT 1`, ['(19) 99999-0001']);  // telefone da Ana
+  assert.equal(lk[0]?.key, 'aluno', 'Gate 0 acharia Ana como aluno (papel resolvido)');
+  assert.equal(lk[0]?.suppression, 'hard', 'papel aluno = suppression hard');
 });
 
 test('(b) re-ingerir o mesmo lote é idempotente (tudo novo = 0, contagens iguais)', async () => {
   const r = await post(TENANT_A, LOTE);
   assert.equal(r.status, 200);
-  assert.deepEqual(r.json.resumo, { itens: 2, pessoas_novas: 0, contratos_novos: 0, telefones_novos: 0, vinculos_novos: 0, pulados: 0 });
+  assert.deepEqual(r.json.resumo, { itens: 2, pessoas_novas: 0, contratos_novos: 0, telefones_novos: 0, vinculos_novos: 0, papeis_novos: 0, pulados: 0 });
   const [{ n: nPerson }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.person`);
   const [{ n: nAm }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.account_member`);
+  const [{ n: nRole }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.contact_role_member`);
   assert.equal(Number(nPerson), 3, 'sem duplicar pessoas');
   assert.equal(Number(nAm), 3, 'sem duplicar vínculos');
+  assert.equal(Number(nRole), 3, 'sem duplicar papéis (idempotente por dígitos)');
 });
 
 test('(c) CROSS-TENANT = 0: o que A ingeriu é invisível a B', async () => {

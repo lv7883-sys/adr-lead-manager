@@ -2604,12 +2604,45 @@ async function _link(c, tid, accountId, personId, bond) {
   return r.rowCount > 0;
 }
 
+// PAPEL (contact_role_member) — a fonte que o Gate 0 lê (ADR-036 E1.3a / _lookupRole). É
+// keyed por TELEFONE (UNIQUE tenant+phone, match por dígitos BR-aware), então:
+//  - sem telefone → não grava (papel é phone-keyed; menor sem fone próprio é reconhecido via o
+//    telefone do responsável, ADR-036 E1.9);
+//  - idempotente por DÍGITOS: se o telefone JÁ tem papel, não mexe (respeita o 037.2a e o modelo
+//    "um papel por telefone"); ON CONFLICT (tenant,phone) DO NOTHING como cinto-e-suspensório;
+//  - NÃO inventa papel: exige a linha em contact_role (aluno/responsavel já semeados). source
+//    'extranet_sync' (conjunto próprio de contact_role_member, ≠ contact_point).
+async function _upsertRole(c, tid, personId, telefone, roleKey) {
+  const digits = String(telefone || '').replace(/[^0-9]/g, '');
+  if (!digits) return false;
+  const role = (await c.query(
+    `SELECT id FROM lead_manager.contact_role WHERE tenant_id=$1 AND key=$2`, [tid, roleKey])).rows[0];
+  if (!role) {
+    // Papel não semeado para este tenant → não inventa papel (config-as-data, ADR-036 E1.5);
+    // pula em silêncio hoje seria invisível. Loga para tornar visível que falta o seed de
+    // papéis-base por-tenant (dívida a pagar no onboarding do 2º tenant).
+    logger.warn('cadastro.role.nao_semeado', { tenant_id: tid, role_key: roleKey, detail: 'papel não semeado para o tenant — pessoa não recebe papel; seed de papéis por-tenant pendente' });
+    return false;
+  }
+  const has = (await c.query(
+    `SELECT 1 FROM lead_manager.contact_role_member
+      WHERE tenant_id=$1 AND regexp_replace(phone,'[^0-9]','','g') = $2 LIMIT 1`,
+    [tid, digits])).rows[0];
+  if (has) return false;
+  const r = await c.query(
+    `INSERT INTO lead_manager.contact_role_member (tenant_id, phone, role_id, source, person_id)
+     VALUES ($1,$2,$3,'extranet_sync',$4)
+     ON CONFLICT (tenant_id, phone) DO NOTHING RETURNING id`,
+    [tid, String(telefone).trim(), role.id, personId]);
+  return r.rowCount > 0;
+}
+
 // POST /tenant/:tenantId/cadastro/contratos  — body { itens: [{ aluno, responsavel?, contrato }] }
 router.post('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   const itens = Array.isArray(req.body && req.body.itens) ? req.body.itens : null;
   if (!itens) return res.status(400).json({ error: 'envie { itens: [...] }' });
   if (itens.length > 5000) return res.status(413).json({ error: 'lote grande demais (máx 5000 itens)' });
-  const resumo = { itens: itens.length, pessoas_novas: 0, contratos_novos: 0, telefones_novos: 0, vinculos_novos: 0, pulados: 0 };
+  const resumo = { itens: itens.length, pessoas_novas: 0, contratos_novos: 0, telefones_novos: 0, vinculos_novos: 0, papeis_novos: 0, pulados: 0 };
   const erros = [];
   try {
     await withTenant(req.tenantId, async (c) => {
@@ -2622,6 +2655,8 @@ router.post('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(W
         const pa = await _upsertPersonByRef(c, req.tenantId, 'aluno', String(aluno.idExterno), aluno.nome, aluno.dataNascimento);
         if (pa.novo) resumo.pessoas_novas++;
         if (await _upsertPhone(c, req.tenantId, pa.id, aluno.telefone)) resumo.telefones_novos++;
+        // ADR-036 E1.3a: grava o PAPEL (o que o Gate 0 lê); aditivo ao account_member.
+        if (await _upsertRole(c, req.tenantId, pa.id, aluno.telefone, 'aluno')) resumo.papeis_novos++;
         const acc = await _upsertAccountByRef(c, req.tenantId, contrato);
         if (acc.novo) resumo.contratos_novos++;
         if (await _link(c, req.tenantId, acc.id, pa.id, 'beneficiario')) resumo.vinculos_novos++;
@@ -2630,6 +2665,8 @@ router.post('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(W
           const pr = await _upsertPersonByRef(c, req.tenantId, 'responsavel', String(resp.idExterno), resp.nome, null);
           if (pr.novo) resumo.pessoas_novas++;
           if (await _upsertPhone(c, req.tenantId, pr.id, resp.telefone)) resumo.telefones_novos++;
+          // ADR-036 E1.3a: papel do responsável (keyed pelo telefone dele).
+          if (await _upsertRole(c, req.tenantId, pr.id, resp.telefone, 'responsavel')) resumo.papeis_novos++;
           if (await _link(c, req.tenantId, acc.id, pr.id, 'pagador')) resumo.vinculos_novos++;
         }
       }
