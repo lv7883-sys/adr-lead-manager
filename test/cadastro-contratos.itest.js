@@ -32,13 +32,18 @@ function post(tid, body) {
 }
 const q = (tid, sql, params = []) => withTenant(tid, (c) => c.query(sql, params)).then((r) => r.rows);
 
-// Lote sintético: Ana (menor, com responsável) + Bruno (sem responsável).
+// Pré-carga do cadastro (backfill): Ana (menor dependente, sem fone próprio) + Bruno (adulto self_paid).
+const LOTE_PRELOAD = { itens: [
+  { beneficiario: { idExterno: 'A1', nome: 'Ana Aluna', dataNascimento: '2013-05-10', payerRelation: 'financially_dependent' },
+    responsavelFinanceiro: { idExterno: 'R1', nome: 'Pai da Ana', telefone: '19 99999-0002' } },
+  { beneficiario: { idExterno: 'A2', nome: 'Bruno Aluno', telefone: '19999990003', payerRelation: 'self_paid' } },
+] };
+// Contratos (CONTRACT-ONLY: aluno/responsavel = SÓ idExterno; nada de nome/telefone).
 const LOTE = { itens: [
-  { aluno: { idExterno: 'A1', nome: 'Ana Aluna', telefone: '(19) 99999-0001', dataNascimento: '2013-05-10' },
-    responsavel: { idExterno: 'R1', nome: 'Pai da Ana', telefone: '19 99999-0002' },
-    contrato: { idExterno: 'C1', instrumento: 'Violão', status: 'Ativo', ini: '2026-01-01', fim: '2026-12-31' } },
-  { aluno: { idExterno: 'A2', nome: 'Bruno Aluno', telefone: '19999990003' },
-    contrato: { idExterno: 'C2', instrumento: 'Bateria', status: 'Ativo' } },
+  { aluno: { idExterno: 'A1' }, responsavel: { idExterno: 'R1' },
+    contrato: { idExterno: 'C1', instrumento: 'Violão', status: 'Ativo', periodicidade: 'anual', planoLabel: 'Anual à vista', ini: '2026-01-01', fim: '2026-12-31' } },
+  { aluno: { idExterno: 'A2' },
+    contrato: { idExterno: 'C2', instrumento: 'Bateria', status: 'Ativo', periodicidade: 'trimestral', planoLabel: 'Flex Trimestral', ini: '2026-01-01', fim: '2026-04-01' } },
 ] };
 
 before(async () => {
@@ -54,83 +59,55 @@ after(async () => {
   await pool.end();
 });
 
-test('(a) ingestão popula os 4 alvos + external_ref + nascimento + o elo', async () => {
+test('(a) contratos CONTRACT-ONLY: casa por id, titular por dependência financeira, plano_label/periodicidade, sem tocar pessoa', async () => {
+  // pré-carga do cadastro (backfill) — cria pessoas + papel + payer_relation
+  const pre = await postBen(TENANT_A, LOTE_PRELOAD);
+  assert.equal(pre.status, 200);
+  // o backfill escreveu o PAPEL que o Gate 0 lê (ADR-036 E1.3a) — Bruno self_paid tem fone próprio.
+  const lk = await q(TENANT_A, `SELECT cr.key, cr.suppression FROM lead_manager.contact_role_member m
+    JOIN lead_manager.contact_role cr ON cr.id=m.role_id
+   WHERE regexp_replace(m.phone,'[^0-9]','','g')=regexp_replace($1,'[^0-9]','','g') LIMIT 1`, ['19999990003']);
+  assert.equal(lk[0]?.key, 'beneficiario', 'Gate 0 resolve o papel canônico do beneficiário');
+  assert.equal(lk[0]?.suppression, 'hard');
+  const cpAntes = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.contact_point WHERE kind='phone'`))[0].n);
+  const roleAntes = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.contact_role_member`))[0].n);
+
+  // ingestão de contrato (contract-only)
   const r = await post(TENANT_A, LOTE);
   assert.equal(r.status, 200);
-  // papeis_novos = 3: aluno(Ana) + responsavel(Pai) + aluno(Bruno) — cada telefone ganha 1 papel.
-  assert.deepEqual(r.json.resumo, { itens: 2, pessoas_novas: 3, contratos_novos: 2, telefones_novos: 3, vinculos_novos: 3, papeis_novos: 3, pulados: 0 });
+  assert.deepEqual(r.json.resumo, { itens: 2, pessoas_novas: 0, contratos_novos: 2, vinculos_novos: 4, pulados: 0 });
 
-  const [{ n: nPerson }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.person`);
-  const [{ n: nCp }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.contact_point WHERE kind='phone'`);
-  const [{ n: nSa }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.service_account`);
-  const [{ n: nAm }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.account_member`);
-  const [{ n: nRef }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.external_ref`);
-  assert.equal(Number(nPerson), 3, '3 pessoas (Ana, Pai, Bruno)');
-  assert.equal(Number(nCp), 3, '3 telefones');
-  assert.equal(Number(nSa), 2, '2 contratos');
-  assert.equal(Number(nAm), 3, '2 beneficiário + 1 pagador');
-  assert.equal(Number(nRef), 5, '3 person + 2 account');
+  // TITULAR por dependência financeira: C1 (Ana dependente) → benef=Ana + pagador=Pai;
+  //                                     C2 (Bruno self_paid) → benef + pagador = o próprio Bruno.
+  const c1 = await q(TENANT_A, `SELECT am.bond, p.display_name FROM lead_manager.external_ref er
+    JOIN lead_manager.account_member am ON am.account_id=er.entity_id JOIN lead_manager.person p ON p.id=am.person_id
+   WHERE er.external_type='contrato' AND er.external_id='C1' ORDER BY am.bond`);
+  assert.deepEqual(c1, [{ bond: 'beneficiario', display_name: 'Ana Aluna' }, { bond: 'pagador', display_name: 'Pai da Ana' }]);
+  const c2 = await q(TENANT_A, `SELECT am.bond, p.display_name FROM lead_manager.external_ref er
+    JOIN lead_manager.account_member am ON am.account_id=er.entity_id JOIN lead_manager.person p ON p.id=am.person_id
+   WHERE er.external_type='contrato' AND er.external_id='C2' ORDER BY am.bond`);
+  assert.deepEqual(c2, [{ bond: 'beneficiario', display_name: 'Bruno Aluno' }, { bond: 'pagador', display_name: 'Bruno Aluno' }]);
 
-  // instrumento + status no contrato
-  const sa = await q(TENANT_A, `SELECT status, servico_label FROM lead_manager.service_account ORDER BY servico_label`);
-  assert.deepEqual(sa.map((x) => x.servico_label), ['Bateria', 'Violão']);
-  assert.ok(sa.every((x) => x.status === 'Ativo'));
-
-  // nascimento da Ana
-  const ana = await q(TENANT_A, `SELECT to_char(data_nascimento,'YYYY-MM-DD') d FROM lead_manager.person WHERE display_name='Ana Aluna'`);
-  assert.equal(ana[0].d, '2013-05-10');
-
-  // O ELO: no contrato C1, aluno=beneficiario (Ana) e responsável=pagador (Pai da Ana)
-  const elo = await q(TENANT_A, `
-    SELECT am.bond, p.display_name
-      FROM lead_manager.external_ref er
-      JOIN lead_manager.account_member am ON am.account_id = er.entity_id
-      JOIN lead_manager.person p ON p.id = am.person_id
-     WHERE er.entity_kind='account' AND er.external_type='contrato' AND er.external_id='C1'
-     ORDER BY am.bond`);
-  assert.deepEqual(elo, [
-    { bond: 'beneficiario', display_name: 'Ana Aluna' },
-    { bond: 'pagador', display_name: 'Pai da Ana' },
+  // periodicidade + plano_label gravados no contrato
+  const sa = await q(TENANT_A, `SELECT servico_label, periodicidade, plano_label FROM lead_manager.service_account ORDER BY servico_label`);
+  assert.deepEqual(sa, [
+    { servico_label: 'Bateria', periodicidade: 'trimestral', plano_label: 'Flex Trimestral' },
+    { servico_label: 'Violão', periodicidade: 'anual', plano_label: 'Anual à vista' },
   ]);
 
-  // ADR-036 E1.3a — o PAPEL (contact_role_member) que o Gate 0 lê foi escrito:
-  //  3 papéis (Ana=aluno, Pai=responsavel, Bruno=aluno), cada um ligado à pessoa certa.
-  const [{ n: nRole }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.contact_role_member`);
-  assert.equal(Number(nRole), 3, '3 papéis (2 aluno + 1 responsavel)');
-  const papeis = await q(TENANT_A, `
-    SELECT p.display_name, cr.key AS papel
-      FROM lead_manager.contact_role_member m
-      JOIN lead_manager.contact_role cr ON cr.id = m.role_id
-      JOIN lead_manager.person p ON p.id = m.person_id
-     ORDER BY p.display_name`);
-  assert.deepEqual(papeis, [
-    { display_name: 'Ana Aluna', papel: 'beneficiario' },
-    { display_name: 'Bruno Aluno', papel: 'beneficiario' },
-    { display_name: 'Pai da Ana', papel: 'responsavel_financeiro' },
-  ]);
-
-  // (6) _lookupRole (Gate 0) AGORA resolve o papel por dígitos BR-aware — mesmo com o gate
-  // em shadow/off, o papel tem que estar lá. Reproduz o match de engine._lookupRole.
-  const lk = await q(TENANT_A, `
-    SELECT cr.key, cr.suppression
-      FROM lead_manager.contact_role_member m
-      JOIN lead_manager.contact_role cr ON cr.id = m.role_id
-     WHERE regexp_replace(m.phone,'[^0-9]','','g') = regexp_replace($1,'[^0-9]','','g')
-     LIMIT 1`, ['(19) 99999-0001']);  // telefone da Ana
-  assert.equal(lk[0]?.key, 'beneficiario', 'Gate 0 acharia Ana como beneficiário (papel canônico resolvido)');
-  assert.equal(lk[0]?.suppression, 'hard', 'papel beneficiario = suppression hard');
+  // CONTRACT-ONLY: não tocou pessoa — contact_point e papéis inalterados desde a pré-carga.
+  const cpDepois = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.contact_point WHERE kind='phone'`))[0].n);
+  const roleDepois = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.contact_role_member`))[0].n);
+  assert.equal(cpDepois, cpAntes, 'contrato não adiciona/re-escreve contact_point');
+  assert.equal(roleDepois, roleAntes, 'contrato não escreve papel (é do backfill)');
 });
 
-test('(b) re-ingerir o mesmo lote é idempotente (tudo novo = 0, contagens iguais)', async () => {
+test('(b) re-ingerir contratos é idempotente (tudo novo = 0)', async () => {
   const r = await post(TENANT_A, LOTE);
   assert.equal(r.status, 200);
-  assert.deepEqual(r.json.resumo, { itens: 2, pessoas_novas: 0, contratos_novos: 0, telefones_novos: 0, vinculos_novos: 0, papeis_novos: 0, pulados: 0 });
-  const [{ n: nPerson }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.person`);
-  const [{ n: nAm }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.account_member`);
-  const [{ n: nRole }] = await q(TENANT_A, `SELECT count(*) n FROM lead_manager.contact_role_member`);
-  assert.equal(Number(nPerson), 3, 'sem duplicar pessoas');
-  assert.equal(Number(nAm), 3, 'sem duplicar vínculos');
-  assert.equal(Number(nRole), 3, 'sem duplicar papéis (idempotente por dígitos)');
+  assert.deepEqual(r.json.resumo, { itens: 2, pessoas_novas: 0, contratos_novos: 0, vinculos_novos: 0, pulados: 0 });
+  const nAm = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.account_member`))[0].n);
+  assert.equal(nAm, 4, 'sem duplicar vínculos (2 contratos × benef+pagador)');
 });
 
 test('(c) CROSS-TENANT = 0: o que A ingeriu é invisível a B', async () => {
@@ -205,20 +182,19 @@ test('(e) /cadastro/beneficiarios: cria beneficiário + responsável, external_r
 });
 
 test('(h) ROLE-AWARE: beneficiário cujo telefone casa um beneficiário existente é BRIDADO, não duplicado', async () => {
-  // Ana (do teste a) tem papel=beneficiario com telefone '(19) 99999-0001'. Um beneficiário novo
-  // com ESSE telefone deve casar a Ana (bridar external_ref), NÃO criar pessoa nova.
+  // Bruno (do teste a, self_paid) tem papel=beneficiario com telefone '19999990003'. Um beneficiário
+  // novo com ESSE telefone deve casar o Bruno (bridar external_ref), NÃO criar pessoa nova.
   const nAntes = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.person`))[0].n);
   const r = await postBen(TENANT_A, { itens: [
-    { beneficiario: { idExterno: 'BENX', nome: 'Ana Aluna', telefone: '(19) 99999-0001', payerRelation: 'self_paid' } },
+    { beneficiario: { idExterno: 'BENX', nome: 'Bruno Aluno', telefone: '19999990003', payerRelation: 'self_paid' } },
   ] });
   assert.equal(r.json.resumo.beneficiarios_bridados, 1, 'casou (bridou) o beneficiário existente');
   assert.equal(r.json.resumo.beneficiarios_novos, 0, 'NÃO criou pessoa nova (sem duplicata)');
   const nDepois = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.person`))[0].n);
   assert.equal(nDepois, nAntes, 'total de pessoas inalterado — zero duplicata');
-  // e o external_ref BENX aponta pra pessoa da Ana
   const p = await q(TENANT_A, `SELECT p.display_name FROM lead_manager.external_ref er
     JOIN lead_manager.person p ON p.id=er.entity_id WHERE er.external_type='beneficiario' AND er.external_id='BENX'`);
-  assert.equal(p[0].display_name, 'Ana Aluna', 'external_ref BENX bridado na pessoa da Ana');
+  assert.equal(p[0].display_name, 'Bruno Aluno', 'external_ref BENX bridado na pessoa do Bruno');
 });
 
 test('(f) telefone de cadastro COEXISTE com whatsapp preexistente (tipo)', async () => {

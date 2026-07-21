@@ -2629,15 +2629,15 @@ async function _upsertAccountByRef(c, tid, contrato) {
   if (ex) {
     await c.query(
       `UPDATE lead_manager.service_account
-          SET status=$2, servico_label=$3, periodicidade=$4, ini_vigencia=$5::date, fim_vigencia=$6::date, updated_at=now()
+          SET status=$2, servico_label=$3, periodicidade=$4, plano_label=$7, ini_vigencia=$5::date, fim_vigencia=$6::date, updated_at=now()
         WHERE id=$1`,
-      [ex.entity_id, contrato.status || null, contrato.instrumento || null, per, ini, fim]);
+      [ex.entity_id, contrato.status || null, contrato.instrumento || null, per, ini, fim, contrato.planoLabel || null]);
     return { id: ex.entity_id, novo: false };
   }
   const aid = (await c.query(
-    `INSERT INTO lead_manager.service_account (tenant_id, status, servico_label, periodicidade, ini_vigencia, fim_vigencia)
-     VALUES ($1,$2,$3,$4,$5::date,$6::date) RETURNING id`,
-    [tid, contrato.status || null, contrato.instrumento || null, per, ini, fim])).rows[0].id;
+    `INSERT INTO lead_manager.service_account (tenant_id, status, servico_label, periodicidade, plano_label, ini_vigencia, fim_vigencia)
+     VALUES ($1,$2,$3,$4,$7,$5::date,$6::date) RETURNING id`,
+    [tid, contrato.status || null, contrato.instrumento || null, per, ini, fim, contrato.planoLabel || null])).rows[0].id;
   await c.query(
     `INSERT INTO lead_manager.external_ref (tenant_id, entity_kind, entity_id, source, external_type, external_id)
      VALUES ($1,'account',$2,$3,'contrato',$4)
@@ -2687,12 +2687,35 @@ async function _upsertRole(c, tid, personId, telefone, roleKey) {
   return r.rowCount > 0;
 }
 
+// CONTRACT-ONLY: casa a pessoa por external_ref e devolve {id, payer_relation} SEM tocar em
+// nenhum campo de pessoa (nome/nascimento/telefone/papel) — pra não conflitar com a proveniência
+// futura. Só cria uma pessoa BARE se não existir (tenant sem backfill); pós-backfill sempre casa.
+async function _matchOrCreatePerson(c, tid, type, extId, nomeIfNew, nascIfNew) {
+  const ex = (await c.query(
+    `SELECT er.entity_id, p.payer_relation FROM lead_manager.external_ref er
+       JOIN lead_manager.person p ON p.id = er.entity_id
+      WHERE er.tenant_id=$1 AND er.entity_kind='person' AND er.source=$2 AND er.external_type=$3 AND er.external_id=$4`,
+    [tid, CADASTRO_SOURCE, type, extId])).rows[0];
+  if (ex) return { id: ex.entity_id, payer_relation: ex.payer_relation, novo: false };  // NÃO atualiza a pessoa
+  const pid = (await c.query(
+    `INSERT INTO lead_manager.person (tenant_id, display_name, data_nascimento) VALUES ($1,$2,$3::date) RETURNING id`,
+    [tid, nomeIfNew || null, _isoDate(nascIfNew)])).rows[0].id;
+  await c.query(
+    `INSERT INTO lead_manager.external_ref (tenant_id, entity_kind, entity_id, source, external_type, external_id)
+     VALUES ($1,'person',$2,$3,$4,$5) ON CONFLICT (tenant_id, source, external_type, external_id) DO NOTHING`,
+    [tid, pid, CADASTRO_SOURCE, type, extId]);
+  return { id: pid, payer_relation: null, novo: true };
+}
+
 // POST /tenant/:tenantId/cadastro/contratos  — body { itens: [{ aluno, responsavel?, contrato }] }
 router.post('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   const itens = Array.isArray(req.body && req.body.itens) ? req.body.itens : null;
   if (!itens) return res.status(400).json({ error: 'envie { itens: [...] }' });
   if (itens.length > 5000) return res.status(413).json({ error: 'lote grande demais (máx 5000 itens)' });
-  const resumo = { itens: itens.length, pessoas_novas: 0, contratos_novos: 0, telefones_novos: 0, vinculos_novos: 0, papeis_novos: 0, pulados: 0 };
+  // CONTRACT-ONLY: escreve service_account + account_member; NÃO toca campo de pessoa
+  // (nome/nascimento/telefone/papel vêm do backfill/beneficiários). Titular por dependência
+  // financeira via person.payer_relation. Idempotente por external_ref do contrato.
+  const resumo = { itens: itens.length, pessoas_novas: 0, contratos_novos: 0, vinculos_novos: 0, pulados: 0 };
   const erros = [];
   try {
     await withTenant(req.tenantId, async (c) => {
@@ -2702,22 +2725,22 @@ router.post('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(W
         if (!aluno.idExterno || !contrato.idExterno) {
           resumo.pulados++; erros.push({ i, motivo: 'aluno.idExterno e contrato.idExterno obrigatórios' }); continue;
         }
-        const pa = await _upsertPersonByRef(c, req.tenantId, 'beneficiario', String(aluno.idExterno), aluno.nome, aluno.dataNascimento);
+        // Casa o beneficiário por id (backfill deixou pronto). Não re-escreve a pessoa.
+        const pa = await _matchOrCreatePerson(c, req.tenantId, 'beneficiario', String(aluno.idExterno), aluno.nome, aluno.dataNascimento);
         if (pa.novo) resumo.pessoas_novas++;
-        if (await _upsertPhone(c, req.tenantId, pa.id, aluno.telefone)) resumo.telefones_novos++;
-        // ADR-036 E1.3a: grava o PAPEL canônico (o que o Gate 0 lê); aditivo ao account_member.
-        if (await _upsertRole(c, req.tenantId, pa.id, aluno.telefone, 'beneficiario')) resumo.papeis_novos++;
         const acc = await _upsertAccountByRef(c, req.tenantId, contrato);
         if (acc.novo) resumo.contratos_novos++;
         if (await _link(c, req.tenantId, acc.id, pa.id, 'beneficiario')) resumo.vinculos_novos++;
+        // TITULAR por dependência financeira (não idade): com responsável no lote → titular=responsável;
+        // senão, se o beneficiário é self_paid → titular=aluno; se dependente sem responsável → sem
+        // pagador (pendência computada pela tela).
         const resp = it.responsavel;
         if (resp && resp.idExterno) {
-          const pr = await _upsertPersonByRef(c, req.tenantId, 'responsavel_financeiro', String(resp.idExterno), resp.nome, null);
+          const pr = await _matchOrCreatePerson(c, req.tenantId, 'responsavel_financeiro', String(resp.idExterno), resp.nome, null);
           if (pr.novo) resumo.pessoas_novas++;
-          if (await _upsertPhone(c, req.tenantId, pr.id, resp.telefone)) resumo.telefones_novos++;
-          // ADR-036 E1.3a: papel canônico do responsável financeiro (keyed pelo telefone dele).
-          if (await _upsertRole(c, req.tenantId, pr.id, resp.telefone, 'responsavel_financeiro')) resumo.papeis_novos++;
-          if (await _link(c, req.tenantId, acc.id, pr.id, 'pagador')) resumo.vinculos_novos++;
+          if (await _link(c, req.tenantId, acc.id, pr.id, 'pagador')) resumo.vinculos_novos++;   // titular = responsável
+        } else if (pa.payer_relation === 'self_paid') {
+          if (await _link(c, req.tenantId, acc.id, pa.id, 'pagador')) resumo.vinculos_novos++;    // titular = próprio aluno
         }
       }
     });
