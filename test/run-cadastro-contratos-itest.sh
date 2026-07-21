@@ -41,7 +41,7 @@ INSERT INTO lead_manager.tenants (id, name)
 GRANT USAGE ON SCHEMA lead_manager TO lead_manager_user;
 GRANT SELECT ON lead_manager.tenants TO lead_manager_user;
 SQL
-for m in 051_contact_roles 060_cadastro_mestre 061_person_data_nascimento; do
+for m in 051_contact_roles 060_cadastro_mestre 061_person_data_nascimento 067_contact_point_tipo; do
   docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest < "$ROOT/db/migrations/${m}.sql" >/dev/null
 done
 
