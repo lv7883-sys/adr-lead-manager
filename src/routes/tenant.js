@@ -2522,11 +2522,14 @@ router.post('/:tenantId/rockhour/classify-genres', authenticate, requireTenantAc
 // ---------------------------------------------------------------------------
 const CADASTRO_SOURCE = 'extranet';
 const PERIODICIDADES = new Set(['mensal', 'trimestral', 'semestral', 'anual', 'outro']);
+const PAYER_RELATIONS = new Set(['self_paid', 'financially_dependent']);
 const _isoDate = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? String(s) : null); // não-ISO → null (não quebra)
 
-// upsert Pessoa por external_ref(person, type, id). Atualiza nome/nascimento quando vierem.
-async function _upsertPersonByRef(c, tid, type, extId, nome, dataNascimento) {
+// upsert Pessoa por external_ref(person, type, id). Atualiza nome/nascimento/payer_relation
+// quando vierem (COALESCE — não apaga o que já existe). payerRelation opcional (só o backfill).
+async function _upsertPersonByRef(c, tid, type, extId, nome, dataNascimento, payerRelation) {
   const dn = _isoDate(dataNascimento);
+  const pr = PAYER_RELATIONS.has(payerRelation) ? payerRelation : null;
   const ex = (await c.query(
     `SELECT entity_id FROM lead_manager.external_ref
       WHERE tenant_id=$1 AND entity_kind='person' AND source=$2 AND external_type=$3 AND external_id=$4`,
@@ -2536,13 +2539,14 @@ async function _upsertPersonByRef(c, tid, type, extId, nome, dataNascimento) {
       `UPDATE lead_manager.person
           SET display_name = COALESCE($2, display_name),
               data_nascimento = COALESCE($3::date, data_nascimento),
+              payer_relation = COALESCE($4, payer_relation),
               updated_at = now()
-        WHERE id=$1`, [ex.entity_id, nome || null, dn]);
+        WHERE id=$1`, [ex.entity_id, nome || null, dn, pr]);
     return { id: ex.entity_id, novo: false };
   }
   const pid = (await c.query(
-    `INSERT INTO lead_manager.person (tenant_id, display_name, data_nascimento)
-     VALUES ($1,$2,$3::date) RETURNING id`, [tid, nome || null, dn])).rows[0].id;
+    `INSERT INTO lead_manager.person (tenant_id, display_name, data_nascimento, payer_relation)
+     VALUES ($1,$2,$3::date,$4) RETURNING id`, [tid, nome || null, dn, pr])).rows[0].id;
   await c.query(
     `INSERT INTO lead_manager.external_ref (tenant_id, entity_kind, entity_id, source, external_type, external_id)
      VALUES ($1,'person',$2,$3,$4,$5)
@@ -2551,19 +2555,65 @@ async function _upsertPersonByRef(c, tid, type, extId, nome, dataNascimento) {
   return { id: pid, novo: true };
 }
 
-// telefone: não duplica por dígitos p/ a mesma pessoa (idempotente). Guarda o valor cru.
+// Casa uma pessoa por external_ref; se não houver, casa por TELEFONE (contra o papel esperado)
+// e brida o external_ref na pessoa achada; senão cria nova. ROLE-AWARE (evita duplicar: o
+// telefone do dependente é do responsável, então cai fora do match do beneficiário). Setta
+// nome/nascimento/payer_relation (COALESCE) em qualquer caminho. Idempotente por external_ref.
+async function _bridgePersonByRefOrPhone(c, tid, type, extId, nome, telefone, roleKey, dataNascimento, payerRelation) {
+  const dn = _isoDate(dataNascimento);
+  const pr = PAYER_RELATIONS.has(payerRelation) ? payerRelation : null;
+  const setFields = (id) => c.query(
+    `UPDATE lead_manager.person
+        SET display_name=COALESCE($2, display_name), data_nascimento=COALESCE($3::date, data_nascimento),
+            payer_relation=COALESCE($4, payer_relation), updated_at=now()
+      WHERE id=$1`, [id, nome || null, dn, pr]);
+  const ex = (await c.query(
+    `SELECT entity_id FROM lead_manager.external_ref
+      WHERE tenant_id=$1 AND entity_kind='person' AND source=$2 AND external_type=$3 AND external_id=$4`,
+    [tid, CADASTRO_SOURCE, type, extId])).rows[0];
+  if (ex) { await setFields(ex.entity_id); return { id: ex.entity_id, novo: false, bridged: false }; }
+  const digits = String(telefone || '').replace(/[^0-9]/g, '');
+  if (digits) {
+    const m = await c.query(
+      `SELECT DISTINCT p.id FROM lead_manager.contact_role_member crm
+         JOIN lead_manager.contact_role cr ON cr.id=crm.role_id AND cr.key=$3
+         JOIN lead_manager.person p ON p.id=crm.person_id
+        WHERE crm.tenant_id=$1 AND (regexp_replace(crm.phone,'[^0-9]','','g')=$2
+              OR right(regexp_replace(crm.phone,'[^0-9]','','g'),8)=right($2,8))`, [tid, digits, roleKey]);
+    if (m.rows.length === 1) {
+      await c.query(
+        `INSERT INTO lead_manager.external_ref (tenant_id, entity_kind, entity_id, source, external_type, external_id)
+         VALUES ($1,'person',$2,$3,$4,$5) ON CONFLICT (tenant_id, source, external_type, external_id) DO NOTHING`,
+        [tid, m.rows[0].id, CADASTRO_SOURCE, type, extId]);
+      await setFields(m.rows[0].id);
+      return { id: m.rows[0].id, novo: false, bridged: true };
+    }
+    if (m.rows.length > 1) return { id: null, novo: false, bridged: false, ambiguo: true };
+  }
+  const pid = (await c.query(
+    `INSERT INTO lead_manager.person (tenant_id, display_name, data_nascimento, payer_relation)
+     VALUES ($1,$2,$3::date,$4) RETURNING id`, [tid, nome || null, dn, pr])).rows[0].id;
+  await c.query(
+    `INSERT INTO lead_manager.external_ref (tenant_id, entity_kind, entity_id, source, external_type, external_id)
+     VALUES ($1,'person',$2,$3,$4,$5) ON CONFLICT (tenant_id, source, external_type, external_id) DO NOTHING`,
+    [tid, pid, CADASTRO_SOURCE, type, extId]);
+  return { id: pid, novo: true, bridged: false };
+}
+
+// telefone de CADASTRO (source='extranet', confidence='alegado', tipo='cadastro'). Dedup POR
+// FONTE: coexiste com o de WhatsApp da mesma pessoa e nunca o sobrescreve (ADR-037 D5).
 async function _upsertPhone(c, tid, personId, telefone) {
   const digits = String(telefone || '').replace(/[^0-9]/g, '');
   if (!digits) return false;
   const has = (await c.query(
     `SELECT 1 FROM lead_manager.contact_point
-      WHERE tenant_id=$1 AND person_id=$2 AND kind='phone'
+      WHERE tenant_id=$1 AND person_id=$2 AND kind='phone' AND source=$4
         AND regexp_replace(value_raw,'[^0-9]','','g') = $3 LIMIT 1`,
-    [tid, personId, digits])).rows[0];
+    [tid, personId, digits, CADASTRO_SOURCE])).rows[0];
   if (has) return false;
   await c.query(
-    `INSERT INTO lead_manager.contact_point (tenant_id, person_id, kind, value_raw, source, confidence)
-     VALUES ($1,$2,'phone',$3,$4,'alegado')`, [tid, personId, String(telefone).trim(), CADASTRO_SOURCE]);
+    `INSERT INTO lead_manager.contact_point (tenant_id, person_id, kind, value_raw, source, confidence, tipo)
+     VALUES ($1,$2,'phone',$3,$4,'alegado','cadastro')`, [tid, personId, String(telefone).trim(), CADASTRO_SOURCE]);
   return true;
 }
 
@@ -2652,21 +2702,21 @@ router.post('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(W
         if (!aluno.idExterno || !contrato.idExterno) {
           resumo.pulados++; erros.push({ i, motivo: 'aluno.idExterno e contrato.idExterno obrigatórios' }); continue;
         }
-        const pa = await _upsertPersonByRef(c, req.tenantId, 'aluno', String(aluno.idExterno), aluno.nome, aluno.dataNascimento);
+        const pa = await _upsertPersonByRef(c, req.tenantId, 'beneficiario', String(aluno.idExterno), aluno.nome, aluno.dataNascimento);
         if (pa.novo) resumo.pessoas_novas++;
         if (await _upsertPhone(c, req.tenantId, pa.id, aluno.telefone)) resumo.telefones_novos++;
-        // ADR-036 E1.3a: grava o PAPEL (o que o Gate 0 lê); aditivo ao account_member.
-        if (await _upsertRole(c, req.tenantId, pa.id, aluno.telefone, 'aluno')) resumo.papeis_novos++;
+        // ADR-036 E1.3a: grava o PAPEL canônico (o que o Gate 0 lê); aditivo ao account_member.
+        if (await _upsertRole(c, req.tenantId, pa.id, aluno.telefone, 'beneficiario')) resumo.papeis_novos++;
         const acc = await _upsertAccountByRef(c, req.tenantId, contrato);
         if (acc.novo) resumo.contratos_novos++;
         if (await _link(c, req.tenantId, acc.id, pa.id, 'beneficiario')) resumo.vinculos_novos++;
         const resp = it.responsavel;
         if (resp && resp.idExterno) {
-          const pr = await _upsertPersonByRef(c, req.tenantId, 'responsavel', String(resp.idExterno), resp.nome, null);
+          const pr = await _upsertPersonByRef(c, req.tenantId, 'responsavel_financeiro', String(resp.idExterno), resp.nome, null);
           if (pr.novo) resumo.pessoas_novas++;
           if (await _upsertPhone(c, req.tenantId, pr.id, resp.telefone)) resumo.telefones_novos++;
-          // ADR-036 E1.3a: papel do responsável (keyed pelo telefone dele).
-          if (await _upsertRole(c, req.tenantId, pr.id, resp.telefone, 'responsavel')) resumo.papeis_novos++;
+          // ADR-036 E1.3a: papel canônico do responsável financeiro (keyed pelo telefone dele).
+          if (await _upsertRole(c, req.tenantId, pr.id, resp.telefone, 'responsavel_financeiro')) resumo.papeis_novos++;
           if (await _link(c, req.tenantId, acc.id, pr.id, 'pagador')) resumo.vinculos_novos++;
         }
       }
@@ -2675,6 +2725,52 @@ router.post('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(W
   } catch (err) {
     logger.error('cadastro.contratos.ingest.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'falha ao ingerir contratos' });
+  }
+});
+
+// POST /tenant/:tenantId/cadastro/beneficiarios — BACKFILL de pessoas do cadastro-mestre.
+// Vocabulário ABSTRATO (beneficiário de serviço + responsável financeiro), sem termo de escola:
+// o adapter da fonte (Valinhos) traduz aluno→beneficiario, tpresp→payerRelation. Idempotente por
+// external_ref. NÃO cria account_member (o vínculo formal nasce com o contrato). ADR-037.
+//   body { itens: [{ beneficiario: { idExterno, nome, dataNascimento?, telefone?, payerRelation? },
+//                    responsavelFinanceiro?: { idExterno, nome?, telefone? } }] }
+router.post('/:tenantId/cadastro/beneficiarios', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const itens = Array.isArray(req.body && req.body.itens) ? req.body.itens : null;
+  if (!itens) return res.status(400).json({ error: 'envie { itens: [...] }' });
+  if (itens.length > 5000) return res.status(413).json({ error: 'lote grande demais (máx 5000 itens)' });
+  const resumo = { itens: itens.length, beneficiarios_novos: 0, beneficiarios_bridados: 0, responsaveis_novos: 0,
+                   responsaveis_bridados: 0, telefones_novos: 0, papeis_novos: 0, ambiguos: 0, pulados: 0 };
+  const erros = [];
+  try {
+    await withTenant(req.tenantId, async (c) => {
+      for (let i = 0; i < itens.length; i++) {
+        const it = itens[i] || {};
+        const ben = it.beneficiario || {};
+        if (!ben.idExterno) { resumo.pulados++; erros.push({ i, motivo: 'beneficiario.idExterno obrigatório' }); continue; }
+        // Beneficiário (role-aware): external_ref → telefone(papel beneficiario, adulto) → cria.
+        // O telefone do dependente é do responsável (papel responsável), cai fora → cria novo, sem duplicar.
+        const pb = await _bridgePersonByRefOrPhone(c, req.tenantId, 'beneficiario', String(ben.idExterno), ben.nome, ben.telefone, 'beneficiario', ben.dataNascimento, ben.payerRelation);
+        if (pb.ambiguo) { resumo.ambiguos++; erros.push({ i, motivo: 'beneficiário ambíguo (telefone casa 2+ pessoas)' }); continue; }
+        if (pb.novo) resumo.beneficiarios_novos++;
+        if (pb.bridged) resumo.beneficiarios_bridados++;
+        if (await _upsertPhone(c, req.tenantId, pb.id, ben.telefone)) resumo.telefones_novos++;
+        if (await _upsertRole(c, req.tenantId, pb.id, ben.telefone, 'beneficiario')) resumo.papeis_novos++;
+        // Responsável financeiro (quando dependente): casa por external_ref → telefone → cria.
+        const rf = it.responsavelFinanceiro;
+        if (rf && rf.idExterno) {
+          const pr = await _bridgePersonByRefOrPhone(c, req.tenantId, 'responsavel_financeiro', String(rf.idExterno), rf.nome, rf.telefone, 'responsavel_financeiro');
+          if (pr.ambiguo) { resumo.ambiguos++; erros.push({ i, motivo: 'responsável ambíguo (telefone casa 2+ pessoas)' }); continue; }
+          if (pr.novo) resumo.responsaveis_novos++;
+          if (pr.bridged) resumo.responsaveis_bridados++;
+          if (await _upsertPhone(c, req.tenantId, pr.id, rf.telefone)) resumo.telefones_novos++;
+          if (await _upsertRole(c, req.tenantId, pr.id, rf.telefone, 'responsavel_financeiro')) resumo.papeis_novos++;
+        }
+      }
+    });
+    res.json({ ok: true, resumo, erros: erros.slice(0, 50) });
+  } catch (err) {
+    logger.error('cadastro.beneficiarios.ingest.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao ingerir beneficiários' });
   }
 });
 

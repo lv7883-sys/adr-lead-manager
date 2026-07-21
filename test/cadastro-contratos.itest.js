@@ -104,9 +104,9 @@ test('(a) ingestão popula os 4 alvos + external_ref + nascimento + o elo', asyn
       JOIN lead_manager.person p ON p.id = m.person_id
      ORDER BY p.display_name`);
   assert.deepEqual(papeis, [
-    { display_name: 'Ana Aluna', papel: 'aluno' },
-    { display_name: 'Bruno Aluno', papel: 'aluno' },
-    { display_name: 'Pai da Ana', papel: 'responsavel' },
+    { display_name: 'Ana Aluna', papel: 'beneficiario' },
+    { display_name: 'Bruno Aluno', papel: 'beneficiario' },
+    { display_name: 'Pai da Ana', papel: 'responsavel_financeiro' },
   ]);
 
   // (6) _lookupRole (Gate 0) AGORA resolve o papel por dígitos BR-aware — mesmo com o gate
@@ -117,8 +117,8 @@ test('(a) ingestão popula os 4 alvos + external_ref + nascimento + o elo', asyn
       JOIN lead_manager.contact_role cr ON cr.id = m.role_id
      WHERE regexp_replace(m.phone,'[^0-9]','','g') = regexp_replace($1,'[^0-9]','','g')
      LIMIT 1`, ['(19) 99999-0001']);  // telefone da Ana
-  assert.equal(lk[0]?.key, 'aluno', 'Gate 0 acharia Ana como aluno (papel resolvido)');
-  assert.equal(lk[0]?.suppression, 'hard', 'papel aluno = suppression hard');
+  assert.equal(lk[0]?.key, 'beneficiario', 'Gate 0 acharia Ana como beneficiário (papel canônico resolvido)');
+  assert.equal(lk[0]?.suppression, 'hard', 'papel beneficiario = suppression hard');
 });
 
 test('(b) re-ingerir o mesmo lote é idempotente (tudo novo = 0, contagens iguais)', async () => {
@@ -151,4 +151,99 @@ test('(d) WITH CHECK bloqueia insert cross-tenant', async () => {
       `INSERT INTO lead_manager.person (tenant_id, display_name) VALUES ($1,'Forjado')`, [TENANT_A]));
   } catch (e) { bloqueado = /row-level security|violates/i.test(e.message); }
   assert.ok(bloqueado, 'policy WITH CHECK deve barrar tenant_id alheio');
+});
+
+// ---- BACKFILL: endpoint abstrato /cadastro/beneficiarios ----
+function postBen(tid, body) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const req = http.request(`${base}/tenant/${tid}/cadastro/beneficiarios`, {
+      method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
+    }, (res) => { let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(b || '{}') })); });
+    req.on('error', reject); req.write(data); req.end();
+  });
+}
+const LOTE_BEN = { itens: [
+  { beneficiario: { idExterno: 'BEN1', nome: 'Carlos Self', telefone: '19 98888-1111', payerRelation: 'self_paid' } },
+  { beneficiario: { idExterno: 'BEN2', nome: 'Duda Dependente', dataNascimento: '2015-03-03', payerRelation: 'financially_dependent' },
+    responsavelFinanceiro: { idExterno: 'RESP1', nome: 'Mae da Duda', telefone: '19 98888-2222' } },
+] };
+
+test('(e) /cadastro/beneficiarios: cria beneficiário + responsável, external_ref, tipo=cadastro, payer_relation, SEM account_member', async () => {
+  const amAntes = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.account_member`))[0].n);
+  const r = await postBen(TENANT_A, LOTE_BEN);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.resumo, { itens: 2, beneficiarios_novos: 2, beneficiarios_bridados: 0, responsaveis_novos: 1,
+    responsaveis_bridados: 0, telefones_novos: 2, papeis_novos: 2, ambiguos: 0, pulados: 0 });
+
+  // external_ref canônico
+  const refs = await q(TENANT_A, `SELECT external_type, external_id FROM lead_manager.external_ref
+     WHERE external_id IN ('BEN1','BEN2','RESP1') ORDER BY external_id`);
+  assert.deepEqual(refs, [
+    { external_type: 'beneficiario', external_id: 'BEN1' },
+    { external_type: 'beneficiario', external_id: 'BEN2' },
+    { external_type: 'responsavel_financeiro', external_id: 'RESP1' },
+  ]);
+  // payer_relation gravado
+  const pr = await q(TENANT_A, `SELECT display_name, payer_relation FROM lead_manager.person WHERE display_name IN ('Carlos Self','Duda Dependente') ORDER BY display_name`);
+  assert.deepEqual(pr, [
+    { display_name: 'Carlos Self', payer_relation: 'self_paid' },
+    { display_name: 'Duda Dependente', payer_relation: 'financially_dependent' },
+  ]);
+  // telefone tipo='cadastro' (BEN1 + RESP1; BEN2 sem telefone)
+  const cps = await q(TENANT_A, `SELECT DISTINCT tipo, source, confidence FROM lead_manager.contact_point
+     WHERE value_raw LIKE '%98888%'`);
+  assert.deepEqual(cps, [{ tipo: 'cadastro', source: 'extranet', confidence: 'alegado' }]);
+  // SEM account_member novo (vínculo formal nasce com o contrato)
+  const amDepois = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.account_member`))[0].n);
+  assert.equal(amDepois, amAntes, 'backfill NÃO cria account_member');
+
+  // idempotente: re-ingerir → tudo novo = 0
+  const r2 = await postBen(TENANT_A, LOTE_BEN);
+  assert.deepEqual(r2.json.resumo, { itens: 2, beneficiarios_novos: 0, beneficiarios_bridados: 0, responsaveis_novos: 0,
+    responsaveis_bridados: 0, telefones_novos: 0, papeis_novos: 0, ambiguos: 0, pulados: 0 });
+});
+
+test('(h) ROLE-AWARE: beneficiário cujo telefone casa um beneficiário existente é BRIDADO, não duplicado', async () => {
+  // Ana (do teste a) tem papel=beneficiario com telefone '(19) 99999-0001'. Um beneficiário novo
+  // com ESSE telefone deve casar a Ana (bridar external_ref), NÃO criar pessoa nova.
+  const nAntes = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.person`))[0].n);
+  const r = await postBen(TENANT_A, { itens: [
+    { beneficiario: { idExterno: 'BENX', nome: 'Ana Aluna', telefone: '(19) 99999-0001', payerRelation: 'self_paid' } },
+  ] });
+  assert.equal(r.json.resumo.beneficiarios_bridados, 1, 'casou (bridou) o beneficiário existente');
+  assert.equal(r.json.resumo.beneficiarios_novos, 0, 'NÃO criou pessoa nova (sem duplicata)');
+  const nDepois = Number((await q(TENANT_A, `SELECT count(*) n FROM lead_manager.person`))[0].n);
+  assert.equal(nDepois, nAntes, 'total de pessoas inalterado — zero duplicata');
+  // e o external_ref BENX aponta pra pessoa da Ana
+  const p = await q(TENANT_A, `SELECT p.display_name FROM lead_manager.external_ref er
+    JOIN lead_manager.person p ON p.id=er.entity_id WHERE er.external_type='beneficiario' AND er.external_id='BENX'`);
+  assert.equal(p[0].display_name, 'Ana Aluna', 'external_ref BENX bridado na pessoa da Ana');
+});
+
+test('(f) telefone de cadastro COEXISTE com whatsapp preexistente (tipo)', async () => {
+  const pid = (await q(TENANT_A, `SELECT p.id FROM lead_manager.person p
+    JOIN lead_manager.external_ref er ON er.entity_id=p.id
+   WHERE er.external_type='beneficiario' AND er.external_id='BEN1'`))[0].id;
+  // simula o scheduler: um whatsapp (provado, tipo=whatsapp) com os MESMOS dígitos
+  await q(TENANT_A, `INSERT INTO lead_manager.contact_point (tenant_id, person_id, kind, value_raw, source, confidence, tipo)
+    VALUES ($1,$2,'phone','19988881111','whatsapp','provado','whatsapp')`, [TENANT_A, pid]);
+  // re-ingere BEN1 → o de cadastro segue lá (não sobrescreve), 2 linhas
+  await postBen(TENANT_A, { itens: [LOTE_BEN.itens[0]] });
+  const cps = await q(TENANT_A, `SELECT tipo FROM lead_manager.contact_point WHERE person_id=$1 AND kind='phone' ORDER BY tipo`, [pid]);
+  assert.deepEqual(cps.map((x) => x.tipo), ['cadastro', 'whatsapp'], 'cadastro e whatsapp coexistem');
+});
+
+test('(g) SEED de papéis por-tenant funciona p/ um tenant FICTÍCIO novo (multi-tenant real)', async () => {
+  const C = process.env.RESOURCES_TENANT_C;
+  const antes = await q(C, `SELECT count(*) n FROM lead_manager.contact_role`);
+  assert.equal(Number(antes[0].n), 0, 'C começa sem papéis');
+  await q(C, `SELECT lead_manager.seed_base_roles($1)`, [C]);   // provisionamento em runtime
+  const papeis = await q(C, `SELECT key FROM lead_manager.contact_role ORDER BY key`);
+  assert.deepEqual(papeis.map((x) => x.key), ['beneficiario', 'prestador', 'responsavel_financeiro'],
+    'C recebe os 3 papéis canônicos sem código específico');
+  // idempotente
+  await q(C, `SELECT lead_manager.seed_base_roles($1)`, [C]);
+  const n2 = await q(C, `SELECT count(*) n FROM lead_manager.contact_role`);
+  assert.equal(Number(n2[0].n), 3, 'seed idempotente (não duplica)');
 });
