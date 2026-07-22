@@ -2902,6 +2902,92 @@ router.put('/:tenantId/cadastro/pessoas/:personId', authenticate, requireTenantA
   }
 });
 
+// ---------------------------------------------------------------------------
+// MONITOR DO GATE (#) — o que o gate de supressão por papel decidiu. Duas fontes:
+//   (A) SOMBRA: gate_shadow_log (gate em shadow → o que TERIA feito + o que o crivo achou);
+//   (B) REAL:   messages.discarded='role_hard' (gate 'on' → descarte real, revertível).
+// internal_contact (staff) é gate SEPARADO always-on — fora deste monitor de rescue.
+// ---------------------------------------------------------------------------
+router.get('/:tenantId/gate/decisions', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const decisions = await withTenant(req.tenantId, async (c) => (await c.query(
+      `SELECT * FROM (
+         -- (A) SOMBRA: decisões por PAPEL (exclui presignal-histórico sem papel)
+         SELECT 'shadow' AS origem, g.id::text AS decisao_id, g.phone,
+                cr.key AS papel, cr.label AS papel_label,
+                m.body AS mensagem, m.media_type,
+                g.reason AS motivo, g.would_action, g.crivo_outcome,
+                CASE WHEN g.would_action='hard' THEN 'teria_descartado' ELSE 'teria_vigiado' END AS acao,
+                (g.would_action='hard' AND g.crivo_outcome='lead') AS divergencia,
+                g.created_at, NULL::text AS revert_msg_id
+           FROM lead_manager.gate_shadow_log g
+           LEFT JOIN lead_manager.contact_role cr ON cr.id = g.role_id
+           LEFT JOIN lead_manager.messages m ON m.tenant_id = g.tenant_id AND m.external_message_id = g.external_message_id
+          WHERE g.tenant_id = $1 AND g.role_id IS NOT NULL
+         UNION ALL
+         -- (B) REAL: descartes por papel (gate 'on'); papel resolvido pelo telefone
+         SELECT 'real' AS origem, m.id::text AS decisao_id, m.sender AS phone,
+                lr.key AS papel, lr.label AS papel_label,
+                m.body AS mensagem, m.media_type,
+                m.discard_reason AS motivo, 'hard' AS would_action, NULL AS crivo_outcome,
+                'descartou' AS acao, false AS divergencia,
+                m.received_at AS created_at, m.id::text AS revert_msg_id
+           FROM lead_manager.messages m
+           LEFT JOIN LATERAL (
+             SELECT cr.key, cr.label FROM lead_manager.contact_role_member cm
+              JOIN lead_manager.contact_role cr ON cr.id = cm.role_id
+             WHERE cm.tenant_id = m.tenant_id
+               AND regexp_replace(cm.phone,'[^0-9]','','g') = regexp_replace(coalesce(m.sender,''),'[^0-9]','','g')
+             LIMIT 1) lr ON true
+          WHERE m.tenant_id = $1 AND m.discarded = true AND m.discard_reason = 'role_hard'
+       ) d ORDER BY created_at DESC LIMIT 500`,
+      [req.tenantId])).rows);
+    res.json({ decisions });
+  } catch (err) {
+    logger.error('gate.decisions.list.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao listar decisões do gate' });
+  }
+});
+
+// POST reverter — desfaz um descarte REAL errado: des-descarta a mensagem + recria/reativa o
+// lead na fila de revisão (funil) + registra o FEEDBACK (correct_label='lead') que melhora o
+// resgate (few-shot lê classification_feedback). Idempotente-ish; só age em descarte 'role_hard'.
+router.post('/:tenantId/gate/decisions/:messageId/reverter', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const mid = String(req.params.messageId);
+  const actor = (req.user && (req.user.sub || req.user.role)) || 'recepcao';
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      const m = (await c.query(
+        `SELECT id, conversation_id, sender, body, discarded, discard_reason
+           FROM lead_manager.messages WHERE id = $1`, [mid])).rows[0];
+      if (!m) return { erro: 'mensagem não encontrada', code: 404 };
+      if (!(m.discarded && m.discard_reason === 'role_hard')) return { erro: 'esta mensagem não é um descarte do gate por papel', code: 400 };
+      // 1) desfaz o discard (visível de volta na conversa)
+      await c.query(`UPDATE lead_manager.messages SET discarded = false, discard_reason = null WHERE id = $1`, [mid]);
+      const phone = m.sender || null;
+      // 2) recria/reativa o lead na FILA DE REVISÃO (recepção tria; não entra no funil silencioso)
+      const lead = (await c.query(
+        `INSERT INTO leads (tenant_id, name, phone, status, review_queue, classification_reasoning)
+         VALUES ($1, $2, $3, 'REVIEW_QUEUE', true, $4)
+         ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
+         DO UPDATE SET status = 'REVIEW_QUEUE', review_queue = true, updated_at = now()
+         RETURNING id`,
+        [req.tenantId, phone, phone, 'revertido do gate (descarte de papel) pela recepção'])).rows[0];
+      // 3) feedback: a decisão do gate estava errada (era lead) → melhora o resgate
+      await c.query(
+        `INSERT INTO lead_manager.classification_feedback (tenant_id, lead_id, correct_label, feedback_by, correction_context)
+         VALUES ($1, $2, 'lead', $3, $4)`,
+        [req.tenantId, lead.id, actor, 'gate_revert: descarte de conhecido-por-papel revertido — era lead']);
+      return { ok: true, lead_id: lead.id };
+    });
+    if (out.erro) return res.status(out.code || 400).json({ error: out.erro });
+    res.json(out);
+  } catch (err) {
+    logger.error('gate.decisions.reverter.error', { tenant_id: req.tenantId, message_id: mid, error: err.message });
+    res.status(500).json({ error: 'falha ao reverter o descarte' });
+  }
+});
+
 // POST /tenant/:tenantId/cadastro/beneficiarios — BACKFILL de pessoas do cadastro-mestre.
 // Vocabulário ABSTRATO (beneficiário de serviço + responsável financeiro), sem termo de escola:
 // o adapter da fonte (Valinhos) traduz aluno→beneficiario, tpresp→payerRelation. Idempotente por
