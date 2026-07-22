@@ -221,3 +221,15 @@ Estabelece o eixo **quem editou por último** — ortogonal ao eixo **de onde ve
 **Como o scraping consulta:** 1 `SELECT` da trava no início da entidade (molde `sync.js` que carrega o estado num Map) + `aplicar_scraping` por campo; escreve a base só quando `ESCREVE`. Custo zero nos campos livres (o caso comum).
 
 **Não-objetivo:** histórico/auditoria completo de edições (N versões, quem/quando) — isso é `audit_log` (012), trilha própria. Esta emenda guarda só o **estado atual** da trava e da divergência (o mínimo para proteger + alertar). **Fundação sem tela nem cron:** a tela de alertas e o cron que chama `aplicar_scraping` vêm depois. Reversível: `git revert` do código; migração aditiva (`DROP TABLE`/`DROP FUNCTION` no rollback).
+
+## Emenda 2026-07-22 — CRON diário de contratos/alunos (molde ADR-026)
+
+Fecha o ciclo: a ingestão 1x (endpoint) vira **sincronização diária diff-based**, no molde do sincronizador de recursos (ADR-026). Migração **072** (aditiva): `service_account.last_synced_at` + `service_account.fonte_ausente_em` (soft-delete) + `cadastro_sync_log`.
+
+**(a) Diff-based (nunca apaga espelho cego).** Contrato/aluno NOVO na Extranet → insere; MUDANÇA → atualiza (só se mudou de fato); SUMIÇO → **NÃO deleta**, marca `fonte_ausente_em=now()` (soft-delete) e conta/reporta; reaparecer → volta a `NULL`. Idempotente por `external_ref` → resumível (cair no meio e re-rodar não duplica).
+
+**(b) Invariante de proveniência.** Campo de **PESSOA** (`display_name`/`data_nascimento`/`payer_relation`) passa por **`aplicar_scraping`** (070) ANTES de escrever — não sobrescreve edição humana, divergência vira alerta, só escreve no veredito `ESCREVE`. **CONTRATO** (`service_account`: status/servico/plano/periodicidade/vigência) é **ESPELHO** da fonte, escrito **direto** (ninguém edita à mão) — FORA da proveniência. O sync realiza os dois em `sync-cadastro.js`.
+
+**(c) Concorrência.** O adapter pega o `pg_advisory_lock('extranet-access')=2037495811` **POR FETCH** e solta entre requests (clique humano tem prioridade na fila) — ≠ do resource sync, que segura o lock o run inteiro (é rápido); este é longo (~1.200 fetches). Throttle **≥25s** embutido no `extranet-client`. O `syncCadastro` (DB) roda **fora** de qualquer lock de Extranet.
+
+**(d) Onde vive / agenda / gate.** `src/cadastro/` (runner `daily-sync-cadastro.js` + `sync-cadastro.js` + `adapters/valinhos-contratos.js`). Cron do **HOST** às **04:00** BRT (`deploy/crontab.cadastro-sync.txt`), escalonado 1h do resource-sync (03h). Reusa o `resource_source_binding` (kind `SCRAPE_EXTRANET`, mesmas creds cifradas). **Multi-tenant**: itera `tenants_active()`; todo conhecimento de Extranet vive no adapter. **Salvaguarda**: aborta antes de escrever se o snapshot vier < 66% do presente. **Log**: `cadastro_sync_log` + `cadastro_sync.alert` (CREDENTIAL/SAFEGUARD/UNKNOWN). **1º run = o 04h natural** pós-ingestão (não disparar manual). Reversível: `git revert` + `DROP` da 072 (aditiva).

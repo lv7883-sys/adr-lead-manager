@@ -1,0 +1,23 @@
+# ADR-037 — Cron de sincronização de CONTRATOS/ALUNOS: run DIÁRIO às 04:00 (America/Sao_Paulo).
+#
+# 04h = ESCALONADO 1h do sincronizador de RECURSOS (03h) para não disputar o advisory lock
+# 'extranet-access' logo no começo. Ainda assim, os dois compartilham o mesmo lock por-fetch, então
+# se um rodar longo, o outro apenas espera na fila (sem deadlock). Madrugada = fora da janela do
+# scheduler → sem contenção com o atendimento.
+#
+# LOCK: o adapter pega pg_advisory_lock(2037495811) POR FETCH e solta entre requests (clique humano
+# tem prioridade). Throttle ≥25s embutido no extranet-client. Run longo (~1.200 fetches ≈ várias horas).
+#
+# RESUMÍVEL: idempotente por external_ref — cair no meio e rodar de novo re-processa sem duplicar;
+# a salvaguarda aborta antes de escrever se o snapshot vier < 66% do presente (parse quebrado/login).
+#
+# Instalar no HOST (crontab do root) — idempotente:
+#   ( crontab -l 2>/dev/null | grep -v 'cadastro-sync'; \
+#     grep -vE '^\s*#' /apps/lead-manager/deploy/crontab.cadastro-sync.txt ) | crontab -
+#
+# Conferir:  crontab -l | grep cadastro-sync
+# Log:       /var/log/cadastro-sync.log
+#
+# GATE do 1º run: NÃO disparar manualmente. O 1º run é o 04h natural (após a ingestão 961/961).
+CRON_TZ=America/Sao_Paulo
+0 4 * * * docker exec adr-lead-manager node /app/src/cadastro/daily-sync-cadastro.js >> /var/log/cadastro-sync.log 2>&1
