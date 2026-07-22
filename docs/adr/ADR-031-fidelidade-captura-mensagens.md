@@ -78,3 +78,11 @@ rascunho-fantasma no que JÁ deveria funcionar.
 - Staff reagindo: filtrado antes do short-circuit pelos gates de `internal_contacts`/papel
   (comportamento preservado).
 - Sticker webp: `<img>` de navegadores modernos renderiza webp (ok).
+
+## Emenda 2026-07-22 — reação = meta-sinal também na CONTABILIDADE DE POSSE (não só no rascunho)
+
+O ADR-031 neutralizou a reação **no gerador de rascunho** (short-circuit em `processInbound` → sem bolha-vazia/rascunho-fantasma). Mas a reação continua gravada em `messages` com `role='USER'` e `body='[reação] <emoji>'`, e a **contabilidade de posse da bola** (`awaiting_reply`, `tenant.js`) ficou intacta — ela fazia `max(received_at WHERE role='USER')` **contando a reação como turno do cliente**. Consequência (diag #3, Alessandra): um "👍" do lead depois da nossa saída reabria "devemos resposta" no caminho de **fallback** (`conversation_state IS NULL`).
+
+**Fix (cinto):** a subquery do fallback do `awaiting_reply` passa a **excluir reação** — `AND coalesce(m.body,'') NOT LIKE '[reação]%'`. Marcador escolhido: **prefixo `[reação]` do body** (o `webhook.js` o escreve deterministicamente; **não há coluna dedicada** de reação — uma flag seria mais robusta e fica como hardening futuro/opcional, não neste cinto). `coalesce(...,'')` trata `body NULL` de mídia: **imagem/áudio continuam contando** como turno; só a reação é excluída.
+
+**Escopo mínimo:** só a subquery que **decide** `awaiting_reply` (o fallback por timestamp, `tenant.js:680-694`). NÃO toca captura, geração de rascunho (já tratada aqui) nem a bola. **NÃO altera o caminho não-fallback:** com `conversation_state` não-NULL o `awaiting_reply` sai do fallback (a bola/estado governam) — o filtro só age no ramo `NULL`. A raiz já é coberta pela bola em `on` (ADR-030); este cinto blinda qualquer lead que ainda caia no fallback. Multi-tenant (marcador genérico, sem hardcode). itest 5/5 (reação não reabre / texto real reabre / Alessandra / estado não-NULL inalterado / mídia conta).

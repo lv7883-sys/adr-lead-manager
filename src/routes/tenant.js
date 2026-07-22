@@ -685,9 +685,14 @@ router.get(
                                            AND s.received_at > l.state_computed_at))
                       OR ((l.conversation_state IS NULL
                            OR (l.conversation_state = 'AGUARDANDO_RECEPCAO' AND l.state_computed_at IS NULL)) AND
+                          -- CINTO (#3): REAÇÃO (emoji) NÃO é turno do cliente. A reação inbound é
+                          -- gravada em messages com role='USER' e body '[reação] …'; sem esse filtro,
+                          -- um "👍" reabria "devemos resposta" no fallback. Exclui só reação (coalesce
+                          -- trata body NULL de mídia: imagem/áudio continuam contando como turno).
                           (SELECT max(m.received_at) FROM messages m
                              JOIN conversations cv ON cv.id = m.conversation_id
-                            WHERE cv.external_id = l.phone AND m.role = 'USER')
+                            WHERE cv.external_id = l.phone AND m.role = 'USER'
+                              AND coalesce(m.body, '') NOT LIKE '[reação]%')
                           > COALESCE((SELECT max(s.received_at) FROM staff_outbound_samples s
                              WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
                                  = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')), 'epoch'::timestamptz))
