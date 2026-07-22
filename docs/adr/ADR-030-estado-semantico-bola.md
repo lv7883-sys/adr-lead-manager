@@ -156,3 +156,15 @@ A `ENROLACAO_PATTERNS` é **vocabulário de ramo**, não da bola nem do tenant. 
 Estrutura acordada (a detalhar no ADR de fundação): **duas camadas** — ramo dá o seed do vocabulário; tenant ajusta em cima (adiciona/remove). A lista de enrolação da Valinhos será promovida a seed do ramo "escola de música"; a 2ª escola de música herda direto.
 
 Folga de sequência: a 2ª escola (cliente em vista) é do **mesmo ramo** da Valinhos → herda o vocabulário como está e **não** depende do conceito de ramo estar pronto. O ramo só vira obrigatório quando o **ramo diferente** chegar. Portanto o Passo 2 sobe em shadow com o `Set` de piloto sem bloqueio; quando a fundação de ramo existir, a lista passa a **consumi-la** sem redesenho.
+
+## Emenda 2026-07-22 — a SAÍDA como fonte de estado (flip) + aba de auditoria (Fatia 0)
+
+Tira a bola do shadow: em **`bola_mode='on'`**, `classificarSaida` passa a **escrever** `conversation_state` (o corte sincronizado do Passo 2), mantendo o `bola_shadow_log` gravando **sempre** (age E presta contas). Construído/uncommitted; o flip do modo é passo separado pós-revisão.
+
+**(a) Wire (`engine.js`).** Após a decisão (`passou_bola → AGUARDANDO_CLIENTE` / `enrolou → AGUARDANDO_RECEPCAO`), em `'on'` chama `_aplicarEstadoBola` que grava `conversation_state` + `state_reasoning` + `state_computed_at` + `bola_nossa_desde` + `adiamentos` (colunas já existentes na 058 — **sem migração**). `'shadow'` só loga; `'off'` inerte. **Default conservador:** erro do Gemini (503) na Camada 2 → `AGUARDANDO_RECEPCAO` (nunca passa a bola no escuro).
+
+**(b) Override respeitado via proveniência (070).** A escrita passa por **`aplicar_scraping('lead', leadId, 'conversation_state', …, 'bola')`**: sem trava → `ESCREVE`; travado por humano (revert) → `DIVERGE`/`IGUAL` → **não escreve** (a bola respeita) e a divergência fica **auditável** em `field_divergence`. O `revert` da aba chama `marcar_edicao_humana('lead', …)` + restaura o valor anterior. Fronteira: o path **INBOUND** (`classifyConversa`) NÃO passa por essa trava — um novo inbound é evento novo e re-deriva legitimamente; o override protege contra a bola re-decidir nas NOSSAS saídas.
+
+**(c) Aba "Bola" no Monitor do Filtro** (`/f/:slug/monitor-filtro`, 2ª aba; "Filtro" intacta). Lê `bola_shadow_log` (última decisão/lead): estado marcado, camada (**Determinístico** vs **Gemini Flash**), o **texto da saída** que disparou, timestamp, flag de override. Botão **↩ Reverter** por lead. Multi-tenant (tenant da URL).
+
+**(d) Invariantes.** `conversation_state` muda de **VALOR, não de contrato** — `awaiting_reply` (tenant.js), badge (recep-leads.js) e SLA (metrics.js) seguem lendo igual. `bola_mode` por-tenant; aba por-tenant; `bolaGate` genérico. **Kill-switch:** `UPDATE tenant_lead_config SET bola_mode='shadow'` (volta a só-calcular, sem deploy). **Interação com o bug da reação (diag #3):** com a bola gravando `AGUARDANDO_CLIENTE`, o `awaiting_reply` sai do fallback-por-timestamp (só-NULL) que a reação sabota → fecha o #3 pela raiz. itest do flip: 5/5 (`_aplicarEstadoBola` escreve/respeita-override, `gateSaida`, cross-tenant).

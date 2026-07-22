@@ -844,6 +844,25 @@ async function _shadowBola(tenantId, {
 
 // Classifica UMA saída da recepção. Best-effort: nunca lança (o webhook já respondeu 200).
 // mediaPendente = mídia (áudio) ainda sem transcrição → adia (classifica quando chegar).
+// FLIP da bola (ADR-030 Fatia 0): escreve o conversation_state derivado da SAÍDA, RESPEITANDO
+// override manual (revert da aba Bola) via proveniência (aplicar_scraping/070, entity_kind='lead').
+// Sem trava → 'ESCREVE' → grava; travado por humano → 'IGUAL'/'DIVERGE' → NÃO grava (a bola
+// respeita) e a divergência fica auditável. Devolve o veredito. NÃO toca o path INBOUND
+// (classifyConversa) — um novo inbound é evento novo e pode re-derivar legitimamente.
+async function _aplicarEstadoBola(tenantId, leadId, estado, reason, bolaDesde, adiamentos) {
+  return withTenant(tenantId, async (c) => {
+    const v = (await c.query(
+      `SELECT lead_manager.aplicar_scraping('lead',$1,'conversation_state',$2,'bola') AS v`, [leadId, estado])).rows[0].v;
+    if (v === 'ESCREVE') {
+      await c.query(
+        `UPDATE leads SET conversation_state=$2, state_reasoning=$3, state_computed_at=now(),
+                bola_nossa_desde=$4, adiamentos=$5, updated_at=now() WHERE id=$1`,
+        [leadId, estado, reason, bolaDesde, adiamentos]);
+    }
+    return v;
+  });
+}
+
 async function classificarSaida(tenantId, { ident, sampleId, body, mediaPendente = false }, deps = {}) {
   const classifyConversa = deps.classifyConversa || gemini.classifyConversa;
   const log = logger.child({ tenant_id: tenantId, fn: 'classificarSaida' });
@@ -886,12 +905,19 @@ async function classificarSaida(tenantId, { ident, sampleId, body, mediaPendente
     let veredito = gateSaida(body);
     if (veredito === 'ambiguo') {
       camada = 'modelo_leve';
-      const conversation = await _carregarConversaSaida(tenantId, ident, lead.id);
-      const examples = await _fewShotExamples(tenantId);
-      const { leadDefinition, stageDefinitions } = await _classifierConfig(tenantId);
-      const r = await _classifyConversaRetry(classifyConversa, {
-        conversation, examples, stageDefinitions, leadDefinition, tenant: tenantId,
-      });
+      let r;
+      try {
+        const conversation = await _carregarConversaSaida(tenantId, ident, lead.id);
+        const examples = await _fewShotExamples(tenantId);
+        const { leadDefinition, stageDefinitions } = await _classifierConfig(tenantId);
+        r = await _classifyConversaRetry(classifyConversa, {
+          conversation, examples, stageDefinitions, leadDefinition, tenant: tenantId,
+        });
+      } catch (e) {
+        // CONSERVADOR (503/timeout do Gemini): NUNCA passa a bola no escuro → fica NOSSA.
+        log.warn('bola.modelo_leve_erro', { error: e.message });
+        r = { conversation_state: 'AGUARDANDO_RECEPCAO', state_reasoning: `erro IA: ${e.message}`, confidence: null };
+      }
       confidence = r.confidence != null ? r.confidence : null; // GRAVADO p/ calibração, NÃO decide
       // Veredito pelo ESTADO que a IA devolveu — NUNCA por confidence: confidence é P(é lead),
       // não a certeza de com quem está a bola (perguntas diferentes; ADR-030 §ajuste). Conservador:
@@ -918,11 +944,17 @@ async function classificarSaida(tenantId, { ident, sampleId, body, mediaPendente
       bolaDesdeSug = await _posseDesde(tenantId, ident, lead);
       adiamentosSug = 1;
     }
+    // FLIP: em 'on', a SAÍDA governa o conversation_state (respeitando override manual). Em
+    // 'shadow' NÃO escreve (só loga). bola_shadow_log é gravado SEMPRE (a bola presta contas).
+    let aplicado = null;
+    if (mode === 'on') {
+      aplicado = await _aplicarEstadoBola(tenantId, lead.id, estadoSugerido, reason, bolaDesdeSug, adiamentosSug);
+    }
     await _shadowBola(tenantId, {
       leadId: lead.id, sampleId, camada, veredito, confidence, reason,
       estadoAtual, estadoSugerido, bolaDesdeSug, adiamentosSug,
     });
-    log.info('bola.saida_classificada', { camada, veredito, estado_atual: estadoAtual, estado_sugerido: estadoSugerido });
+    log.info('bola.saida_classificada', { camada, veredito, estado_atual: estadoAtual, estado_sugerido: estadoSugerido, mode, aplicado });
   } catch (e) {
     log.warn('bola.classificar_error', { error: e.message });
   }
@@ -1668,5 +1700,5 @@ module.exports = {
   // ADR-029 fatia 3 — expostos p/ o teste de isolamento multi-tenant (§7).
   _gateConfig, _lookupRole, _presignalActive, _evaluateGateSuppression, _shadowLog, _shadowOutcome,
   // ADR-030 Passo 2 — classificação da saída (estado semântico da bola), shadow-only.
-  classificarSaida,
+  classificarSaida, _aplicarEstadoBola,
 };

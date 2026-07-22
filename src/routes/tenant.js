@@ -2988,6 +2988,58 @@ router.post('/:tenantId/gate/decisions/:messageId/reverter', authenticate, requi
   }
 });
 
+// ---------------------------------------------------------------------------
+// ABA BOLA (ADR-030) — decisões da bola semântica (bola_shadow_log) + reverter.
+// GET: última decisão por lead (estado marcado, camada, texto que disparou, timestamp).
+// POST reverter: restaura o conversation_state ao valor ANTERIOR + TRAVA por proveniência
+// (marcar_edicao_humana 'lead') → a bola passa a respeitar o override (auditável).
+// ---------------------------------------------------------------------------
+router.get('/:tenantId/bola/decisions', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const decisions = await withTenant(req.tenantId, async (c) => (await c.query(
+      `SELECT * FROM (
+         SELECT DISTINCT ON (b.lead_id)
+           b.lead_id::text AS lead_id, l.phone, l.name, l.conversation_state AS estado_agora,
+           b.camada, b.veredito, b.estado_atual, b.estado_sugerido, b.reason, b.created_at,
+           so.body AS saida_texto,
+           EXISTS(SELECT 1 FROM lead_manager.field_provenance fp
+                   WHERE fp.entity_kind='lead' AND fp.entity_id=b.lead_id AND fp.field='conversation_state') AS override_manual
+           FROM lead_manager.bola_shadow_log b
+           JOIN lead_manager.leads l ON l.id=b.lead_id
+           LEFT JOIN lead_manager.staff_outbound_samples so ON so.id=b.outbound_sample_id
+          WHERE b.tenant_id=$1 AND b.camada <> 'skip'
+          ORDER BY b.lead_id, b.created_at DESC
+       ) x ORDER BY created_at DESC LIMIT 500`, [req.tenantId])).rows);
+    res.json({ decisions });
+  } catch (err) {
+    logger.error('bola.decisions.list.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao listar decisões da bola' });
+  }
+});
+
+router.post('/:tenantId/bola/decisions/:leadId/reverter', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const lid = String(req.params.leadId);
+  const actor = (req.user && (req.user.sub || req.user.role)) || 'recepcao';
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      const last = (await c.query(
+        `SELECT estado_atual FROM lead_manager.bola_shadow_log WHERE tenant_id=$1 AND lead_id=$2 ORDER BY created_at DESC LIMIT 1`,
+        [req.tenantId, lid])).rows[0];
+      if (!last) return { erro: 'sem decisão da bola para este lead', code: 404 };
+      const restore = last.estado_atual;   // o estado ANTES da bola (pode ser NULL)
+      await c.query(`UPDATE lead_manager.leads SET conversation_state=$2, state_reasoning='revertido pela recepção (bola)', state_computed_at=now(), updated_at=now() WHERE id=$1`, [lid, restore]);
+      // TRAVA por proveniência → a bola respeita o override (aplicar_scraping devolve DIVERGE/IGUAL)
+      await c.query(`SELECT lead_manager.marcar_edicao_humana('lead',$1,'conversation_state',$2,$3)`, [lid, restore, actor]);
+      return { ok: true, restaurado: restore };
+    });
+    if (out.erro) return res.status(out.code || 400).json({ error: out.erro });
+    res.json(out);
+  } catch (err) {
+    logger.error('bola.decisions.reverter.error', { tenant_id: req.tenantId, lead_id: lid, error: err.message });
+    res.status(500).json({ error: 'falha ao reverter a decisão da bola' });
+  }
+});
+
 // POST /tenant/:tenantId/cadastro/beneficiarios — BACKFILL de pessoas do cadastro-mestre.
 // Vocabulário ABSTRATO (beneficiário de serviço + responsável financeiro), sem termo de escola:
 // o adapter da fonte (Valinhos) traduz aluno→beneficiario, tpresp→payerRelation. Idempotente por
