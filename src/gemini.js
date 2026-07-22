@@ -624,7 +624,48 @@ Texto:
   });
 }
 
+// ============================================================================
+// RESCUE QUESTION por papel (ADR-036 E1.4) — o "resgate" do Gate 0. Recebe o CRITÉRIO do papel
+// (rescue_prompt, config por tenant via role_lead_policy) + a mensagem/conversa do contato
+// CONHECIDO e decide se é LEAD (resgata) apesar do papel supressor. Substitui o crivo genérico
+// role-cego pela pergunta desenhada do papel. temperatura 0, JSON fechado {resgata, confidence,
+// motivo}. Conservador: na dúvida real, resgata=true (não descarta lead bom).
+// ============================================================================
+async function classifyRescue({ message, conversation, rescuePrompt }) {
+  const criterio = (typeof rescuePrompt === 'string' && rescuePrompt.trim()) ? rescuePrompt.trim() : null;
+  if (!criterio) return { resgata: true, confidence: 0, motivo: 'sem critério de resgate configurado — mantém (não descarta)' };
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({
+      model: modelName,
+      generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+    });
+    const conteudo = (Array.isArray(conversation) && conversation.length)
+      ? `CONVERSA (cronológica):\n${_formatConversa(conversation)}`
+      : `MENSAGEM: """${message ?? ''}"""`;
+    const prompt = `Você avalia se a conversa/mensagem de um CONTATO CONHECIDO do negócio representa um LEAD
+(uma OPORTUNIDADE DE NOVO NEGÓCIO) segundo o CRITÉRIO DO PAPEL abaixo. Por padrão, contato conhecido em
+assunto de rotina/pós-venda NÃO é lead; só é lead se o critério de RESGATE for satisfeito. A INTENÇÃO da
+conversa decide, nunca a identidade.
+
+CRITÉRIO DE RESGATE (do papel, deste cliente):
+${criterio}
+
+${conteudo}
+
+Responda SOMENTE com JSON: {"resgata":<true|false>,"confidence":<0.0-1.0>,"motivo":"<1 frase em pt-BR citando o conteúdo>"}
+- resgata=true → é lead (MANTÉM no funil). resgata=false → é rotina/pós-venda/operacional (descarta).
+- "confidence" = certeza da decisão (0.0-1.0). Na dúvida REAL, prefira resgata=true — precisão sobre recall no descarte (não descartar lead bom).`;
+    const res = await model.generateContent(prompt);
+    const parsed = JSON.parse(res.response.text());
+    const confidence = Math.min(1, Math.max(0, Number(parsed.confidence) || 0));
+    const resgata = typeof parsed.resgata === 'boolean' ? parsed.resgata : confidence >= 0.5;
+    const motivo = typeof parsed.motivo === 'string' ? parsed.motivo : null;
+    return { resgata, confidence, motivo };
+  });
+}
+
 module.exports = {
+  classifyRescue,
   classify,
   classifyConversa,
   transcribeAudio,

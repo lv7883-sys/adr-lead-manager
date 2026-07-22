@@ -6,6 +6,7 @@ const { toE164 } = require('./validation');
 const telBR = require('./telefoneBR');
 const { resolveSystemPrompt } = require('./templates');
 const gemini = require('./gemini');
+const { getRescuePolicy } = require('./roleLeadPolicy');   // ADR-036 E1.4: rescue question por papel (config por tenant)
 const notifyModule = require('./notify');
 const notificacao = require('./notificacao');   // Bloco 4: push WhatsApp pra recepção
 const redisClient = require('./redisClient');
@@ -937,6 +938,7 @@ async function classificarSaida(tenantId, { ident, sampleId, body, mediaPendente
 async function processInbound(tenant, msg, rawBody, deps = {}) {
   const classify = deps.classify || gemini.classify;
   const classifyConversa = deps.classifyConversa || gemini.classifyConversa;
+  const classifyRescue = deps.classifyRescue || gemini.classifyRescue;   // rescue question do papel (Gate 0)
   const generate = deps.generate || gemini.generateReply;
   const classifyIntent = deps.classifyIntent || gemini.classifyIntent;
   const extract = deps.extract || gemini.extractQualification;
@@ -1042,13 +1044,30 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   if (phone && gateCfg.mode !== 'off') {
     const sup = await _evaluateGateSuppression(tenantId, phone, gateCfg);
     if (sup.hard) {
-      if (gateCfg.mode === 'on') {
-        log.info('gate0.role_hard', { gate: 0, role: sup.roleKey });
+      // WIRE do RESGATE (ADR-036 E1.4): papel supressor NÃO descarta cego. Pergunta a RESCUE
+      // QUESTION do papel (config por tenant, role_lead_policy). resgata=true → MANTÉM (segue o
+      // pipeline normal → crivo/funil, nunca descarte silencioso); resgata=false → descarta
+      // ('role_hard'). Falha da IA ou papel sem critério → CONSERVADOR: mantém (não descarta).
+      const policy = await getRescuePolicy(tenantId, sup.roleKey);
+      let resgata = true, rescueMotivo = null, rescueConf = null;
+      if (policy.rescue_prompt) {
+        try {
+          const rq = await classifyRescue({ message: msg.body, rescuePrompt: policy.rescue_prompt });
+          resgata = rq.resgata; rescueMotivo = rq.motivo; rescueConf = rq.confidence;
+        } catch (e) { log.warn('gate0.rescue_failed', { gate: 0, role: sup.roleKey, error: e.message }); resgata = true; }
+      }
+      const decisao = resgata ? 'keep' : 'discard';
+      if (gateCfg.mode === 'on' && !resgata) {
+        log.info('gate0.role_hard', { gate: 0, role: sup.roleKey, rescue_conf: rescueConf });
         await captureDiscarded(tenantId, channel, phone, msg, rawBody, 'role_hard');  // distinto de 'internal_contact'
         return;
       }
+      // shadow (ou 'on' + resgata=keep): registra a decisão do RESGATE. `reason` carrega keep/discard
+      // + o motivo — a fonte que o Monitor do Filtro lê pra mostrar a rescue question em ação.
       gateShadowId = await _shadowLog(tenantId, { phone, channel, wouldAction: 'hard',
-        roleId: sup.roleId, reason: 'role:' + (sup.roleKey || ''), externalMessageId: msg.externalMessageId });
+        roleId: sup.roleId,
+        reason: `role:${sup.roleKey || ''}|rescue:${decisao}${rescueMotivo ? '|' + rescueMotivo.slice(0, 100) : ''}`,
+        externalMessageId: msg.externalMessageId });
     } else if (sup.presignal) {
       gatePresignal = true;   // presignal NUNCA descarta sozinha; segue pro crivo
       if (gateCfg.mode !== 'on') {
