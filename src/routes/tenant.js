@@ -12,6 +12,7 @@ const { patchLeadConfig } = require('../leadConfig');
 const { isUuid } = require('../validation');
 const { fromLegacy, canonicaliza, validaHorarioJson, normaliza, minToHm } = require('../horario'); // H1: horário por-dia
 const logger = require('../logger');
+const { resumoPlantao } = require('../plantao');   // ADR-040: plantão (resumo de saúde)
 const evolution = require('../evolution');   // E4: envio direto via Evolution
 const meta = require('../meta');              // E6: envio outbound via Messenger/IG
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
@@ -3045,6 +3046,16 @@ router.post('/:tenantId/bola/decisions/:leadId/reverter', authenticate, requireT
   } catch (err) {
     logger.error('bola.decisions.reverter.error', { tenant_id: req.tenantId, lead_id: lid, error: err.message });
     res.status(500).json({ error: 'falha ao reverter a decisão da bola' });
+  }
+});
+
+// PLANTÃO (ADR-040) — resumo de saúde do dia por sistema (agrega os logs existentes). Leitura só.
+router.get('/:tenantId/plantao', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    res.json(await resumoPlantao(req.tenantId));
+  } catch (err) {
+    logger.error('plantao.resumo.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao montar o plantão' });
   }
 });
 

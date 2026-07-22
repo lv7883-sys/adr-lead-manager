@@ -1,0 +1,15 @@
+# ADR-040 — RESUMO NOTURNO do plantão: run DIÁRIO às 21:00 (America/Sao_Paulo).
+#
+# 21h = fim do dia operacional (fecha o plantão), BEM longe dos outros crons: 03h (backup +
+# resources-sync) e 04h (cadastro-sync). Só LEITURA de log (contagens) — não bate na Extranet,
+# não pega advisory lock, custo ínfimo. Manda o resumo via hook de ops (hoje = log de alta
+# visibilidade 'plantao.resumo'; alert:true quando algo destoa).
+#
+# Instalar no HOST (crontab do root) — idempotente:
+#   ( crontab -l 2>/dev/null | grep -v 'plantao-noturno'; \
+#     grep -vE '^\s*#' /apps/lead-manager/deploy/crontab.plantao.txt ) | crontab -
+#
+# Conferir:  crontab -l | grep plantao-noturno
+# Log:       /var/log/plantao.log   (grep 'plantao.resumo' — alert:true = precisa de olho)
+CRON_TZ=America/Sao_Paulo
+0 21 * * * docker exec adr-lead-manager node /app/src/jobs/plantao-noturno.js >> /var/log/plantao.log 2>&1
