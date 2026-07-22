@@ -14,7 +14,14 @@
 //
 const CADASTRO_SOURCE = 'extranet';
 const PERIODICIDADES = new Set(['mensal', 'trimestral', 'semestral', 'anual', 'outro']);
-const _iso = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? String(s) : null);
+// rejeita data-zero ("0000-00-00" e variantes com componente 00) — passa na regex mas estoura
+// no ::date. Zero em ano/mês/dia → null (contrato entra com vigência nula, não quebra o cron).
+const _iso = (s) => {
+  const v = String(s || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const [y, m, d] = v.split('-').map(Number);
+  return (y && m && d) ? v : null;
+};
 
 // Pessoa por external_ref; cria BARE se não existir (campos vêm pelo _syncPersonField). {id, novo}.
 async function _person(c, tid, type, extId) {

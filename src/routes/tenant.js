@@ -2523,7 +2523,15 @@ router.post('/:tenantId/rockhour/classify-genres', authenticate, requireTenantAc
 const CADASTRO_SOURCE = 'extranet';
 const PERIODICIDADES = new Set(['mensal', 'trimestral', 'semestral', 'anual', 'outro']);
 const PAYER_RELATIONS = new Set(['self_paid', 'financially_dependent']);
-const _isoDate = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? String(s) : null); // não-ISO → null (não quebra)
+// não-ISO → null. Rejeita DATA-ZERO ("0000-00-00" e variantes com componente 00): a fonte
+// (Extranet) manda 00/00/0000 → "0000-00-00" passa na regex mas estoura no cast ::date. Zero em
+// ano/mês/dia → null (o contrato entra com vigência nula, não quebra).
+const _isoDate = (s) => {
+  const v = String(s || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const [y, m, d] = v.split('-').map(Number);
+  return (y && m && d) ? v : null;
+};
 
 // upsert Pessoa por external_ref(person, type, id). Atualiza nome/nascimento/payer_relation
 // quando vierem (COALESCE — não apaga o que já existe). payerRelation opcional (só o backfill).
