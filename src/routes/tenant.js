@@ -2751,6 +2751,157 @@ router.post('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(W
   }
 });
 
+// ---------------------------------------------------------------------------
+// LEITURA do cadastro para a TELA (#10). GET lista (1 linha/contrato) + GET pessoa + PUT edição.
+// Cruza service_account → external_ref(contrato) → account_member(beneficiario/pagador) →
+// person(payer_relation/nascimento) → contact_point(whatsapp preferido, fallback cadastro).
+// ---------------------------------------------------------------------------
+
+// GET lista de contratos (uma linha por contrato). Cliente ordena/filtra; devolve tudo.
+router.get('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const contratos = await withTenant(req.tenantId, async (c) => (await c.query(
+      `SELECT
+         sa.id::text AS contrato_id, cref.external_id AS contrato_ref,
+         sa.servico_label, sa.plano_label, sa.periodicidade, sa.status,
+         sa.ini_vigencia, sa.fim_vigencia, sa.status_renovacao,
+         pb.id::text AS aluno_id, pb.display_name AS aluno_nome, pb.data_nascimento AS aluno_nasc,
+         pb.payer_relation,
+         pp.id::text AS titular_id, pp.display_name AS titular_nome,
+         cc.value_raw AS contato_whats, cc.tipo AS contato_tipo,
+         (sa.fim_vigencia >= CURRENT_DATE) AS ativo,
+         (pb.payer_relation='financially_dependent' AND sa.fim_vigencia >= CURRENT_DATE AND pp.id IS NULL) AS pend_sem_resp,
+         (pb.payer_relation='self_paid' AND pb.data_nascimento IS NOT NULL
+            AND pb.data_nascimento > (CURRENT_DATE - INTERVAL '18 years')) AS pend_crianca_selfpaid,
+         -- DIVERGÊNCIA: field_divergence ATIVO da pessoa (scraping ≠ edição humana; não dispensado)
+         EXISTS (SELECT 1 FROM lead_manager.field_divergence fd
+                  WHERE fd.entity_kind='person' AND fd.entity_id=pb.id
+                    AND fd.dismissed_value IS DISTINCT FROM fd.source_value) AS tem_divergencia,
+         (SELECT string_agg(fd.field, ', ' ORDER BY fd.field) FROM lead_manager.field_divergence fd
+                  WHERE fd.entity_kind='person' AND fd.entity_id=pb.id
+                    AND fd.dismissed_value IS DISTINCT FROM fd.source_value) AS divergencia_campos
+       FROM lead_manager.service_account sa
+       JOIN lead_manager.external_ref cref
+         ON cref.entity_id=sa.id AND cref.entity_kind='account' AND cref.external_type='contrato'
+       LEFT JOIN lead_manager.account_member amb ON amb.account_id=sa.id AND amb.bond='beneficiario'
+       LEFT JOIN lead_manager.person pb ON pb.id=amb.person_id
+       LEFT JOIN lead_manager.account_member amp ON amp.account_id=sa.id AND amp.bond='pagador'
+       LEFT JOIN lead_manager.person pp ON pp.id=amp.person_id
+       LEFT JOIN LATERAL (
+         SELECT value_raw, tipo FROM lead_manager.contact_point cp
+          WHERE cp.person_id = CASE WHEN pb.payer_relation='self_paid' THEN pb.id ELSE COALESCE(pp.id, pb.id) END
+            AND cp.kind='phone'
+          ORDER BY (cp.tipo='whatsapp') DESC, (cp.source IN ('whatsapp','conversa')) DESC, cp.created_at DESC
+          LIMIT 1) cc ON true
+       ORDER BY ativo DESC, sa.fim_vigencia DESC NULLS LAST, pb.display_name`,
+      [])).rows);
+    res.json({ contratos });
+  } catch (err) {
+    logger.error('cadastro.contratos.list.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao listar contratos' });
+  }
+});
+
+// GET detalhe de uma PESSOA (aluno ou responsável): dados + telefones + contratos + responsável.
+router.get('/:tenantId/cadastro/pessoas/:personId', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  const pid = String(req.params.personId);
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      const pessoa = (await c.query(
+        `SELECT id::text, display_name, data_nascimento, payer_relation FROM lead_manager.person WHERE id=$1`, [pid])).rows[0];
+      if (!pessoa) return null;
+      const telefones = (await c.query(
+        `SELECT value_raw, source, confidence, tipo FROM lead_manager.contact_point
+          WHERE person_id=$1 AND kind='phone' ORDER BY (tipo='whatsapp') DESC, created_at`, [pid])).rows;
+      // campos travados por humano (proveniência) — p/ a tela mostrar o cadeado
+      const travados = (await c.query(
+        `SELECT field FROM lead_manager.field_provenance WHERE entity_kind='person' AND entity_id=$1`, [pid])).rows.map((r) => r.field);
+      // contratos onde a pessoa é beneficiário OU pagador
+      const contratos = (await c.query(
+        `SELECT sa.id::text AS contrato_id, cref.external_id AS contrato_ref, am.bond,
+                sa.servico_label, sa.plano_label, sa.periodicidade, sa.status,
+                sa.ini_vigencia, sa.fim_vigencia, (sa.fim_vigencia >= CURRENT_DATE) AS ativo
+           FROM lead_manager.account_member am
+           JOIN lead_manager.service_account sa ON sa.id=am.account_id
+           JOIN lead_manager.external_ref cref
+             ON cref.entity_id=sa.id AND cref.entity_kind='account' AND cref.external_type='contrato'
+          WHERE am.person_id=$1
+          ORDER BY ativo DESC, sa.fim_vigencia DESC NULLS LAST`, [pid])).rows;
+      // responsável financeiro (pagador) dos contratos em que a pessoa é beneficiário
+      const responsavel = (await c.query(
+        `SELECT DISTINCT pp.id::text, pp.display_name,
+                (SELECT value_raw FROM lead_manager.contact_point cp WHERE cp.person_id=pp.id AND cp.kind='phone'
+                  ORDER BY (cp.tipo='whatsapp') DESC, cp.created_at DESC LIMIT 1) AS telefone
+           FROM lead_manager.account_member amb
+           JOIN lead_manager.account_member amp ON amp.account_id=amb.account_id AND amp.bond='pagador'
+           JOIN lead_manager.person pp ON pp.id=amp.person_id AND pp.id <> $1
+          WHERE amb.person_id=$1 AND amb.bond='beneficiario'`, [pid])).rows[0] || null;
+      // pendências da pessoa (mesma regra da lista, agregada)
+      const pend = (await c.query(
+        `SELECT
+           bool_or(pb.payer_relation='financially_dependent' AND sa.fim_vigencia >= CURRENT_DATE AND amp.person_id IS NULL) AS pend_sem_resp
+         FROM lead_manager.account_member amb
+         JOIN lead_manager.service_account sa ON sa.id=amb.account_id AND amb.bond='beneficiario'
+         JOIN lead_manager.person pb ON pb.id=amb.person_id
+         LEFT JOIN lead_manager.account_member amp ON amp.account_id=sa.id AND amp.bond='pagador'
+        WHERE amb.person_id=$1`, [pid])).rows[0] || {};
+      const crianca_selfpaid = pessoa.payer_relation === 'self_paid' && pessoa.data_nascimento
+        && new Date(pessoa.data_nascimento) > new Date(Date.now() - 18 * 365.25 * 864e5);
+      // divergências ATIVAS (scraping ≠ humano; não dispensadas) — p/ a tela destacar/resolver
+      const divergencias = (await c.query(
+        `SELECT field, human_value, source_value, source, last_seen FROM lead_manager.field_divergence
+          WHERE entity_kind='person' AND entity_id=$1 AND dismissed_value IS DISTINCT FROM source_value
+          ORDER BY field`, [pid])).rows;
+      return { pessoa, telefones, travados, contratos, responsavel, divergencias,
+        pendencias: { sem_responsavel: !!pend.pend_sem_resp, crianca_selfpaid: !!crianca_selfpaid } };
+    });
+    if (!out) return res.status(404).json({ error: 'pessoa não encontrada' });
+    res.json(out);
+  } catch (err) {
+    logger.error('cadastro.pessoa.get.error', { tenant_id: req.tenantId, person_id: pid, error: err.message });
+    res.status(500).json({ error: 'falha ao ler pessoa' });
+  }
+});
+
+// PUT edição manual de campos da pessoa. Correção normal (sem marca especial) + PROVENIÊNCIA:
+// cada campo editado chama marcar_edicao_humana (o humano TRAVA o campo contra o scraping).
+const _CAMPOS_EDITAVEIS = new Set(['display_name', 'data_nascimento', 'payer_relation']);
+router.put('/:tenantId/cadastro/pessoas/:personId', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const pid = String(req.params.personId);
+  const campos = (req.body && req.body.campos) || {};
+  const actor = (req.user && (req.user.sub || req.user.role)) || 'recepcao';
+  try {
+    const alterados = await withTenant(req.tenantId, async (c) => {
+      const atual = (await c.query(
+        `SELECT display_name, data_nascimento, payer_relation FROM lead_manager.person WHERE id=$1`, [pid])).rows[0];
+      if (!atual) return null;
+      const mudou = [];
+      for (const [campo, valorRaw] of Object.entries(campos)) {
+        if (!_CAMPOS_EDITAVEIS.has(campo)) continue;
+        if (campo === 'payer_relation' && !PAYER_RELATIONS.has(valorRaw)) continue;
+        const novo = valorRaw === '' ? null : valorRaw;
+        const antigoTxt = atual[campo] == null ? null : (campo === 'data_nascimento' ? _isoDate(atual[campo] instanceof Date ? atual[campo].toISOString().slice(0, 10) : String(atual[campo]).slice(0, 10)) : String(atual[campo]));
+        const novoTxt = novo == null ? null : String(novo);
+        if (novoTxt === antigoTxt) continue;                        // sem mudança → não trava
+        if (campo === 'data_nascimento') {
+          await c.query(`UPDATE lead_manager.person SET data_nascimento=$2::date, updated_at=now() WHERE id=$1`, [pid, novo]);
+        } else {
+          await c.query(`UPDATE lead_manager.person SET ${campo}=$2, updated_at=now() WHERE id=$1`, [pid, novo]);
+        }
+        // proveniência: o humano trava o campo (scraping não sobrescreve mais)
+        await c.query(`SELECT lead_manager.marcar_edicao_humana('person',$1,$2,$3,$4)`, [pid, campo, novoTxt, actor]);
+        mudou.push(campo);
+      }
+      return mudou;
+    });
+    if (alterados == null) return res.status(404).json({ error: 'pessoa não encontrada' });
+    res.json({ ok: true, alterados });
+  } catch (err) {
+    logger.error('cadastro.pessoa.put.error', { tenant_id: req.tenantId, person_id: pid, error: err.message });
+    res.status(500).json({ error: 'falha ao editar pessoa' });
+  }
+});
+
 // POST /tenant/:tenantId/cadastro/beneficiarios — BACKFILL de pessoas do cadastro-mestre.
 // Vocabulário ABSTRATO (beneficiário de serviço + responsável financeiro), sem termo de escola:
 // o adapter da fonte (Valinhos) traduz aluno→beneficiario, tpresp→payerRelation. Idempotente por
