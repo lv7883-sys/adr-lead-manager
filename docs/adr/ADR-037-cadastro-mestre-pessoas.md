@@ -192,3 +192,32 @@ Invariante: **um novo consumidor entra sem mudar o cadastro** (D15: um só cadas
 **Nota de unicidade:** `contact_point` **não tem UNIQUE** (só a PK e um índice **não-único** por dígitos) — o DB **já permite** 2+ telefones/pessoa com `tipo` distinto; a idempotência de hoje é só no app (`_upsertPhone`). Logo a coluna `tipo` entra **sem** mexer em unicidade. Um índice de idempotência por `(tenant, person, dígitos, tipo)` é hardening **opcional/futuro** (arriscado sobre dado existente com possíveis duplicados) — não entra nesta fatia.
 
 **Escopo desta fatia:** (i) esta emenda (spec: a–e + a dívida de f) e (ii) **uma migração aditiva** — `067` adiciona a coluna `tipo` em `contact_point` (nullable, backfill dos existentes = `cadastro`, pois todos vêm da Extranet/alegado). **Nenhuma mudança de comportamento do endpoint** — os fixes de ingestão (f) são dívida pós-backfill. Vocabulário e derivações (d/e) são spec para os consumidores. Reversível: `git revert` do código; a migração é aditiva/não-destrutiva (DROP COLUMN no rollback). `source`/`confidence`/`bond` já existiam (051/060); só o `tipo` é novo.
+
+## Emenda 2026-07-22 — Política de proveniência (humano vs scraping; proteção e divergência por campo)
+
+Estabelece o eixo **quem editou por último** — ortogonal ao eixo **de onde veio** (D5: `source`/`confidence`). D5 responde *"o número veio da Extranet ou de uma conversa?"*; esta emenda responde *"um humano travou este campo?"*. Motivada pelo cadastro virar **fonte viva sincronizada** (cron de scraping diário, molde ADR-026): sem proteção, o próximo scraping sobrescreveria a correção manual da recepção.
+
+**(a) TODO CAMPO EDITÁVEL TEM PROVENIÊNCIA POR CAMPO.** A granularidade é **o campo**, não o registro: numa mesma pessoa, `display_name` pode estar travado por humano enquanto `data_nascimento` segue livre pro scraping. Vale para **qualquer campo editável de qualquer tenant** — é mecanismo genérico (tabela + `field` como chave-texto), não regra de um campo.
+
+**(b) HUMANO TRAVA; SCRAPING NÃO SOBRESCREVE TRAVADO.** Quando um humano edita um campo pela tela, o campo fica **PROTEGIDO**. O scraping (cron futuro) **consulta a proveniência antes de escrever** e **pula** todo campo travado por humano — nunca sobrescreve. (Espelha D5 "nunca sobrescreve", agora para o eixo humano.)
+
+**(c) DIVERGÊNCIA VIRA ALERTA, NÃO SOBRESCRITA.** Se o scraping traz, para um campo travado, **valor diferente** do valor humano, ele **não escreve** e **registra um ALERTA DE DIVERGÊNCIA** (o campo protegido continua com o valor humano). O alerta guarda os dois valores (humano vs fonte) para a recepção decidir.
+
+**(d) DISPENSÁVEL, MAS REINCIDENTE.** A recepção pode **DISPENSAR** o alerta (silencia **aquela ocorrência**). Se um **novo scraping** traz o **mesmo** valor divergente, segue dispensado; se traz **valor divergente diferente**, o alerta **RESSURGE** (a dispensa vale para o valor que foi dispensado, não para a divergência eterna). Enquanto a fonte divergir, o alerta é **reincidente**.
+
+**(e) A FONTE CORRIGE → O ALERTA SOME SOZINHO.** Quando o scraping passa a trazer valor **igual** ao humano (a Extranet foi corrigida), a divergência deixa de existir e o alerta é **encerrado automaticamente** no próprio run — sem ação da recepção. Sem lixo acumulado.
+
+**(f) DESTRAVAR É EXPLÍCITO.** Só um humano remove a trava (ex.: botão "voltar a seguir a fonte" na tela) — o scraping **nunca** destrava sozinho. Destravado, o campo volta a aceitar a fonte no próximo run.
+
+**(g) FRONTEIRA — SÓ CAMPO EDITÁVEL.** Contrato (`service_account`/`account_member`) é **espelho puro** (060) — sem edição humana, sem proveniência; o sync de contratos ignora esta camada. A proveniência mora no sync de **pessoas/contatos** (`person`, `contact_point`), que é justamente o que a ingestão de contrato **já não toca** (contract-only).
+
+**(h) MECANISMO MÍNIMO (duas tabelas laterais esparsas, `field` como chave-texto).** Migração `070`, aditiva:
+- **`field_provenance`** (a trava) — PK `(tenant_id, entity_kind, entity_id, field)`; guarda `human_value`, `actor`, `locked_at`. **Linha existe ⇔ campo travado por humano.** Esparsa (só o tocado).
+- **`field_divergence`** (o alerta) — PK `(tenant_id, entity_kind, entity_id, field)`; guarda `human_value`, `source_value`, `source`, `first_seen`, `last_seen`, `dismissed_value` (o valor cuja dispensa vale). **Linha existe ⇔ há divergência viva**; **ATIVO** = `dismissed_value IS DISTINCT FROM source_value`.
+- `entity_kind` reusa o vocabulário do `external_ref` (`person`, `contact_point`, …); `field` é o nome da coluna. RLS `FORCE` idêntico ao 060; **zero coluna** nas tabelas de cadastro.
+
+**Três funções** (genéricas, tenant do `current_setting`): `marcar_edicao_humana(...)` grava a trava e resolve divergência pendente; `aplicar_scraping(...) → {ESCREVE|IGUAL|DIVERGE}` decide e gere o alerta (**não escreve a base — o chamador escreve quando `ESCREVE`**, como o `sync.js`); `dispensar_alerta(...)` silencia o valor atual. Ressurgir/sumir são automáticos no `aplicar_scraping` (valor novo → ativo; convergiu → deleta).
+
+**Como o scraping consulta:** 1 `SELECT` da trava no início da entidade (molde `sync.js` que carrega o estado num Map) + `aplicar_scraping` por campo; escreve a base só quando `ESCREVE`. Custo zero nos campos livres (o caso comum).
+
+**Não-objetivo:** histórico/auditoria completo de edições (N versões, quem/quando) — isso é `audit_log` (012), trilha própria. Esta emenda guarda só o **estado atual** da trava e da divergência (o mínimo para proteger + alertar). **Fundação sem tela nem cron:** a tela de alertas e o cron que chama `aplicar_scraping` vêm depois. Reversível: `git revert` do código; migração aditiva (`DROP TABLE`/`DROP FUNCTION` no rollback).
