@@ -269,7 +269,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     // BLOCO 1 — SLA / responsividade
     const respTimes = []; // segundos até 1ª resposta
     const respComercial = [], respFora = []; // split por horário comercial (1ª msg do lead)
-    let semResposta = 0, leadParou = 0, comInbound = 0;
+    let semResposta = 0, comInbound = 0;   // Fatia E: leadParou podado (pct_lead_parou morto)
     let em30 = 0, em2h = 0; // faixas de SLA: <=30min (verde), <=2h (verde+amarelo)
     // D1 — SLA honesto baseado em conversation_state: o denominador inclui os leads
     // que NUNCA respondemos e que SEGUEM esperando nós (AGUARDANDO_RECEPCAO). Esses
@@ -286,8 +286,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const slaSemana = new Map();  // SLA semanal — semana(segunda) -> { ate_30, ate_1h, ate_2h, acima_2h }
     const semRespostaLeads = []; // { id, name } — pro alerta com link direto
     const porRecep = new Map(); // sender -> { n, somaSeg, comTempo }
-    const leadsTabela = []; // linha por lead pra seção "Lista de leads"
-    const agora = Date.now();
+    const agora = Date.now();   // Fatia E: leadsTabela podado (leads_tabela morto, lista grande no payload)
     for (const l of rows) {
       const fin = l.first_in ? new Date(l.first_in).getTime() : null;
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
@@ -329,8 +328,6 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         if (dentroDoExpediente(horario, l.first_in)) respComercial.push(respSeg);
         else respFora.push(respSeg);
       }
-      // "respondemos mas o lead parou": última palavra foi nossa.
-      if (respondido && lout != null && (lin == null || lout > lin)) leadParou++;
       // ADR-021 — estado atual (só leads ativos): aguardando nós / silencioso 3d+.
       // EXPERIMENTAL_AGENDADA é estado "parado" (aula marcada) — sai dos buckets de
       // espera/silêncio: a última msg de cortesia do cliente NÃO reabre a espera.
@@ -372,16 +369,6 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       }
       // Tempo em aberto: respondido = tempo até a 1ª resposta; sem resposta = desde
       // a chegada (1º inbound, ou created_at se não houver) até agora.
-      const chegada = fin || new Date(l.created_at).getTime();
-      const abertoSeg = respondido ? respSeg : Math.max(0, (agora - chegada) / 1000);
-      leadsTabela.push({
-        id: l.id, name: l.name || 'Lead sem nome',
-        channel: l.channel || null, instrument: l.instrument || null,
-        status: l.status, temperatura: temperatura(l),
-        respondido, resposta_seg: respSeg == null ? null : round(respSeg, 0),
-        aberto_seg: round(abertoSeg, 0),
-        ultimo_contato_lead: l.last_in || null, // última msg DO lead (role USER)
-      });
     }
     respTimes.sort((a, b) => a - b);
     // D1 — universo único do SLA: respondidos + esperando-nós-sem-resposta (fora-da-meta).
@@ -553,7 +540,6 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
 
     return {
       period, channel: channel || null, total_leads: totalLeads,
-      leads_tabela: leadsTabela,
       engajamento,
       bloco_sla_semanal,
       bloco1_sla: {
@@ -567,13 +553,10 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         sla_universo: slaDenom,
         sla_backlog_sem_resposta: slaBacklog,
         sla_meta_min: 30,
-        pct_em_30min: slaDenom ? round((em30 / slaDenom) * 100) : null,         // verde
-        pct_30min_2h: slaDenom ? round(((em2h - em30) / slaDenom) * 100) : null, // amarelo
-        pct_acima_2h: slaDenom ? round(((slaDenom - em2h) / slaDenom) * 100) : null, // vermelho (inclui sem-resposta)
+        pct_em_30min: slaDenom ? round((em30 / slaDenom) * 100) : null,         // verde (Fatia E: faixas amarelo/vermelho pct_30min_2h/pct_acima_2h podadas — não renderizadas)
         pct_sem_resposta: comInbound ? round((semResposta / comInbound) * 100) : null,
         sem_resposta_n: semResposta,
         sem_resposta_leads: semRespostaLeads,
-        pct_lead_parou: comInbound ? round((leadParou / comInbound) * 100) : null,
         seg_rascunho_ate_decisao: appr.seg_ate_decisao != null ? round(Number(appr.seg_ate_decisao), 0) : null,
         taxa_edicao_global: decididos ? round((editados / decididos) * 100) : null,
         // ADR-021 — BLOCO A (estado AGORA) + BLOCO C (silenciosos).
@@ -680,11 +663,14 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
       await c.query(
         `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS mes,
                 count(*) AS leads,
+                -- Fatia E: "agendada" usa EXPERIMENTAL_AGENDADA (status que SIGNIFICA aula marcada),
+                -- não mais QUALIFIED (qualificado ≠ agendou). Proxy mais fiel; o link à agenda real
+                -- do Scheduler fica pro diagnóstico de estágios (EXPERIMENTAL_AGENDADA é subusado).
                 count(*) FILTER (
-                  WHERE intent = 'SCHEDULE_INTEREST' OR status = 'QUALIFIED' OR desfecho = 'nao_compareceu_aula'
+                  WHERE intent = 'SCHEDULE_INTEREST' OR status = 'EXPERIMENTAL_AGENDADA' OR desfecho = 'nao_compareceu_aula'
                 ) AS agendadas,
                 count(*) FILTER (
-                  WHERE (intent = 'SCHEDULE_INTEREST' OR status = 'QUALIFIED' OR desfecho = 'nao_compareceu_aula')
+                  WHERE (intent = 'SCHEDULE_INTEREST' OR status = 'EXPERIMENTAL_AGENDADA' OR desfecho = 'nao_compareceu_aula')
                     AND desfecho IS NOT NULL AND desfecho <> 'nao_compareceu_aula'
                 ) AS realizadas,
                 count(*) FILTER (WHERE desfecho = 'matriculado') AS matriculas
