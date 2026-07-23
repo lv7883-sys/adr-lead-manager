@@ -619,6 +619,11 @@ router.get(
   async (req, res) => {
     try {
       const result = await withTenant(req.tenantId, async (c) => {
+        // ADR-028 — N de dormência (config por tenant; default 7). Lido ANTES da lista
+        // porque a derivação do ciclo (#8, emenda ADR-027) usa o N como corte da retomada.
+        const dorm = (await c.query(
+          'SELECT dormancy_days, reactivation_expiry_days FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
+        const dormancyDays = Number.isInteger(dorm?.dormancy_days) && dorm.dormancy_days > 0 ? dorm.dormancy_days : 7;
         const leads = (
           await c.query(
             `SELECT l.id, l.name, l.phone, l.status, l.intent, l.temperatura_manual,
@@ -626,18 +631,21 @@ router.get(
                     l.suggested_stage, l.stage_reasoning, l.stage_suggested_at,
                     -- Card compartilhado (recep-decisao) na Reativação: resumo cacheado + 1ª msg.
                     l.classification_reasoning AS reasoning, l.classification_confidence AS confidence,
-                    -- ADR-027 Reativação Etapa 1 — rastros do CICLO (derivado na leitura, sem status marcado):
-                    -- última retomada ENVIADA (não conta 'pendente'/'ignorado'), se reengajou depois, e se há sugestão pronta.
-                    (SELECT max(rt.enviado_em) FROM reabordagem_tentativas rt
-                       WHERE rt.lead_id = l.id AND rt.status = 'enviado') AS retomada_enviado_em,
+                    -- ADR-027 Reativação Etapa 1 — rastros do CICLO (derivado na leitura, sem status marcado).
+                    -- EMENDA #8 (Opção B): retomada DERIVADA DO LOG REAL DE ENVIO (staff_outbound_samples,
+                    -- via LATERAL rtm abaixo), NÃO de reabordagem_tentativas — que a recepção alimenta pelo
+                    -- /approve (nunca gravava 'enviado'). retomada_enviado_em = saída nossa após silêncio
+                    -- >= dormancy_days do inbound anterior; reengajou = inbound do lead APÓS essa retomada.
+                    -- Captura /approve E enviar-retomada, é retroativo, e conserta o bug do reengajou
+                    -- (que comparava contra um enviado_em sempre NULL). retomada_sugestao_pendente segue
+                    -- lendo reabordagem_tentativas (é a fila de sugestão, não a fonte do "foi enviado").
+                    rtm.retomada_em AS retomada_enviado_em,
                     EXISTS (SELECT 1 FROM reabordagem_tentativas rt
                              WHERE rt.lead_id = l.id AND rt.status = 'pendente') AS retomada_sugestao_pendente,
-                    EXISTS (SELECT 1 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-                             WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
-                                 = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
-                               AND m.role = 'USER'
-                               AND m.received_at > (SELECT max(rt.enviado_em) FROM reabordagem_tentativas rt
-                                                     WHERE rt.lead_id = l.id AND rt.status = 'enviado')) AS retomada_reengajou,
+                    (rtm.retomada_em IS NOT NULL AND EXISTS (
+                       SELECT 1 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                        WHERE cv.external_id = l.phone AND m.role = 'USER'
+                          AND m.received_at > rtm.retomada_em)) AS retomada_reengajou,
                     (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
                       WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
                           = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
@@ -707,9 +715,25 @@ router.get(
                           = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')) AS ts_out
                FROM leads l
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
+               -- EMENDA #8 (Opção B): retomada = última saída nossa cuja lacuna desde o inbound
+               -- ANTERIOR (o mais recente antes dela) é >= dormancy_days ($1). Sem inbound anterior
+               -- (subquery NULL) a comparação é NULL → não conta como retomada (evita falso-positivo
+               -- de 1º contato/resposta same-day). Corte por-tenant, sem hardcode.
+               LEFT JOIN LATERAL (
+                 SELECT max(s.received_at) AS retomada_em
+                   FROM staff_outbound_samples s
+                  WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
+                      = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
+                    AND (SELECT max(m.received_at) FROM messages m
+                           JOIN conversations cv ON cv.id = m.conversation_id
+                          WHERE cv.external_id = l.phone AND m.role = 'USER'
+                            AND m.received_at < s.received_at)
+                        <= s.received_at - make_interval(days => $1::int)
+               ) rtm ON true
               WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
               ORDER BY l.created_at DESC
-              LIMIT 1000`
+              LIMIT 1000`,
+            [dormancyDays]
           )
         ).rows;
         // P5 — classifica engajamento do cliente por lead (e remove os arrays crus).
@@ -731,11 +755,9 @@ router.get(
             `SELECT count(*)::int AS n FROM leads WHERE review_queue = true AND review_result IS NULL AND status = 'REVIEW_QUEUE'`
           )
         ).rows[0].n;
-        // ADR-028 — N de dormência (config por tenant; default 7). O dashboard usa p/
-        // definir "lead ativo" (única fonte do N), nunca constante no código.
-        const dorm = (await c.query(
-          'SELECT dormancy_days, reactivation_expiry_days FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
-        return { leads, pendingTotal, reviewTotal, dormancyDays: dorm?.dormancy_days ?? 7, reactivationExpiryDays: dorm?.reactivation_expiry_days ?? 45 };
+        // dormancyDays já resolvido no topo (usado no corte da retomada). reactivation_expiry_days
+        // (ADR-027: dias até "Perdido") vem do mesmo fetch.
+        return { leads, pendingTotal, reviewTotal, dormancyDays, reactivationExpiryDays: dorm?.reactivation_expiry_days ?? 45 };
       });
       res.json({
         tenant_id: req.tenantId,
