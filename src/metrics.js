@@ -236,26 +236,28 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const dormRow = (await c.query(
       'SELECT dormancy_days FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
     const dormancyDays = Number.isInteger(dormRow?.dormancy_days) && dormRow.dormancy_days > 0 ? dormRow.dormancy_days : 7;
+    // Params: $1=days, $2=dormancyDays. RLS já isola o tenant (não passamos tenantId — se
+    // passássemos sem usar, o PG erra "could not determine data type of parameter").
     const reab = (
       await c.query(
         `SELECT
            count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL
-                              AND rtm.retomada_em >= now() - ($2 || ' days')::interval)::int AS total,
+                              AND rtm.retomada_em >= now() - ($1 || ' days')::interval)::int AS total,
            count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL
-                              AND rtm.retomada_em >= now() - ($2 || ' days')::interval
+                              AND rtm.retomada_em >= now() - ($1 || ' days')::interval
                               AND ${reengajouExists('rtm.retomada_em')})::int AS responderam
            FROM leads l
-           ${retomadaLateral('$3')}
+           ${retomadaLateral('$2')}
           WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')`,
-        [tenantId, days, dormancyDays]
+        [days, dormancyDays]
       )
     ).rows[0];
     // Leads com retomada REAL (derivada de staff_outbound), pro % de silenciosos reabordados.
     const reabIds = new Set(
       (await c.query(
-        `SELECT l.id FROM leads l ${retomadaLateral('$2')}
+        `SELECT l.id FROM leads l ${retomadaLateral('$1')}
           WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE') AND rtm.retomada_em IS NOT NULL`,
-        [tenantId, dormancyDays]))
+        [dormancyDays]))
         .rows.map((r) => r.id)
     );
 
