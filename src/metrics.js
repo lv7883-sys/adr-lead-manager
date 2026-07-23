@@ -8,6 +8,10 @@ const { withTenant } = require('./db');
 const { dentroDoExpediente, normaliza, minToHm } = require('./horario');
 const { retomadaLateral, reengajouExists } = require('./reativacao');   // #8 Fatia B: fonte única da retomada
 const { terminalSql, isTerminal, isConvertido } = require('./lifecycle');   // Fatia A: régua canônica lead ativo/convertido
+// Passo 1 — régua canônica de estágios (fonte única; substitui kanbanColuna/_ETAPAS_TRABALHO/
+// KANBAN_TRANSICOES/PERDIDO_DESFECHOS locais e o OR-proxy inline do computeFunil).
+const stages = require('./stages');
+const { stageKey, funilBucketSql } = stages;
 
 const PERIODS = { '1d': 1, '7d': 7, '30d': 30, '90d': 90 };
 
@@ -663,17 +667,13 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
       await c.query(
         `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS mes,
                 count(*) AS leads,
-                -- Fatia E: "agendada" usa EXPERIMENTAL_AGENDADA (status que SIGNIFICA aula marcada),
-                -- não mais QUALIFIED (qualificado ≠ agendou). Proxy mais fiel; o link à agenda real
-                -- do Scheduler fica pro diagnóstico de estágios (EXPERIMENTAL_AGENDADA é subusado).
-                count(*) FILTER (
-                  WHERE intent = 'SCHEDULE_INTEREST' OR status = 'EXPERIMENTAL_AGENDADA' OR desfecho = 'nao_compareceu_aula'
-                ) AS agendadas,
-                count(*) FILTER (
-                  WHERE (intent = 'SCHEDULE_INTEREST' OR status = 'EXPERIMENTAL_AGENDADA' OR desfecho = 'nao_compareceu_aula')
-                    AND desfecho IS NOT NULL AND desfecho <> 'nao_compareceu_aula'
-                ) AS realizadas,
-                count(*) FILTER (WHERE desfecho = 'matriculado') AS matriculas
+                -- Passo 1: buckets do funil vêm da régua canônica (stages.funilBucketSql), com a
+                -- precedência FATO>IA>PROXY. Hoje só o proxy da Fatia E está ligado → SQL idêntico
+                -- ao anterior ("agendada"=EXPERIMENTAL_AGENDADA/intent/no-show; "realizada"=proxy
+                -- negativo). Trocar por FATO (Extranet) no Passo 2 é mexer só em stages.js.
+                count(*) FILTER (WHERE ${funilBucketSql('experimental')}) AS agendadas,
+                count(*) FILTER (WHERE ${funilBucketSql('realizada')}) AS realizadas,
+                count(*) FILTER (WHERE ${funilBucketSql('convertido')}) AS matriculas
            FROM leads
           WHERE created_at >= $1::date AND created_at < $2::date
             AND status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
@@ -937,34 +937,13 @@ async function computePainel(tenantId) {
 // --- ADR-010 — Kanban do ciclo de vida -------------------------------------
 const KANBAN_PERIODS = { '30d': 30, '90d': 90 };
 // Desfechos de "perda" (não-matrícula). 'nao_e_lead' NÃO entra (é spam/interno).
-const PERDIDO_DESFECHOS = [
-  'nao_matriculado_preco', 'nao_matriculado_horario', 'nao_matriculado_concorrente',
-  'nao_matriculado_desistiu', 'nao_compareceu_aula', 'outro',
-];
-// Coluna do kanban a partir de status + desfecho (modelo ADR-011: desfecho dirige
-// o desfecho final; PERDIDO preserva o status — NÃO vira NOT_LEAD).
-function kanbanColuna(status, desfecho) {
-  if (PERDIDO_DESFECHOS.includes(desfecho)) return 'perdido';
-  if (desfecho === 'matriculado' || status === 'CONVERTED') return 'convertido';
-  if (status === 'NEW') return 'novo';
-  if (status === 'EXPERIMENTAL_AGENDADA') return 'experimental';
-  if (status === 'QUALIFIED') return 'qualificado';
-  return 'qualificando';
-}
-// Transições permitidas (origem -> destinos). Política PERMISSIVA (recall-first):
-// full mesh entre as 5 etapas de trabalho — qualquer etapa vai pra qualquer outra,
-// incluindo voltar (qualificado→qualificando) e reativar (convertido/perdido → etapa
-// anterior). 'novo' é intake: é origem possível, mas NÃO é destino de arrasto.
-// A fricção do Matriculado (confirmar saída de convertido) fica no front.
-const _ETAPAS_TRABALHO = ['qualificando', 'qualificado', 'experimental', 'convertido', 'perdido'];
-const KANBAN_TRANSICOES = {
-  novo: [..._ETAPAS_TRABALHO],
-  qualificando: _ETAPAS_TRABALHO.filter((c) => c !== 'qualificando'),
-  qualificado: _ETAPAS_TRABALHO.filter((c) => c !== 'qualificado'),
-  experimental: _ETAPAS_TRABALHO.filter((c) => c !== 'experimental'),
-  convertido: _ETAPAS_TRABALHO.filter((c) => c !== 'convertido'),
-  perdido: _ETAPAS_TRABALHO.filter((c) => c !== 'perdido'),
-};
+// Passo 1: PERDIDO_DESFECHOS / kanbanColuna / KANBAN_TRANSICOES agora vêm da régua canônica
+// (stages.js). Mantidos aqui como reexport/porta fina p/ não quebrar os importadores existentes
+// (tenant.js, engine.js, sweep-stage-suggestion.js) — mesma assinatura, uma só fonte.
+const { PERDIDO_DESFECHOS, KANBAN_TRANSICOES } = stages;
+// Coluna do kanban a partir de status + desfecho (modelo ADR-011: desfecho dirige o desfecho
+// final; PERDIDO preserva o status — NÃO vira NOT_LEAD). Delegado a stages.stageKey.
+const kanbanColuna = stageKey;
 
 async function computeKanban(tenantId, { period = '30d' } = {}) {
   const days = KANBAN_PERIODS[period] || 30;

@@ -20,6 +20,7 @@ const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
 const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, PERIODS, classificarEngajamento } = require('../metrics');   // G: dashboard de gestão
+const stages = require('../stages');   // Passo 1: régua canônica de estágios (fonte única servida ao dashboard)
 const { generateDraftForLead, classificarSaida, _isTransientAIError, loadRealHistory } = require('../engine');   // Bloco 2: rascunho; ADR-030: saída; _isTransientAIError: resiliência 503; loadRealHistory: histórico completo p/ o Melhorar
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
@@ -146,7 +147,10 @@ router.get(
 router.get('/:tenantId/leads/kanban', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   const period = ['30d', '90d'].includes(String(req.query.period)) ? String(req.query.period) : '30d';
   try {
-    res.json(await computeKanban(req.tenantId, { period }));
+    // Passo 1: além das colunas, serve o CATÁLOGO da régua canônica (labels/emoji/dica/transições/
+    // motivos) pro dashboard CONSUMIR em vez de espelhar. Aditivo — os consumidores atuais leem
+    // k.novo/k.qualificando/… e seguem intactos.
+    res.json({ ...(await computeKanban(req.tenantId, { period })), catalog: stages.stageCatalog() });
   } catch (err) {
     logger.error('tenant.kanban.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
@@ -155,10 +159,11 @@ router.get('/:tenantId/leads/kanban', authenticate, requireTenantAccess(READ_ROL
 
 // PUT /tenant/:tid/leads/:id/mover-kanban — body { destino, desfecho? }. Valida a
 // transição e atualiza status/desfecho (PERDIDO preserva o status — só grava desfecho).
-const _KANBAN_DEST_COL = { QUALIFYING: 'qualificando', QUALIFIED: 'qualificado', EXPERIMENTAL_AGENDADA: 'experimental', CONVERTED: 'convertido', PERDIDO: 'perdido' };
-// stages.js (dashboard) manda `destino` como STATUS; o inverso (key da coluna → status)
-// é usado quando o destino já vem como key da etapa (ex.: confirmar sugestão da IA).
-const _COL_TO_STATUS = Object.fromEntries(Object.entries(_KANBAN_DEST_COL).map(([s, k]) => [k, s]));
+// Passo 1: de-para status↔coluna vem da régua canônica (stages.js), não mais hardcoded aqui.
+// `destino` chega como STATUS (STATUS_TO_KEY); o inverso (key→status) é usado quando o destino já
+// vem como key da etapa (ex.: confirmar sugestão da IA).
+const _KANBAN_DEST_COL = stages.STATUS_TO_KEY;
+const _COL_TO_STATUS = stages.KEY_TO_STATUS;
 
 // Move um lead pela mesma lógica do drag/dropdown — FONTE ÚNICA de movimentação de etapa
 // (mover-kanban E confirmação de sugestão da IA caem aqui). Roda dentro de uma transação
@@ -1007,6 +1012,9 @@ router.get(
           desfecho: l.desfecho,
           desfecho_notas: l.desfecho_notas,
           desfecho_em: l.desfecho_em,
+          // Passo 1: estágio canônico já resolvido no LM (fonte única) — o dashboard consome em vez
+          // de re-derivar com colunaDeLead (status+desfecho). Aditivo.
+          stage: stages.stageOfLead(l),
           desfecho_source: l.desfecho_source,
           desfecho_motivo: l.desfecho_motivo,
           desfecho_catalog: data.desfechoCatalog,
