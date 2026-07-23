@@ -1588,6 +1588,14 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     }
 
     // MODO OBSERVAÇÃO: não envia; cria aprovação pendente.
+    // Fatia D — DEDUP: arquiva o PENDING anterior do lead ANTES de inserir o novo (rascunho mais
+    // fresco). Nunca 2 PENDING vivos pro mesmo lead. A recepção já via só o mais recente
+    // (decidePending ORDER BY created_at DESC LIMIT 1); isto estanca o acúmulo (era 427 p/ 102
+    // leads). Mesma transação (c) → atômico. Espelha o dedup que o generateDraftForLead já faz.
+    await c.query(
+      "UPDATE pending_approvals SET status = 'ARCHIVED' WHERE tenant_id = $1 AND lead_id = $2 AND status = 'PENDING'",
+      [tenantId, ctx.leadId]
+    );
     const pa = await c.query(
       `INSERT INTO pending_approvals
          (tenant_id, lead_id, conversation_id, suggested_response, status)
