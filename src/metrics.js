@@ -936,6 +936,10 @@ async function computePainel(tenantId) {
 
 // --- ADR-010 — Kanban do ciclo de vida -------------------------------------
 const KANBAN_PERIODS = { '30d': 30, '90d': 90 };
+// Período DEFAULT do Kanban (a janela que a tela abre e que o badge de sugestões deve espelhar —
+// fatia (b): badge == cards à vista no landing). FONTE ÚNICA: computeKanban e o count do badge
+// (tenant.js) leem daqui. Mudar aqui move os dois juntos.
+const KANBAN_DEFAULT_PERIOD = '30d';
 // Desfechos de "perda" (não-matrícula). 'nao_e_lead' NÃO entra (é spam/interno).
 // Passo 1: PERDIDO_DESFECHOS / kanbanColuna / KANBAN_TRANSICOES agora vêm da régua canônica
 // (stages.js). Mantidos aqui como reexport/porta fina p/ não quebrar os importadores existentes
@@ -945,8 +949,8 @@ const { PERDIDO_DESFECHOS, KANBAN_TRANSICOES } = stages;
 // final; PERDIDO preserva o status — NÃO vira NOT_LEAD). Delegado a stages.stageKey.
 const kanbanColuna = stageKey;
 
-async function computeKanban(tenantId, { period = '30d' } = {}) {
-  const days = KANBAN_PERIODS[period] || 30;
+async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) {
+  const days = KANBAN_PERIODS[period] || KANBAN_PERIODS[KANBAN_DEFAULT_PERIOD];
   return withTenant(tenantId, async (c) => {
     const rows = (
       await c.query(
@@ -1025,7 +1029,7 @@ async function computeKanban(tenantId, { period = '30d' } = {}) {
 
 module.exports = {
   computeMetrics, computeFunil, computePainel, computeKanban,
-  kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS,
+  kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, KANBAN_PERIODS, KANBAN_DEFAULT_PERIOD,
   resolveFunilRange, percentile, temperatura, spHourDow, PERIODS,
   classificarEngajamento,
 };

@@ -135,6 +135,30 @@ function detectSql(stage, alias = 'l') {
 // alias '' (default aqui) = colunas cruas, como no computeFunil (FROM leads sem alias).
 function funilBucketSql(key, alias = '') { return detectSql(_byKey[key], alias); }
 
+// ---- sugestão de etapa da IA (fatia (b)) --------------------------------------------------------
+// Sugestão ATIVA (acionável): há suggested_stage, o lead NÃO é terminal (não descartado/terminal),
+// e a sugestão não é a etapa ATUAL nem a que a recepção já dispensou. É o universo do badge do kanban
+// (item 2) e do que a recepção confirma. FONTE ÚNICA — o count do /leads, a limpeza e o itest usam a
+// MESMA régua. `terminalParaSugestaoSql` é a condição que faz a sugestão virar órfã (limpeza + raiz).
+function terminalParaSugestaoSql(a = 'l') {
+  return `(${a}.status IN ('NOT_LEAD', 'REVIEW_QUEUE') OR ${a}.desfecho IS NOT NULL)`;
+}
+function sugestaoAtivaSql(a = 'l') {
+  return `${a}.suggested_stage IS NOT NULL
+    AND NOT ${terminalParaSugestaoSql(a)}
+    AND ${a}.suggested_stage <> (${stageSql(a)})
+    AND (${a}.suggested_stage_dismissed IS NULL OR ${a}.suggested_stage <> ${a}.suggested_stage_dismissed)`;
+}
+// Gêmeo JS (itest prova SQL≡JS).
+function isSugestaoAtiva(l) {
+  if (!l || !l.suggested_stage) return false;
+  const s = String(l.status || '').toUpperCase();
+  if (['NOT_LEAD', 'REVIEW_QUEUE'].includes(s) || l.desfecho != null) return false;
+  if (l.suggested_stage === stageOfLead(l)) return false;
+  if (l.suggested_stage_dismissed && l.suggested_stage === l.suggested_stage_dismissed) return false;
+  return true;
+}
+
 // ---- catálogo servido ao dashboard (o dashboard CONSOME isto; não espelha) ----------------------
 // Só apresentação/estrutura — sem funções (serializável em JSON). Uma fonte, servida na API.
 function stageCatalog() {
@@ -170,4 +194,5 @@ module.exports = {
   PERDIDO_DESFECHOS, MOTIVOS_PERDA, KANBAN_TRANSICOES, KEY_TO_STATUS, STATUS_TO_KEY,
   stageKey, stageOfLead, isStage, stageSql,
   detectSql, funilBucketSql, stageCatalog, loadStages,
+  terminalParaSugestaoSql, sugestaoAtivaSql, isSugestaoAtiva,
 };

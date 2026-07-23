@@ -19,7 +19,9 @@ const meta = require('../meta');              // E6: envio outbound via Messenge
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
-const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, PERIODS, classificarEngajamento } = require('../metrics');   // G: dashboard de gestão
+const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, KANBAN_PERIODS, KANBAN_DEFAULT_PERIOD, PERIODS, classificarEngajamento } = require('../metrics');   // G: dashboard de gestão
+// fatia (b): dias da janela DEFAULT do Kanban — o badge de sugestões conta no MESMO período (badge == cards à vista).
+const KANBAN_BADGE_DAYS = KANBAN_PERIODS[KANBAN_DEFAULT_PERIOD];
 const stages = require('../stages');   // Passo 1: régua canônica de estágios (fonte única servida ao dashboard)
 const { generateDraftForLead, classificarSaida, _isTransientAIError, loadRealHistory } = require('../engine');   // Bloco 2: rascunho; ADR-030: saída; _isTransientAIError: resiliência 503; loadRealHistory: histórico completo p/ o Melhorar
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
@@ -169,12 +171,22 @@ const _COL_TO_STATUS = stages.KEY_TO_STATUS;
 // (mover-kanban E confirmação de sugestão da IA caem aqui). Roda dentro de uma transação
 // `withTenant` (recebe o client `c`). `conteudoEtapa` permite sobrescrever a descrição do
 // evento (ex.: "sugestão da IA confirmada"). Retorna {row, origem} | {notFound} | {invalid}.
+// Anula a sugestão de etapa PENDENTE de um lead (fatia (b) — raiz). Chamada em TODA transição
+// terminal/descarte (não só no mover), senão a sugestão fantasma volta a acumular (os 46 órfãos).
+// Preserva suggested_stage_dismissed. No-op se não há sugestão.
+async function _limparSugestaoEtapa(c, id) {
+  await c.query(
+    'UPDATE leads SET suggested_stage = NULL, stage_reasoning = NULL, stage_suggested_at = NULL WHERE id = $1 AND suggested_stage IS NOT NULL',
+    [id]);
+}
+
 async function _aplicarMoverEtapa(c, { tenantId, id, destCol, desfecho, autor, nota, conteudoEtapa, limparSugestao }) {
   const lead = (await c.query('SELECT status, desfecho FROM leads WHERE id = $1', [id])).rows[0];
   if (!lead) return { notFound: true };
   const origem = kanbanColuna(lead.status, lead.desfecho);
   if (!(KANBAN_TRANSICOES[origem] || []).includes(destCol)) return { invalid: true, origem };
   let r;
+  let eventoId = null;   // fatia (b): id do evento de mudança (p/ o Undo da confirmação removê-lo)
   // Destinos NÃO-terminais limpam o desfecho (e desfecho_em): reativar um lead
   // convertido/perdido tem de tirar o 'matriculado'/desfecho de perda, senão
   // kanbanColuna() re-deriva a coluna terminal e o card "volta" sozinho.
@@ -189,11 +201,11 @@ async function _aplicarMoverEtapa(c, { tenantId, id, destCol, desfecho, autor, n
     const conteudo = conteudoEtapa || (['convertido', 'perdido'].includes(origem)
       ? `reativado de ${origem}${lead.desfecho ? ` [${lead.desfecho}]` : ''} → ${destCol}`
       : (destCol === 'perdido' ? `${origem} → perdido [${desfecho}]` : `${origem} → ${destCol}`));
-    await c.query(
+    eventoId = (await c.query(
       `INSERT INTO lead_eventos (tenant_id, lead_id, tipo, autor, conteudo, etapa_key)
-       VALUES ($1, $2, 'mudanca_etapa', $3, $4, $5)`,
+       VALUES ($1, $2, 'mudanca_etapa', $3, $4, $5) RETURNING id`,
       [tenantId, id, autor || null, conteudo, destCol]
-    );
+    )).rows[0].id;
   }
   // Anotação opcional junto da mudança (o botão "Registrar" pode mandar as duas).
   if (nota) {
@@ -203,11 +215,8 @@ async function _aplicarMoverEtapa(c, { tenantId, id, destCol, desfecho, autor, n
     );
   }
   // Mover (por qualquer via) zera a sugestão de etapa pendente — ela já foi resolvida.
-  if (limparSugestao) {
-    await c.query(
-      'UPDATE leads SET suggested_stage = NULL, stage_reasoning = NULL, stage_suggested_at = NULL WHERE id = $1', [id]);
-  }
-  return { row: r.rows[0], origem };
+  if (limparSugestao) await _limparSugestaoEtapa(c, id);
+  return { row: r.rows[0], origem, eventoId };
 }
 
 router.put('/:tenantId/leads/:id/mover-kanban', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
@@ -243,7 +252,10 @@ router.post('/:tenantId/leads/:id/sugestao-etapa/confirmar', authenticate, requi
   if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
   try {
     const out = await withTenant(req.tenantId, async (c) => {
-      const lead = (await c.query('SELECT suggested_stage FROM leads WHERE id = $1', [id])).rows[0];
+      // SNAPSHOT do estado ANTES de mover (fatia (b): Undo restaura EXATO — status/desfecho + a própria
+      // sugestão + o evento logado). Reusa o toast compartilhado da Fatia F via restore_path próprio.
+      const lead = (await c.query(
+        'SELECT status, desfecho, desfecho_em, suggested_stage, stage_reasoning, stage_suggested_at FROM leads WHERE id = $1', [id])).rows[0];
       if (!lead) return { notFound: true };
       const destCol = lead.suggested_stage;
       if (!destCol || !_COL_TO_STATUS[destCol]) return { semSugestao: true };
@@ -251,13 +263,20 @@ router.post('/:tenantId/leads/:id/sugestao-etapa/confirmar', authenticate, requi
       const r = await _aplicarMoverEtapa(c, {
         tenantId: req.tenantId, id, destCol, autor: req.tenantRole, conteudoEtapa: conteudo, limparSugestao: true,
       });
-      return { ...r, destCol };
+      if (r.invalid) return { ...r, destCol };
+      const snapshot = {
+        lead_id: id, kind: 'stage', restore_path: 'sugestao-etapa/restaurar', toast_msg: 'Etapa atualizada.',
+        prior: { status: lead.status, desfecho: lead.desfecho, desfecho_em: lead.desfecho_em },
+        suggested_stage: lead.suggested_stage, stage_reasoning: lead.stage_reasoning,
+        stage_suggested_at: lead.stage_suggested_at, evento_id: r.eventoId || null,
+      };
+      return { ...r, destCol, snapshot };
     });
     if (out.notFound) return res.status(404).json({ error: 'lead not found' });
     if (out.semSugestao) return res.status(409).json({ error: 'sem sugestão de etapa pendente' });
     if (out.invalid) return res.status(409).json({ error: `transição inválida (${out.origem} → ${out.destCol})` });
     logger.info('tenant.lead.sugestao_confirmada', { tenant_id: req.tenantId, lead_id: id, destino: out.destCol, by: req.tenantRole });
-    res.json({ ok: true, coluna: out.destCol, ...out.row });
+    res.json({ ok: true, coluna: out.destCol, snapshot: out.snapshot, ...out.row });
   } catch (err) {
     logger.error('tenant.lead.sugestao_confirmar_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
     res.status(500).json({ error: 'internal error' });
@@ -294,6 +313,39 @@ router.post('/:tenantId/leads/:id/sugestao-etapa/dispensar', authenticate, requi
     res.json({ ok: true });
   } catch (err) {
     logger.error('tenant.lead.sugestao_dispensar_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tid/leads/:id/sugestao-etapa/restaurar — UNDO da confirmação de sugestão (fatia (b)).
+// Recebe o `snapshot` que o /confirmar devolveu e restaura o estado EXATO: status/desfecho/desfecho_em
+// anteriores + a própria sugestão (suggested_stage/reasoning/at) + APAGA o evento 'mudanca_etapa' que
+// a confirmação logou. Reusa o toast compartilhado da Fatia F (só o restore_path é próprio). Sem mensagem.
+router.post('/:tenantId/leads/:id/sugestao-etapa/restaurar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  const snap = req.body?.snapshot;
+  if (!snap || snap.lead_id !== id || snap.kind !== 'stage' || !snap.prior) return res.status(400).json({ error: 'invalid snapshot' });
+  const p = snap.prior;
+  const eventoId = isUuid(snap.evento_id) ? snap.evento_id : null;
+  try {
+    const ok = await withTenant(req.tenantId, async (c) => {
+      const r = await c.query(
+        `UPDATE leads SET status = $2, desfecho = $3, desfecho_em = $4,
+                          suggested_stage = $5, stage_reasoning = $6, stage_suggested_at = $7, updated_at = now()
+          WHERE id = $1 RETURNING id`,
+        [id, p.status, p.desfecho ?? null, p.desfecho_em ?? null,
+          snap.suggested_stage ?? null, snap.stage_reasoning ?? null, snap.stage_suggested_at ?? null]);
+      if (!r.rowCount) return false;
+      // Remove o evento de mudança que a confirmação criou (restaura a timeline ao estado anterior).
+      if (eventoId) await c.query("DELETE FROM lead_eventos WHERE id = $1 AND lead_id = $2 AND tipo = 'mudanca_etapa'", [eventoId, id]);
+      return true;
+    });
+    if (!ok) return res.status(404).json({ error: 'lead not found' });
+    logger.info('tenant.lead.sugestao_restaurada', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error('tenant.lead.sugestao_restaurar_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
     res.status(500).json({ error: 'internal error' });
   }
 });
@@ -499,6 +551,7 @@ router.post('/:tenantId/unclassified/:id/ignore', authenticate, requireTenantAcc
         const r = await c.query("UPDATE leads SET review_result = 'confirmed_not_lead', review_em = now(), review_by = $2 WHERE id = $1 RETURNING id", [id, req.tenantRole]);
         if (!r.rows[0]) return false;
         await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole, { context: motivo });
+        await _limparSugestaoEtapa(c, id);   // fatia (b): descarte limpa a sugestão pendente (raiz)
         return true;
       }
       const r = await c.query("UPDATE messages SET discard_reason = 'ignored' WHERE id = $1 AND discarded = true RETURNING id", [id]);
@@ -529,6 +582,7 @@ router.post('/:tenantId/unclassified/:id/marcar-interno', authenticate, requireT
         if (!l || !l.phone) return false;
         phone = l.phone; defName = defName || l.name;
         await c.query("UPDATE leads SET status = 'NOT_LEAD', review_result = 'confirmed_not_lead', review_em = now(), review_by = $2 WHERE id = $1", [id, req.tenantRole]);
+        await _limparSugestaoEtapa(c, id);   // fatia (b): virar contato interno (terminal) limpa a sugestão
       } else {
         const m = await _msgInfo(c, id);
         if (!m || !m.external_id) return false;
@@ -589,6 +643,7 @@ router.post(
         if (r.rows[0]) {
           await _registrarFeedback(c, req.tenantId, id, isLead ? 'lead' : 'not_lead', req.tenantRole,
             { context: isLead ? null : motivo, temperature: isLead ? temperature : null });
+          if (!isLead) await _limparSugestaoEtapa(c, id);   // fatia (b): confirmar "não é lead" limpa a sugestão
         }
         return r.rows[0] || null;
       });
@@ -746,9 +801,19 @@ router.get(
             `SELECT count(*)::int AS n FROM leads WHERE review_queue = true AND review_result IS NULL AND status = 'REVIEW_QUEUE'`
           )
         ).rows[0].n;
+        // fatia (b) — badge do Kanban: sugestões de etapa da IA ATIVAS (acionáveis). Régua canônica
+        // (stages.sugestaoAtivaSql): há sugestão, lead não-terminal, sugestão ≠ etapa atual nem a dispensada.
+        // AMARRADO à janela DEFAULT do Kanban (created_at): o badge conta só o que a tela abre por
+        // default — badge == cards à vista (senão a recepção clica "N" e vê menos, e desconfia).
+        const stageSuggestions = (
+          await c.query(
+            `SELECT count(*)::int AS n FROM leads l
+              WHERE ${stages.sugestaoAtivaSql('l')} AND l.created_at >= now() - make_interval(days => $1)`,
+            [KANBAN_BADGE_DAYS])
+        ).rows[0].n;
         // dormancyDays já resolvido no topo (usado no corte da retomada). reactivation_expiry_days
         // (ADR-027: dias até "Perdido") vem do mesmo fetch.
-        return { leads, pendingTotal, reviewTotal, dormancyDays, reactivationExpiryDays: dorm?.reactivation_expiry_days ?? 45 };
+        return { leads, pendingTotal, reviewTotal, stageSuggestions, dormancyDays, reactivationExpiryDays: dorm?.reactivation_expiry_days ?? 45 };
       });
       res.json({
         tenant_id: req.tenantId,
@@ -756,6 +821,7 @@ router.get(
         impersonation: req.impersonation,
         pending_approvals_count: result.pendingTotal,
         review_queue_count: result.reviewTotal,
+        stage_suggestions_count: result.stageSuggestions,   // fatia (b): badge do Kanban
         lista_ordenacao: LISTA_ORDENACAO_DEFAULTS,   // ADR-028: ordenação por tenant (seed)
         dormancy_days: result.dormancyDays,
         reactivation_expiry_days: result.reactivationExpiryDays,   // ADR-027: dias até "Perdido"
@@ -1227,6 +1293,7 @@ router.post('/:tenantId/leads/:id/requalificar', authenticate, requireTenantAcce
           [id, req.tenantRole]
         );
         const feedbackId = await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole, { context: observation });
+        await _limparSugestaoEtapa(c, id);   // fatia (b): rebaixar p/ não-lead limpa a sugestão de etapa
         // GUARDRAIL Fatia D: arquiva o PENDING do lead (senão vira rascunho órfão em NOT_LEAD).
         const arch = await c.query(
           "UPDATE pending_approvals SET status = 'ARCHIVED' WHERE tenant_id = $1 AND lead_id = $2 AND status = 'PENDING' RETURNING id",
@@ -2157,6 +2224,8 @@ router.post(
         await c.query('UPDATE classifier_shadow SET ground_truth = $2 WHERE lead_id = $1', [id, ground_truth]);
         // "não é lead" legado segue alimentando o few-shot do classificador.
         if (desfecho === 'nao_e_lead') await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole);
+        // fatia (b): desfecho terminal (não 'em aberto') limpa a sugestão de etapa pendente.
+        if (r.rows[0].desfecho != null) await _limparSugestaoEtapa(c, id);
         return { row: r.rows[0], ground_truth, outcome: outcome || null };
       });
       if (out && out.bad) return res.status(400).json({ error: 'invalid desfecho/outcome' });
