@@ -67,3 +67,22 @@ coisa (rascunho pronto), não "foi enviado".
 **Fora desta fase (#8 Fase 2, separada):** o acúmulo de `pendente` duplicado em
 `detectar-silenciosos.js` (dedup furado por `enviado_em` com `DEFAULT now()`) e a limpeza dos 249
 pendentes. Não tocado aqui.
+
+## Emenda 2026-07-23 (#8 Fase 2) — higiene do ledger de sugestão
+
+A tabela `reabordagem_tentativas` acumulou **249 `pendente` para 77 leads (~3.2/lead)**: o dedup do
+job `detectar-silenciosos.js` ancorava em `enviado_em > now()-3d`, mas `pendente` tinha
+`enviado_em = DEFAULT now()` (hora da GERAÇÃO, não do envio) → após 3 dias regenerava. Três correções:
+
+1. **Dedup** (`detectar-silenciosos.js`): o `NOT EXISTS` passa a bloquear se **já existe `pendente`
+   aberto** pro lead (`rt.status='pendente' OR rt.enviado_em > now()-3d`) — não só a janela de 3d.
+2. **Coluna honesta**: `enviado_em` passa a significar **só "enviado de verdade"**. O INSERT de
+   pendente grava `enviado_em=NULL`; o INSERT de envio (`enviar-retomada`) grava `now()` explícito;
+   a **migração 073** dropa o `DEFAULT now()`. (Fase 1 não depende disso — lê `staff_outbound_samples`.)
+3. **Limpeza (073, idempotente)**: purga pendentes de leads não mais candidatos (status fora de
+   QUALIFYING/QUALIFIED, `desfecho` definido, ou **não mais dormente** por `dormancy_days` do tenant)
+   + colapsa duplicatas → **1 pendente por (tenant_id, lead_id)**, o mais recente. Dry-run:
+   249 → **46** (purga 58 + dedup 145), exatamente 1/lead. Multi-tenant, sem hardcode.
+
+itest 8/8 (`test/reabordagem-cleanup.itest.js`, migração 073 testada verbatim). Não altera o chip
+(Fase 1 intacta) nem caminho de envio (só carimba `enviado_em` explícito).

@@ -1590,8 +1590,10 @@ router.post('/:tenantId/leads/:id/enviar-retomada', authenticate, requireTenantA
       );
       if (upd.rowCount === 0) {
         await c.query(
-          `INSERT INTO reabordagem_tentativas (tenant_id, lead_id, texto, sugestao_estrategia, sugestao_rascunho, status)
-           VALUES ($1, $2, $3, $4, $5, 'enviado')`,
+          // #8 Fase 2: enviado_em=now() EXPLÍCITO — a migração 073 dropa o DEFAULT now(),
+          // então o caminho de envio precisa carimbar o timestamp do envio ele mesmo.
+          `INSERT INTO reabordagem_tentativas (tenant_id, lead_id, texto, sugestao_estrategia, sugestao_rascunho, status, enviado_em)
+           VALUES ($1, $2, $3, $4, $5, 'enviado', now())`,
           [req.tenantId, id, text, estrategia, rascunho]
         );
       }

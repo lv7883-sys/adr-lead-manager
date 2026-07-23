@@ -51,8 +51,12 @@ async function leadsSilenciosos(c, tenantId) {
         AND (i.last_in IS NULL OR o.last_out > i.last_in)          -- último contato foi DA escola
         AND o.last_out < now() - interval '3 days'                 -- silêncio >= 3 dias
         AND NOT EXISTS (
+              -- #8 Fase 2: NÃO regenera enquanto houver um 'pendente' aberto pro lead
+              -- (antes o dedup só olhava janela de 3d via enviado_em, mas 'pendente' tinha
+              -- enviado_em=DEFAULT now() → após 3d regenerava → acúmulo de duplicatas).
               SELECT 1 FROM reabordagem_tentativas rt
-               WHERE rt.lead_id = l.id AND rt.enviado_em > now() - interval '3 days'
+               WHERE rt.lead_id = l.id
+                 AND (rt.status = 'pendente' OR rt.enviado_em > now() - interval '3 days')
             )
       ORDER BY o.last_out ASC`,
     [tenantId]
@@ -105,9 +109,11 @@ async function processarTenant(tenantId) {
       const sug = await gemini.sugestaoRetomada({ history: convo, leadName: lead.name, schoolContext });
       if (!sug || !sug.rascunho) { logger.warn('silenciosos.sem_rascunho', { tenant_id: tenantId, lead_id: lead.id }); continue; }
       await withTenant(tenantId, (c) => c.query(
+        // #8 Fase 2: enviado_em=NULL explícito — 'pendente' não é envio; enviado_em passa a
+        // significar SÓ "enviado de verdade" (migração 073 dropa o DEFAULT now()).
         `INSERT INTO reabordagem_tentativas
-           (tenant_id, lead_id, texto, sugestao_estrategia, sugestao_rascunho, status)
-         VALUES ($1, $2, $3, $4, $5, 'pendente')`,
+           (tenant_id, lead_id, texto, sugestao_estrategia, sugestao_rascunho, status, enviado_em)
+         VALUES ($1, $2, $3, $4, $5, 'pendente', NULL)`,
         [tenantId, lead.id, sug.rascunho, sug.estrategia || null, sug.rascunho]
       ));
       // Deixa a sugestão quentinha no cache p/ a fila exibir na hora (mesma key
