@@ -1181,47 +1181,65 @@ async function _registrarFeedback(c, tenantId, leadId, correctLabel, by, extra =
   const lead = (await c.query(
     'SELECT classification_confidence, classification_reasoning FROM leads WHERE id = $1', [leadId]
   )).rows[0] || {};
-  await c.query(
+  const r = await c.query(
     `INSERT INTO classification_feedback
        (tenant_id, lead_id, correct_label, original_confidence, original_reasoning,
         correction_context, corrected_temperature, feedback_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
     [tenantId, leadId, correctLabel, lead.classification_confidence ?? null, lead.classification_reasoning ?? null,
      extra.context ?? null, extra.temperature ?? null, by || null]
   );
+  return r.rows[0]?.id || null;   // Fatia F: id do feedback (o Undo apaga p/ não ensinar flip-flop)
 }
 
-// POST /tenant/:tid/leads/:id/requalificar — recepção corrige a classificação.
-// body { classification:'not_lead'|'quente'|'morno'|'frio', instrument?, intent?, observation? }
+// POST /tenant/:tid/leads/:id/requalificar — recepção corrige a classificação. BIDIRECIONAL (Fatia F).
+// body { classification:'lead'|'not_lead'|'quente'|'morno'|'frio', instrument?, intent?, observation?, temperature? }
+// 'lead'/'not_lead' devolvem `snapshot` (estado anterior + ids criados/arquivados) p/ o Undo (restore).
+// Guard: latch do review_result (confirmed_lead/confirmed_not_lead) protege a decisão da máquina.
 router.post('/:tenantId/leads/:id/requalificar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   const { id } = req.params;
   if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
   const cls = req.body?.classification;
-  if (!['not_lead', 'quente', 'morno', 'frio'].includes(cls)) return res.status(400).json({ error: 'invalid classification' });
+  if (!['lead', 'not_lead', 'quente', 'morno', 'frio'].includes(cls)) return res.status(400).json({ error: 'invalid classification' });
   const instrument = typeof req.body?.instrument === 'string' ? req.body.instrument.trim() || null : null;
   const intent = typeof req.body?.intent === 'string' ? req.body.intent.trim() || null : null;
   const observation = typeof req.body?.observation === 'string' ? req.body.observation.trim() || null : null;
+  const temperature = ['quente', 'morno', 'frio'].includes(req.body?.temperature) ? req.body.temperature : null; // opcional p/ 'lead'
   try {
     const out = await withTenant(req.tenantId, async (c) => {
-      const exists = (await c.query('SELECT 1 FROM leads WHERE id = $1', [id])).rowCount > 0;
-      if (!exists) return null;
+      // SNAPSHOT do estado ANTES de mutar (p/ o Undo restaurar EXATO — não um QUALIFYING genérico).
+      const prior = (await c.query(
+        'SELECT status, review_result, review_em, review_by, temperatura_manual FROM leads WHERE id = $1', [id])).rows[0];
+      if (!prior) return null;
+
       if (cls === 'not_lead') {
-        // Mesma marca canônica de descarte dos outros caminhos (review/ignore): além de
-        // status, grava review_result + review_em (= timestamp do descarte). Sem isso, um
-        // lead re-descartado pela Fila mantinha review_em antigo e afundava na ordenação do
-        // Descartados (coalesce(review_em, created_at) DESC), saindo do LIMIT → "limbo".
+        // Marca canônica de descarte + latch (confirmed_not_lead) + review_em (ordenação Descartados).
         await c.query(
           "UPDATE leads SET status = 'NOT_LEAD', review_result = 'confirmed_not_lead', review_em = now(), review_by = $2, updated_at = now() WHERE id = $1",
           [id, req.tenantRole]
         );
-        await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole, { context: observation });
-        return { status: 'NOT_LEAD' };
+        const feedbackId = await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole, { context: observation });
+        // GUARDRAIL Fatia D: arquiva o PENDING do lead (senão vira rascunho órfão em NOT_LEAD).
+        const arch = await c.query(
+          "UPDATE pending_approvals SET status = 'ARCHIVED' WHERE tenant_id = $1 AND lead_id = $2 AND status = 'PENDING' RETURNING id",
+          [req.tenantId, id]);
+        return { status: 'NOT_LEAD', snapshot: { lead_id: id, prior, feedback_id: feedbackId, draft_created_id: null, drafts_archived: arch.rows.map((r) => r.id) } };
       }
-      // quente/morno/frio: override de temperatura + instrumento/intenção opcionais.
+
+      if (cls === 'lead') {
+        // Promove (mesmo mecanismo do /unclassified/promote e do reopen da Aline): status vivo +
+        // latch confirmed_lead + feedback. O rascunho é gerado FORA da tx (abaixo).
+        await c.query(
+          "UPDATE leads SET status = 'QUALIFYING', review_result = 'confirmed_lead', review_em = now(), review_by = $2, temperatura_manual = COALESCE($3, temperatura_manual), updated_at = now() WHERE id = $1",
+          [id, req.tenantRole, temperature]
+        );
+        const feedbackId = await _registrarFeedback(c, req.tenantId, id, 'lead', req.tenantRole, { temperature });
+        return { status: 'QUALIFYING', _promote: true, snapshot: { lead_id: id, prior, feedback_id: feedbackId, draft_created_id: null, drafts_archived: [] } };
+      }
+
+      // quente/morno/frio: override de temperatura + instrumento/intenção (sem snapshot — não é flip lead/não-lead).
       await c.query(
-        `UPDATE leads SET temperatura_manual = $2,
-                          intent = COALESCE($3, intent), updated_at = now()
-          WHERE id = $1`,
+        `UPDATE leads SET temperatura_manual = $2, intent = COALESCE($3, intent), updated_at = now() WHERE id = $1`,
         [id, cls, intent]
       );
       if (instrument) {
@@ -1236,10 +1254,58 @@ router.post('/:tenantId/leads/:id/requalificar', authenticate, requireTenantAcce
       return { status: 'requalificado', temperatura: cls };
     });
     if (!out) return res.status(404).json({ error: 'lead not found' });
+
+    // 'lead': gera o rascunho FORA da tx (best-effort, não derruba a promoção). Completa o snapshot
+    // só com draft NOVO (dup = pré-existente, o Undo não deve arquivá-lo). Não envia mensagem.
+    if (out._promote) {
+      let draft = { ok: false };
+      try { draft = await generateDraftForLead(req.tenantId, id); }
+      catch (e) { logger.error('tenant.lead.requalificar_draft_error', { tenant_id: req.tenantId, lead_id: id, error: e.message }); }
+      if (draft.ok && !draft.dup) out.snapshot.draft_created_id = draft.approvalId || null;
+      out.draft = draft.ok;
+      delete out._promote;
+    }
     logger.info('tenant.lead.requalificado', { tenant_id: req.tenantId, lead_id: id, classification: cls, by: req.tenantRole });
     res.json({ ok: true, ...out });
   } catch (err) {
     logger.error('tenant.lead.requalificar_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tid/leads/:id/restore-classificacao — UNDO da classificação (Fatia F). Recebe o
+// `snapshot` devolvido pelo /requalificar e RESTAURA o estado EXATO: status/review_result/review_em/
+// review_by/temperatura anteriores, APAGA o feedback criado (senão a IA aprende flip-flop), des-
+// arquiva os PENDING que o rebaixe arquivou, e arquiva o draft NOVO que a promoção gerou. Sem mensagem.
+router.post('/:tenantId/leads/:id/restore-classificacao', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
+  const snap = req.body?.snapshot;
+  if (!snap || snap.lead_id !== id || !snap.prior) return res.status(400).json({ error: 'invalid snapshot' });
+  const p = snap.prior;
+  const archived = Array.isArray(snap.drafts_archived) ? snap.drafts_archived.filter(isUuid) : [];
+  const createdDraft = isUuid(snap.draft_created_id) ? snap.draft_created_id : null;
+  const feedbackId = isUuid(snap.feedback_id) ? snap.feedback_id : null;
+  try {
+    const ok = await withTenant(req.tenantId, async (c) => {
+      const r = await c.query(
+        `UPDATE leads SET status = $2, review_result = $3, review_em = $4, review_by = $5,
+                          temperatura_manual = $6, updated_at = now()
+          WHERE id = $1 RETURNING id`,
+        [id, p.status ?? null, p.review_result ?? null, p.review_em ?? null, p.review_by ?? null, p.temperatura_manual ?? null]);
+      if (!r.rowCount) return false;
+      // apaga o feedback criado pela ação (não ensina flip-flop). RLS garante o tenant.
+      if (feedbackId) await c.query('DELETE FROM classification_feedback WHERE id = $1 AND lead_id = $2', [feedbackId, id]);
+      // des-arquiva o que o rebaixe arquivou; arquiva o draft NOVO que a promoção gerou.
+      if (archived.length) await c.query("UPDATE pending_approvals SET status = 'PENDING' WHERE lead_id = $1 AND id = ANY($2::uuid[])", [id, archived]);
+      if (createdDraft) await c.query("UPDATE pending_approvals SET status = 'ARCHIVED' WHERE id = $1 AND lead_id = $2", [createdDraft, id]);
+      return true;
+    });
+    if (!ok) return res.status(404).json({ error: 'lead not found' });
+    logger.info('tenant.lead.restore_classificacao', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole, restored_status: p.status });
+    res.json({ ok: true, status: p.status ?? null });
+  } catch (err) {
+    logger.error('tenant.lead.restore_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
     res.status(500).json({ error: 'internal error' });
   }
 });

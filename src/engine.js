@@ -1697,7 +1697,7 @@ async function generateDraftForLead(tenantId, leadId, deps = {}) {
     return { id: r.rows[0].id };
   });
   log.info('draft.generated', { approval_id: out.id, dup: !!out.dup });
-  return { ok: true, approvalId: out.id };
+  return { ok: true, approvalId: out.id, dup: !!out.dup };   // Fatia F: dup → o Undo só arquiva draft NOVO
 }
 
 module.exports = {
