@@ -7,9 +7,12 @@
 // (recebe tenantId; sem hardcode). Custo: ~6 SELECTs de contagem por tenant, 1x/dia (+ o card).
 //
 const { withTenant } = require('./db');
+const { retomadaLateral, reengajouExists } = require('./reativacao');   // #8 Fatia B: fonte única da retomada
 
 async function _safe(fn, def) { try { return await fn(); } catch { return def; } }
-const HOJE = "date_trunc('day', now())";
+// #8 Fatia B — "hoje" em America/Sao_Paulo (antes era UTC → "hoje" do card divergia ~3h do
+// resto do produto, que usa SP). Aplica a TODAS as linhas do plantão (bola/filtro/reativação/...).
+const HOJE = "date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo'";
 
 // resumoPlantao(tenantId) → { gerado_em, pior, systems: [{key,label,status,numeros,detalhe,link}] }
 // status ∈ 'verde'|'amarelo'|'vermelho'. link = destino RELATIVO (o dashboard prefixa /f/:slug).
@@ -45,11 +48,24 @@ async function resumoPlantao(tenantId) {
       numeros: `${filtro.descartes} descartes · ${filtro.rev} revertidos`,
       detalhe: filtro.fp > 0 ? `⚠ ${filtro.fp} teria(m) engolido lead` : `${filtro.total} decisões-sombra`, link: '/monitor-filtro' });
 
-    // ---- REATIVAÇÃO (ADR-027) ----
-    const reat = await _safe(async () => (await c.query(
-      `SELECT count(*) FILTER (WHERE status='enviado' AND enviado_em >= ${HOJE})::int enviadas,
-              count(*) FILTER (WHERE respondeu AND respondeu_em >= ${HOJE})::int reengajaram
-         FROM lead_manager.reabordagem_tentativas WHERE tenant_id=$1`, [tenantId])).rows[0], null);
+    // ---- REATIVAÇÃO (ADR-027, RE-FONTEADO #8 Fatia B) ----
+    // Retomada = saída nossa após silêncio >= dormancy_days (helper, MESMA regra do /leads e do BI).
+    // "enviadas" = leads cuja última retomada foi HOJE (SP); "reengajaram" = reabordados que
+    // receberam inbound HOJE após a retomada. Fonte antiga (reabordagem_tentativas) abandonada —
+    // ela nunca gravava 'enviado' (as retomadas reais saem via /approve → invisíveis a ela).
+    const reat = await _safe(async () => {
+      const dorm = (await c.query(`SELECT dormancy_days FROM lead_manager.tenant_lead_config WHERE tenant_id=$1`, [tenantId])).rows[0];
+      const N = Number.isInteger(dorm?.dormancy_days) && dorm.dormancy_days > 0 ? dorm.dormancy_days : 7;
+      return (await c.query(
+        `SELECT
+           count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL AND rtm.retomada_em >= ${HOJE})::int enviadas,
+           count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL
+                              AND ${reengajouExists('rtm.retomada_em', { schema: 'lead_manager.', since: HOJE })})::int reengajaram
+           FROM lead_manager.leads l
+           ${retomadaLateral('$2', { schema: 'lead_manager.' })}
+          WHERE l.tenant_id=$1 AND l.status NOT IN ('NOT_LEAD','REVIEW_QUEUE')`,
+        [tenantId, N])).rows[0];
+    }, null);
     if (reat) push({ key: 'reativacao', label: 'Reativação', status: 'verde',
       numeros: `${reat.enviadas} retomadas · ${reat.reengajaram} reengajaram`, detalhe: '', link: '/reativacao' });
 

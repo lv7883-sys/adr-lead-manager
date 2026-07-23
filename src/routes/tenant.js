@@ -13,6 +13,7 @@ const { isUuid } = require('../validation');
 const { fromLegacy, canonicaliza, validaHorarioJson, normaliza, minToHm } = require('../horario'); // H1: horário por-dia
 const logger = require('../logger');
 const { resumoPlantao } = require('../plantao');   // ADR-040: plantão (resumo de saúde)
+const { retomadaLateral, reengajouExists } = require('../reativacao');   // #8 Fatia B: fonte única da retomada
 const evolution = require('../evolution');   // E4: envio direto via Evolution
 const meta = require('../meta');              // E6: envio outbound via Messenger/IG
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
@@ -642,10 +643,7 @@ router.get(
                     rtm.retomada_em AS retomada_enviado_em,
                     EXISTS (SELECT 1 FROM reabordagem_tentativas rt
                              WHERE rt.lead_id = l.id AND rt.status = 'pendente') AS retomada_sugestao_pendente,
-                    (rtm.retomada_em IS NOT NULL AND EXISTS (
-                       SELECT 1 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-                        WHERE cv.external_id = l.phone AND m.role = 'USER'
-                          AND m.received_at > rtm.retomada_em)) AS retomada_reengajou,
+                    (rtm.retomada_em IS NOT NULL AND ${reengajouExists('rtm.retomada_em')}) AS retomada_reengajou,
                     (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
                       WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
                           = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
@@ -715,21 +713,9 @@ router.get(
                           = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')) AS ts_out
                FROM leads l
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
-               -- EMENDA #8 (Opção B): retomada = última saída nossa cuja lacuna desde o inbound
-               -- ANTERIOR (o mais recente antes dela) é >= dormancy_days ($1). Sem inbound anterior
-               -- (subquery NULL) a comparação é NULL → não conta como retomada (evita falso-positivo
-               -- de 1º contato/resposta same-day). Corte por-tenant, sem hardcode.
-               LEFT JOIN LATERAL (
-                 SELECT max(s.received_at) AS retomada_em
-                   FROM staff_outbound_samples s
-                  WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
-                      = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
-                    AND (SELECT max(m.received_at) FROM messages m
-                           JOIN conversations cv ON cv.id = m.conversation_id
-                          WHERE cv.external_id = l.phone AND m.role = 'USER'
-                            AND m.received_at < s.received_at)
-                        <= s.received_at - make_interval(days => $1::int)
-               ) rtm ON true
+               -- EMENDA #8 (Fatia B): retomada agora vem do helper compartilhado (src/reativacao.js),
+               -- a MESMA regra usada por metrics.js e plantao.js → os 3 dão o mesmo número. $1 = dormancy_days.
+               ${retomadaLateral('$1')}
               WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
               ORDER BY l.created_at DESC
               LIMIT 1000`,

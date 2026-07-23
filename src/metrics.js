@@ -6,6 +6,7 @@
 //
 const { withTenant } = require('./db');
 const { dentroDoExpediente, normaliza, minToHm } = require('./horario');
+const { retomadaLateral, reengajouExists } = require('./reativacao');   // #8 Fatia B: fonte única da retomada
 
 const PERIODS = { '1d': 1, '7d': 7, '30d': 30, '90d': 90 };
 
@@ -227,29 +228,35 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       )
     ).rows;
 
-    // REABORDAGENS (BLOCO C): tentativas no período + quantas o lead respondeu
-    // DEPOIS (calculado na leitura — sem job de fundo; `respondeu` fica null no envio).
+    // REABORDAGENS (#8 Fatia B): RE-FONTEADO de reabordagem_tentativas → staff_outbound_samples
+    // (a MESMA regra do /leads, via helper src/reativacao.js). `total` = leads reabordados no
+    // período (retomada dentro da janela); `responderam` = destes, quantos REENGAJARAM (inbound
+    // após a retomada). Universo alinhado ao resto do BI (status NOT IN NOT_LEAD/REVIEW_QUEUE) —
+    // antes o JOIN não filtrava e contava leads que o gate já suprimiu. $3 = dormancy_days.
+    const dormRow = (await c.query(
+      'SELECT dormancy_days FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
+    const dormancyDays = Number.isInteger(dormRow?.dormancy_days) && dormRow.dormancy_days > 0 ? dormRow.dormancy_days : 7;
     const reab = (
       await c.query(
-        `SELECT count(*)::int AS total,
-                count(*) FILTER (WHERE EXISTS (
-                  SELECT 1 FROM messages m
-                    JOIN conversations cv ON cv.id = m.conversation_id
-                   WHERE cv.tenant_id = $1 AND m.role = 'USER'
-                     AND regexp_replace(cv.external_id, '[^0-9]', '', 'g')
-                         = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
-                     AND m.received_at > rt.enviado_em
-                ))::int AS responderam
-           FROM reabordagem_tentativas rt
-           JOIN leads l ON l.id = rt.lead_id
-          WHERE rt.tenant_id = $1 AND rt.enviado_em >= now() - ($2 || ' days')::interval`,
-        [tenantId, days]
+        `SELECT
+           count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL
+                              AND rtm.retomada_em >= now() - ($2 || ' days')::interval)::int AS total,
+           count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL
+                              AND rtm.retomada_em >= now() - ($2 || ' days')::interval
+                              AND ${reengajouExists('rtm.retomada_em')})::int AS responderam
+           FROM leads l
+           ${retomadaLateral('$3')}
+          WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')`,
+        [tenantId, days, dormancyDays]
       )
     ).rows[0];
-    // Leads que já têm ALGUMA reabordagem registrada (pro % de silenciosos reabordados).
+    // Leads com retomada REAL (derivada de staff_outbound), pro % de silenciosos reabordados.
     const reabIds = new Set(
-      (await c.query('SELECT DISTINCT lead_id FROM reabordagem_tentativas WHERE tenant_id = $1', [tenantId]))
-        .rows.map((r) => r.lead_id)
+      (await c.query(
+        `SELECT l.id FROM leads l ${retomadaLateral('$2')}
+          WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE') AND rtm.retomada_em IS NOT NULL`,
+        [tenantId, dormancyDays]))
+        .rows.map((r) => r.id)
     );
 
     // ---- agregação em JS ---------------------------------------------------
@@ -566,6 +573,10 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         aguardando_lista: aguardandoLista.sort((a, b) => b.esperando_seg - a.esperando_seg).slice(0, 50),
         silenciosos_3d: silenciosos3d,
         reabordados_no_prazo: Number(reab.total) || 0,
+        // #8 Fatia B — par de QUALIDADE: dos reabordados, quantos reengajaram (inbound após a retomada).
+        reengajaram: Number(reab.responderam) || 0,
+        taxa_reengajamento: Number(reab.total) ? round((Number(reab.responderam) / Number(reab.total)) * 100) : null,
+        // taxa_retomada mantida (mesmo valor) p/ o render atual do dashboard; relabel = follow-up.
         taxa_retomada: Number(reab.total) ? round((Number(reab.responderam) / Number(reab.total)) * 100) : null,
         // Separação por horário comercial (dentro = real da equipe; fora = impacto sem automação).
         por_horario: porHorario,

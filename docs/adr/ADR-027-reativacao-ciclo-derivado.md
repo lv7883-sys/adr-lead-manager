@@ -86,3 +86,26 @@ job `detectar-silenciosos.js` ancorava em `enviado_em > now()-3d`, mas `pendente
 
 itest 8/8 (`test/reabordagem-cleanup.itest.js`, migração 073 testada verbatim). Não altera o chip
 (Fase 1 intacta) nem caminho de envio (só carimba `enviado_em` explícito).
+
+## Emenda 2026-07-23 (#8 Fatia B) — fonte única de retomada estendida a metrics.js e plantao.js
+
+A Fase 1 re-fonteou a retomada (reabordagem_tentativas → staff_outbound_samples) **só no `/leads`**.
+`metrics.js` (BI de gestão) e `plantao.js` (card de saúde) ficaram na fonte antiga → **3 fontes
+divergentes** de "retomada". Pior: a limpeza da Fase 2 mexeu nos números da gestão (metrics contava
+**46** sugestões `pendente` como "enviadas"; denominador `reabIds` caiu 77→49). Regressão nossa.
+
+**Decisão.** A regra da Fase 1 (retomada = saída nossa cuja lacuna desde o inbound anterior ≥
+`dormancy_days`) vira **helper compartilhado `src/reativacao.js`** (`retomadaLateral` + `reengajouExists`),
+usado pelos **três** lugares — `tenant.js` (/leads, **refatorado** pra usar o helper), `metrics.js`
+e `plantao.js`. Assim os 3 dão o **mesmo número** pros mesmos dados. Correções acopladas:
+- **metrics.js**: `reabordados_no_prazo`/`taxa_retomada` derivam de staff_outbound; **universo
+  corrigido** (`status NOT IN NOT_LEAD/REVIEW_QUEUE` — antes o JOIN contava leads que o gate
+  suprimiu); `reabIds` idem. **Par de qualidade novo**: `reengajaram` + `taxa_reengajamento`.
+- **plantao.js**: mesma re-fonte + **fuso corrigido** (`HOJE` de UTC → America/Sao_Paulo, aplica a
+  todas as linhas do card — antes divergia ~3h do resto).
+
+Read-path puro (não move lead, não envia). Extraí helper (não dupliquei) porque a regra é idêntica
+nos 3; plantão usa o mesmo helper com `schema='lead_manager.'` e `since=SP_HOJE`. Multi-tenant
+(`dormancy_days` por tenant). Prova: metrics real passou de **46 falsos → 22 reais** (30d); os 3
+lugares consistentes na mesma janela. itest 7/7 (`test/retomada-fonte-unica.itest.js`), Fase 1 6/6
+sem regressão. Fica de fora (Fatia A): régua canônica de "lead ativo"/"convertido" (vazamento de `desfecho`).

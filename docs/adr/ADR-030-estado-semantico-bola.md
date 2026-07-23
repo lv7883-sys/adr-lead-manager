@@ -168,3 +168,22 @@ Tira a bola do shadow: em **`bola_mode='on'`**, `classificarSaida` passa a **esc
 **(c) Aba "Bola" no Monitor do Filtro** (`/f/:slug/monitor-filtro`, 2ª aba; "Filtro" intacta). Lê `bola_shadow_log` (última decisão/lead): estado marcado, camada (**Determinístico** vs **Gemini Flash**), o **texto da saída** que disparou, timestamp, flag de override. Botão **↩ Reverter** por lead. Multi-tenant (tenant da URL).
 
 **(d) Invariantes.** `conversation_state` muda de **VALOR, não de contrato** — `awaiting_reply` (tenant.js), badge (recep-leads.js) e SLA (metrics.js) seguem lendo igual. `bola_mode` por-tenant; aba por-tenant; `bolaGate` genérico. **Kill-switch:** `UPDATE tenant_lead_config SET bola_mode='shadow'` (volta a só-calcular, sem deploy). **Interação com o bug da reação (diag #3):** com a bola gravando `AGUARDANDO_CLIENTE`, o `awaiting_reply` sai do fallback-por-timestamp (só-NULL) que a reação sabota → fecha o #3 pela raiz. itest do flip: 5/5 (`_aplicarEstadoBola` escreve/respeita-override, `gateSaida`, cross-tenant).
+
+## Dívida técnica (registrada 2026-07-23) — `classificarSaida` não filtra por status vivo
+
+**Observado** (auditoria do watcher pós-flip): a bola processa saídas de leads **fora do funil**
+(`NOT_LEAD`/`CONVERTED`) — ex.: Aline e Paula Ramos (rotina de aluno existente, marcadas
+`confirmed_not_lead`), a recepção manda follow-up e o `classificarSaida` roda a cadeia inteira,
+incluindo a **chamada Gemini** da Camada 2 (`modelo_leve`) quando o `gateSaida` dá ambíguo.
+
+**Impacto:** a escrita do `conversation_state` nesses leads é **inerte** (leads `NOT_LEAD` não
+aparecem no funil/`awaiting_reply`/tiles), mas **cada mensagem gasta uma chamada Gemini** à toa.
+Não é bug de correção — é desperdício de ciclo (custo + latência) e polui o `bola_shadow_log`.
+
+**Otimização futura (NÃO implementar agora):** `classificarSaida` (engine.js:866) ganhar um
+early-return quando o lead não está em status vivo do funil (fora de `QUALIFYING`/`QUALIFIED`/
+`EXPERIMENTAL_AGENDADA`, ou com `desfecho` terminal) — antes do `gateSaida`/Gemini. Cuidado: um
+lead pode legitimamente RE-abrir (ex.: `NOT_LEAD` de rotina que volta com sinal de expansão — ver
+o caso Aline); o filtro é do **estado da bola**, não da re-classificação de lead (que segue no
+path inbound). Kill-switch e semântica inalterados. Estimativa: a maioria das saídas hoje é pra
+leads vivos, mas o volume de rotina-cliente `NOT_LEAD` (Extranet) não é desprezível.
