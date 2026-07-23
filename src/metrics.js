@@ -7,6 +7,7 @@
 const { withTenant } = require('./db');
 const { dentroDoExpediente, normaliza, minToHm } = require('./horario');
 const { retomadaLateral, reengajouExists } = require('./reativacao');   // #8 Fatia B: fonte única da retomada
+const { terminalSql, isTerminal, isConvertido } = require('./lifecycle');   // Fatia A: régua canônica lead ativo/convertido
 
 const PERIODS = { '1d': 1, '7d': 7, '30d': 30, '90d': 90 };
 
@@ -333,7 +334,9 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       // ADR-021 — estado atual (só leads ativos): aguardando nós / silencioso 3d+.
       // EXPERIMENTAL_AGENDADA é estado "parado" (aula marcada) — sai dos buckets de
       // espera/silêncio: a última msg de cortesia do cliente NÃO reabre a espera.
-      const ativo021 = !l.desfecho && l.status !== 'CONVERTED' && l.status !== 'EXPERIMENTAL_AGENDADA';
+      // Fatia A: "ativo" canônico (¬TERMINAL) + a especialização do ADR-021 (EXPERIMENTAL_AGENDADA
+      // é estado "parado", fora dos buckets de espera/silêncio). ¬TERMINAL = régua única (helper).
+      const ativo021 = !isTerminal(l) && l.status !== 'EXPERIMENTAL_AGENDADA';
       // D1 — "esperando nossa resposta" = a bola está conosco. AGUARDANDO_RECEPCAO só vale se
       // NÃO houve saída NOSSA posterior ao estado (senão a bola já virou — "estado vencido";
       // leitura só, não reescreve conversation_state). state_computed_at NULL cai no fallback
@@ -428,7 +431,11 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const instrConvert = new Map();
     const porCanal = new Map();
     for (const l of rows) {
-      funil[l.status in funil ? l.status : 'OUTRO']++;
+      // Fatia A: "convertido" unificado (status CONVERTED/WON OU desfecho='matriculado') — antes
+      // o funil contava só status='CONVERTED', então matriculados sem esse status caíam em
+      // QUALIFYING/QUALIFIED (divergindo de matriculados/BLOCO 3). Agora o funil bate.
+      if (isConvertido(l)) funil.CONVERTED++;
+      else funil[l.status in funil ? l.status : 'OUTRO']++;
       temps[temperatura(l)]++;
       if (l.instrument) {
         instrProcura.set(l.instrument, (instrProcura.get(l.instrument) || 0) + 1);
@@ -488,8 +495,8 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
            SELECT l.id, regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g') AS ident
              FROM leads l
             WHERE l.created_at >= now() - ($2 || ' days')::interval
-              AND l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE', 'CONVERTED')
-              AND l.desfecho IS NULL
+              AND l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
+              AND NOT ${terminalSql('l')}   -- Fatia A: ¬TERMINAL canônico (CONVERTED/WON OU desfecho)
          ),
          inb AS (
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
