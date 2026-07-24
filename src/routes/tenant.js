@@ -3218,6 +3218,74 @@ router.post('/:tenantId/bola/decisions/:leadId/reverter', authenticate, requireT
   }
 });
 
+// ---------------------------------------------------------------------------
+// MONITOR — APLICAÇÃO AUTOMÁTICA DE ETAPA (078). O que a IA moveu sozinha (stage_autoapply_log) + reverter.
+// GET: movimentos automáticos (from→to, motivo da IA, fonte, revertido?), mais recentes primeiro.
+// POST reverter: restaura o estado EXATO anterior (status/desfecho/desfecho_em), apaga o evento que o
+// move criou e DISPENSA a etapa (suggested_stage_dismissed) p/ a máquina NÃO re-aplicar (anti flip-flop)
+// — mesma semântica do Undo manual (/sugestao-etapa/restaurar) + dispensar. Idempotente (reverted).
+// ---------------------------------------------------------------------------
+router.get('/:tenantId/stage-autoapply/decisions', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const decisions = await withTenant(req.tenantId, async (c) => (await c.query(
+      `SELECT s.id::text AS decisao_id, s.lead_id::text, l.name, l.phone,
+              s.from_stage, s.to_stage, s.reasoning, s.source, s.created_at,
+              s.reverted, s.reverted_at, s.reverted_by,
+              (${stages.stageSql('l')}) AS etapa_agora
+         FROM lead_manager.stage_autoapply_log s
+         JOIN lead_manager.leads l ON l.id = s.lead_id
+        WHERE s.tenant_id = $1
+        ORDER BY s.created_at DESC LIMIT 500`,
+      [req.tenantId])).rows);
+    res.json({ decisions });
+  } catch (err) {
+    logger.error('stage_autoapply.decisions.list.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao listar movimentos automáticos de etapa' });
+  }
+});
+
+router.post('/:tenantId/stage-autoapply/decisions/:logId/reverter', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const lid = String(req.params.logId);
+  if (!isUuid(lid)) return res.status(400).json({ error: 'invalid log id' });
+  const actor = (req.user && (req.user.sub || req.user.role)) || req.tenantRole || 'recepcao';
+  try {
+    const out = await withTenant(req.tenantId, async (c) => {
+      const s = (await c.query(
+        `SELECT lead_id, to_stage, prior_status, prior_desfecho, prior_desfecho_em, evento_id, reverted
+           FROM lead_manager.stage_autoapply_log WHERE id = $1`, [lid])).rows[0];
+      if (!s) return { erro: 'movimento não encontrado', code: 404 };
+      if (s.reverted) return { erro: 'este movimento já foi revertido', code: 409 };
+      // 1) restaura o estado EXATO anterior + DISPENSA a etapa (não re-aplica no próximo evento).
+      await c.query(
+        `UPDATE lead_manager.leads
+            SET status = $2, desfecho = $3, desfecho_em = $4,
+                suggested_stage = NULL, stage_reasoning = NULL, stage_suggested_at = NULL,
+                suggested_stage_dismissed = $5, updated_at = now()
+          WHERE id = $1`,
+        [s.lead_id, s.prior_status, s.prior_desfecho ?? null, s.prior_desfecho_em ?? null, s.to_stage]);
+      // 2) apaga o evento de mudança que o auto-apply criou (timeline volta ao estado anterior).
+      if (isUuid(s.evento_id)) await c.query(
+        "DELETE FROM lead_manager.lead_eventos WHERE id = $1 AND lead_id = $2 AND tipo = 'mudanca_etapa'",
+        [s.evento_id, s.lead_id]);
+      // 3) registra a reversão na timeline + marca o log (auditoria).
+      await c.query(
+        `INSERT INTO lead_manager.lead_eventos (tenant_id, lead_id, tipo, autor, conteudo)
+         VALUES ($1, $2, 'nota', $3, $4)`,
+        [req.tenantId, s.lead_id, actor, `aplicação automática de etapa revertida (${s.to_stage})`]);
+      await c.query(
+        'UPDATE lead_manager.stage_autoapply_log SET reverted = true, reverted_at = now(), reverted_by = $2 WHERE id = $1',
+        [lid, actor]);
+      return { ok: true, lead_id: s.lead_id, restaurado: s.prior_status };
+    });
+    if (out.erro) return res.status(out.code || 400).json({ error: out.erro });
+    logger.info('stage_autoapply.reverted', { tenant_id: req.tenantId, log_id: lid, by: actor });
+    res.json(out);
+  } catch (err) {
+    logger.error('stage_autoapply.decisions.reverter.error', { tenant_id: req.tenantId, log_id: lid, error: err.message });
+    res.status(500).json({ error: 'falha ao reverter o movimento automático' });
+  }
+});
+
 // PLANTÃO (ADR-040) — resumo de saúde do dia por sistema (agrega os logs existentes). Leitura só.
 router.get('/:tenantId/plantao', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {

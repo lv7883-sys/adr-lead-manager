@@ -12,6 +12,7 @@ const notificacao = require('./notificacao');   // Bloco 4: push WhatsApp pra re
 const redisClient = require('./redisClient');
 const gating = require('./gating');
 const { kanbanColuna } = require('./metrics');   // ADR sugestão-de-etapa: travas de posição
+const stages = require('./stages');              // régua canônica: KEY_TO_STATUS/KANBAN_TRANSICOES (auto-apply)
 const { gateSaida } = require('./bolaGate');     // ADR-030 Passo 2: gate determinístico da saída
 
 const CONFIDENCE_THRESHOLD = 0.7;
@@ -167,9 +168,55 @@ async function _shadowOutcome(tenantId, shadowId, crivoOutcome) {
   } catch (e) { logger.warn('gate0.shadow_outcome_failed', { tenant_id: tenantId, error: e.message }); }
 }
 
-// ADR sugestão-de-etapa — persiste a sugestão da IA (suggestion-only) com as DUAS travas:
-// (1) nunca sugerir a etapa em que o lead JÁ está; (2) não re-sugerir uma etapa que a
-// recepção já dispensou (suggested_stage_dismissed). NUNCA move o lead. Best-effort.
+// GÊMEO de routes/tenant.js::_aplicarMoverEtapa — move de etapa SEM cliente HTTP (fluxo ao vivo/backfill).
+// Roda no client `c` de uma transação withTenant JÁ aberta. NÃO pode requerer routes (ciclo), então
+// replica a mecânica mínima do move canônico: mesma partição (stages.stageOfLead), mesmas transições
+// (stages.KANBAN_TRANSICOES), mesmos UPDATEs de status/desfecho por destino, mesmo evento 'mudanca_etapa'.
+// O itest prova a equivalência de transição. Grava o SNAPSHOT do estado anterior em stage_autoapply_log
+// (o REVERTER do Monitor restaura EXATO, igual ao Undo de /sugestao-etapa/restaurar). Retorna
+// {applied} | {invalid} | {terminal}. NÃO limpa suggested_stage_dismissed (respeita dispensa anterior).
+async function _autoAplicarEtapa(c, { tenantId, leadId, destCol, reasoning, source, externalMessageId }) {
+  const lead = (await c.query(
+    'SELECT status, desfecho, desfecho_em FROM leads WHERE id = $1', [leadId])).rows[0];
+  if (!lead) return { notFound: true };
+  // Trava dura: nunca move sozinho um lead terminal/descartado (carimbo/desfecho é decisão de gente).
+  if (lead.desfecho != null || ['NOT_LEAD', 'REVIEW_QUEUE'].includes(String(lead.status || '').toUpperCase())) {
+    return { terminal: true };
+  }
+  const origem = stages.stageOfLead(lead);
+  if (origem === destCol) return { terminal: true };                       // já está lá (nada a mover)
+  if (!(stages.KANBAN_TRANSICOES[origem] || []).includes(destCol)) return { invalid: true, origem };
+  // UPDATE de status por destino — espelho EXATO dos ramos de _aplicarMoverEtapa (não-terminais zeram
+  // desfecho; 'convertido' grava matriculado). 'perdido' nunca é auto (exige motivo) → não cai aqui.
+  if (destCol === 'qualificando') await c.query("UPDATE leads SET status='QUALIFYING', desfecho=NULL, desfecho_em=NULL, updated_at=now() WHERE id=$1", [leadId]);
+  else if (destCol === 'qualificado') await c.query("UPDATE leads SET status='QUALIFIED', desfecho=NULL, desfecho_em=NULL, updated_at=now() WHERE id=$1", [leadId]);
+  else if (destCol === 'experimental') await c.query("UPDATE leads SET status='EXPERIMENTAL_AGENDADA', desfecho=NULL, desfecho_em=NULL, updated_at=now() WHERE id=$1", [leadId]);
+  else if (destCol === 'convertido') await c.query("UPDATE leads SET status='CONVERTED', desfecho='matriculado', desfecho_em=now(), updated_at=now() WHERE id=$1", [leadId]);
+  else return { invalid: true, origem };
+  const conteudo = `movido para ${destCol} — sugestão da IA aplicada automaticamente`;
+  const evento = (await c.query(
+    `INSERT INTO lead_eventos (tenant_id, lead_id, tipo, autor, conteudo, etapa_key)
+     VALUES ($1, $2, 'mudanca_etapa', 'ia_auto', $3, $4) RETURNING id`,
+    [tenantId, leadId, conteudo, destCol])).rows[0];
+  // A sugestão foi RESOLVIDA pelo próprio move → limpa (não fica pendente no badge).
+  await c.query(
+    'UPDATE leads SET suggested_stage = NULL, stage_reasoning = NULL, stage_suggested_at = NULL WHERE id = $1',
+    [leadId]);
+  await c.query(
+    `INSERT INTO stage_autoapply_log
+       (tenant_id, lead_id, from_stage, to_stage, reasoning, source, external_message_id,
+        prior_status, prior_desfecho, prior_desfecho_em, evento_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [tenantId, leadId, origem, destCol, reasoning || null, source || 'event', externalMessageId || null,
+     lead.status, lead.desfecho, lead.desfecho_em, evento.id]);
+  return { applied: true, from: origem, evento_id: evento.id };
+}
+
+// ADR sugestão-de-etapa — persiste a sugestão da IA com as DUAS travas: (1) nunca sugerir a etapa em
+// que o lead JÁ está; (2) não re-sugerir uma etapa que a recepção já dispensou. Se o tenant tem
+// APLICAÇÃO AUTOMÁTICA ligada (stage_autoapply_mode='on') E a etapa está na lista elegível (078),
+// APLICA no evento (via _autoAplicarEtapa, auditável+revertível no Monitor); senão fica suggestion-only
+// como antes. 'convertido' fica de fora por padrão. Tudo em UMA transação. Best-effort (nunca lança).
 async function persistStageSuggestion(tenantId, leadId, suggestedStage, stageReasoning) {
   if (!leadId || !suggestedStage) return;
   try {
@@ -186,6 +233,18 @@ async function persistStageSuggestion(tenantId, leadId, suggestedStage, stageRea
           WHERE id = $1`,
         [leadId, suggestedStage, stageReasoning || null]
       );
+      // Aplicação automática (config por-tenant). Lê mode+lista na MESMA transação. Fora do 'on' ou
+      // fora da lista → nada move (suggestion-only). Transição inválida/terminal → deixa pra recepção.
+      const cfg = (await c.query(
+        'SELECT stage_autoapply_mode, stage_autoapply_stages FROM tenant_lead_config WHERE tenant_id = $1',
+        [tenantId])).rows[0];
+      const allowed = Array.isArray(cfg?.stage_autoapply_stages) ? cfg.stage_autoapply_stages : [];
+      if (cfg?.stage_autoapply_mode === 'on' && allowed.includes(suggestedStage)) {
+        const r = await _autoAplicarEtapa(c, {
+          tenantId, leadId, destCol: suggestedStage, reasoning: stageReasoning, source: 'event',
+        });
+        if (r.applied) logger.info('stage.autoapplied', { tenant_id: tenantId, lead_id: leadId, from: r.from, to: suggestedStage });
+      }
     });
   } catch (e) {
     logger.warn('stage.suggestion_persist_failed', { tenant_id: tenantId, lead_id: leadId, error: e.message });
@@ -1752,4 +1811,6 @@ module.exports = {
   _carregarConversaSaida, _rescueConversation, RESCUE_CONV_MAX,
   // ADR-030 Passo 2 — classificação da saída (estado semântico da bola), shadow-only.
   classificarSaida, _aplicarEstadoBola,
+  // Aplicação automática de sugestão de etapa (078) — expostos p/ itest + backfill.
+  _autoAplicarEtapa, persistStageSuggestion,
 };
