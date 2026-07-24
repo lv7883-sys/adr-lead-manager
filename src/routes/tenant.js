@@ -3091,6 +3091,17 @@ router.get('/:tenantId/gate/decisions', authenticate, requireTenantAccess(READ_R
            LEFT JOIN lead_manager.contact_role cr ON cr.id = g.role_id
            LEFT JOIN lead_manager.messages m ON m.tenant_id = g.tenant_id AND m.external_message_id = g.external_message_id
           WHERE g.tenant_id = $1 AND g.role_id IS NOT NULL
+            -- DEDUP: desde que _shadowLog passou a registrar keep E discard (rescue-com-conversa),
+            -- um descarte REAL ('on') gera linha na SOMBRA (A) E na REAL (B) com o mesmo
+            -- external_message_id. Exclui de (A) o que já é descarte real (revertível) em (B) →
+            -- o caso aparece UMA vez, com o botão certo. external_message_id NULL não casa → mantém.
+            AND NOT EXISTS (
+              SELECT 1 FROM lead_manager.messages md
+               WHERE md.tenant_id = g.tenant_id
+                 AND md.external_message_id = g.external_message_id
+                 AND md.discarded = true
+                 AND md.discard_reason = 'role_hard'
+            )
          UNION ALL
          -- (B) REAL: descartes por papel (gate 'on'); papel resolvido pelo telefone
          SELECT 'real' AS origem, m.id::text AS decisao_id, m.sender AS phone,
