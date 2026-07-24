@@ -72,15 +72,31 @@ async function _classifierConfig(tenantId) {
 const PRESIGNAL_NOTE = 'Contato já marcado "não é lead" antes (dentro da validade). '
   + 'Reavalie a conversa do zero — isto é só uma dúvida a conferir, NÃO um veredito.';
 
+// Gate 0 (rescue question): nº MÁXIMO de turnos da conversa passados à rescue. Cap de custo/token —
+// rotina-vs-lead se decide nos turnos RECENTES; manda-se o TAIL (mais recente). A rescue só roda p/
+// contato de PAPEL hard (conhecido no cadastro), fração pequena dos inbounds → custo extra contido.
+const RESCUE_CONV_MAX = 20;
+// Monta a conversa que a rescue julga: histórico real (loadRealHistory) + a mensagem ATUAL (que no
+// Gate 0 ainda não está persistida em `messages`), com tail cap. Histórico vazio → devolve só a
+// mensagem atual → classifyRescue mantém o default conservador (na dúvida, keep). PURA (testável).
+function _rescueConversation(history, currentBody) {
+  const conv = Array.isArray(history) ? history.slice() : [];
+  if (currentBody) conv.push({ role: 'USER', content: currentBody, at: new Date().toISOString() });
+  return conv.length > RESCUE_CONV_MAX ? conv.slice(-RESCUE_CONV_MAX) : conv;
+}
+
 async function _gateConfig(tenantId) {
   try {
     const r = await withTenant(tenantId, (c) => c.query(
-      'SELECT gate_suppression_mode, presignal_ttl_days FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]));
+      'SELECT gate_suppression_mode, presignal_ttl_days, rescue_conv_mode FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]));
     const row = r.rows[0] || {};
     const mode = ['off', 'shadow', 'on'].includes(row.gate_suppression_mode) ? row.gate_suppression_mode : 'off';
     const ttlDays = Number.isInteger(row.presignal_ttl_days) ? row.presignal_ttl_days : 30;
-    return { mode, ttlDays };
-  } catch { return { mode: 'off', ttlDays: 30 }; }   // falha → inerte
+    // Flag INDEPENDENTE (migration 076): shadow/flip da rescue-com-conversa. 'off' → rescue julga só a
+    // mensagem (pré-correção). Nunca confundir com `mode` (gate_suppression) — são ortogonais.
+    const rescueConvMode = ['off', 'shadow', 'on'].includes(row.rescue_conv_mode) ? row.rescue_conv_mode : 'off';
+    return { mode, ttlDays, rescueConvMode };
+  } catch { return { mode: 'off', ttlDays: 30, rescueConvMode: 'off' }; }   // falha → inerte
 }
 
 // Papel EXPLÍCITO do contato (contact_role_member ⋈ contact_role). RLS isola por tenant.
@@ -1081,25 +1097,50 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       // pipeline normal → crivo/funil, nunca descarte silencioso); resgata=false → descarta
       // ('role_hard'). Falha da IA ou papel sem critério → CONSERVADOR: mantém (não descarta).
       const policy = await getRescuePolicy(tenantId, sup.roleKey);
-      let resgata = true, rescueMotivo = null, rescueConf = null;
+      // ── DOIS VEREDITOS lado a lado (shadow da rescue-com-conversa, flag rescue_conv_mode / migration 076) ──
+      // (A) MESSAGE-ONLY: julga só a mensagem atual. É o driver da AÇÃO do gate HOJE (off/shadow) —
+      //     comportamento de produção INTOCADO. Sempre computado quando há critério.
+      // (B) CONVERSA: julga o histórico real + a mensagem atual (corrige o Jörg — um "Olá;" isolado
+      //     engana a rescue; a rotina de responsável só se revela na conversa). Só computado em
+      //     shadow/on → custo extra (1 chamada Gemini) apenas p/ contato de PAPEL hard, fração pequena.
+      let msgResgata = true, msgMotivo = null, msgConf = null;
+      let convResgata = null, convMotivo = null, convConf = null;
       if (policy.rescue_prompt) {
         try {
-          const rq = await classifyRescue({ message: msg.body, rescuePrompt: policy.rescue_prompt });
-          resgata = rq.resgata; rescueMotivo = rq.motivo; rescueConf = rq.confidence;
-        } catch (e) { log.warn('gate0.rescue_failed', { gate: 0, role: sup.roleKey, error: e.message }); resgata = true; }
+          const rqMsg = await classifyRescue({ message: msg.body, rescuePrompt: policy.rescue_prompt });
+          msgResgata = rqMsg.resgata; msgMotivo = rqMsg.motivo; msgConf = rqMsg.confidence;
+        } catch (e) { log.warn('gate0.rescue_failed', { gate: 0, role: sup.roleKey, error: e.message }); msgResgata = true; }
+        if (gateCfg.rescueConvMode !== 'off') {
+          try {
+            const identRescue = String(phone || '').replace(/\D/g, '');
+            const histRescue = identRescue ? await _carregarConversaSaida(tenantId, identRescue, null) : [];
+            const convRescue = _rescueConversation(histRescue, msg.body);   // tail cap p/ custo
+            const rqConv = await classifyRescue({ message: msg.body, conversation: convRescue, rescuePrompt: policy.rescue_prompt });
+            convResgata = rqConv.resgata; convMotivo = rqConv.motivo; convConf = rqConv.confidence;
+          } catch (e) { log.warn('gate0.rescue_conv_failed', { gate: 0, role: sup.roleKey, error: e.message }); convResgata = null; }
+        }
       }
+      // FLIP: só em rescue_conv_mode='on' a CONVERSA manda na ação; em off/shadow a ação segue o
+      // message-only (produção atual). convResgata=null (não computado/falhou) → cai no message-only.
+      const resgata = (gateCfg.rescueConvMode === 'on' && convResgata !== null) ? convResgata : msgResgata;
       const decisao = resgata ? 'keep' : 'discard';
+      // AUDITORIA side-by-side (presta contas do shadow): TODA decisão vai pro gate_shadow_log — keep E
+      // discard. `rescue:<ação real>` (backward-compat) + msg:/conv:/div: p/ responder "quantos
+      // divergiram, quais contatos, qual motivo". div:Y = os dois vereditos DISCORDAM = o que o flip
+      // mudaria (filtro do Monitor). Sem veredito-conversa (off/falha) → mantém o formato legado.
+      const msgDec = msgResgata ? 'keep' : 'discard';
+      const convDec = convResgata === null ? null : (convResgata ? 'keep' : 'discard');
+      const reason = convDec === null
+        ? `role:${sup.roleKey || ''}|rescue:${decisao}${msgMotivo ? '|' + msgMotivo.slice(0, 100) : ''}`
+        : `role:${sup.roleKey || ''}|rescue:${decisao}|msg:${msgDec}|conv:${convDec}|div:${convDec !== msgDec ? 'Y' : 'N'}`
+          + `${msgMotivo ? '|motivo:' + msgMotivo.slice(0, 80) : ''}${convMotivo ? '|conv_motivo:' + convMotivo.slice(0, 80) : ''}`;
+      gateShadowId = await _shadowLog(tenantId, { phone, channel, wouldAction: 'hard',
+        roleId: sup.roleId, reason, externalMessageId: msg.externalMessageId });
       if (gateCfg.mode === 'on' && !resgata) {
-        log.info('gate0.role_hard', { gate: 0, role: sup.roleKey, rescue_conf: rescueConf });
+        log.info('gate0.role_hard', { gate: 0, role: sup.roleKey, rescue_conf: msgConf, conv_conf: convConf, conv_mode: gateCfg.rescueConvMode });
         await captureDiscarded(tenantId, channel, phone, msg, rawBody, 'role_hard');  // distinto de 'internal_contact'
         return;
       }
-      // shadow (ou 'on' + resgata=keep): registra a decisão do RESGATE. `reason` carrega keep/discard
-      // + o motivo — a fonte que o Monitor do Filtro lê pra mostrar a rescue question em ação.
-      gateShadowId = await _shadowLog(tenantId, { phone, channel, wouldAction: 'hard',
-        roleId: sup.roleId,
-        reason: `role:${sup.roleKey || ''}|rescue:${decisao}${rescueMotivo ? '|' + rescueMotivo.slice(0, 100) : ''}`,
-        externalMessageId: msg.externalMessageId });
     } else if (sup.presignal) {
       gatePresignal = true;   // presignal NUNCA descarta sozinha; segue pro crivo
       if (gateCfg.mode !== 'on') {
@@ -1707,6 +1748,8 @@ module.exports = {
   _isTransientAIError, _pendingWindowExpired, _decideConversaRoute, PENDING_CLASSIFICATION_WINDOW_MS,
   // ADR-029 fatia 3 — expostos p/ o teste de isolamento multi-tenant (§7).
   _gateConfig, _lookupRole, _presignalActive, _evaluateGateSuppression, _shadowLog, _shadowOutcome,
+  // Gate 0 rescue com conversa — expostos p/ itest (conversa passada à rescue question).
+  _carregarConversaSaida, _rescueConversation, RESCUE_CONV_MAX,
   // ADR-030 Passo 2 — classificação da saída (estado semântico da bola), shadow-only.
   classificarSaida, _aplicarEstadoBola,
 };
