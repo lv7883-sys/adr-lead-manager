@@ -139,6 +139,26 @@ async function _presignalActive(tenantId, phone, ttlDays) {
   } catch { return false; }
 }
 
+// SALVAGUARDA do rescue (backtest 2026-07-24): o gate de ENTRADA existe p/ impedir lead de NASCER
+// errado — NÃO p/ matar lead que a recepção JÁ trabalha. Se o contato tem lead em FUNIL ATIVO
+// (QUALIFYING/QUALIFIED/EXPERIMENTAL_AGENDADA, desfecho NULL), o rescue nunca descarta; a saída de
+// funil ativo é humano ou a re-avaliação por sinal (077), nunca o gate. NEW (intake) e terminais
+// (CONVERTED/WON/perdido/desfecho≠NULL) ficam FORA da guarda. Casa por matchKeys BR-aware.
+const _FUNIL_ATIVO_GUARD = ['QUALIFYING', 'QUALIFIED', 'EXPERIMENTAL_AGENDADA'];
+async function _leadEmFunilAtivo(tenantId, phone) {
+  const keys = phone ? telBR.matchKeys(phone) : [];
+  if (!keys.length) return false;
+  try {
+    const r = await withTenant(tenantId, (c) => c.query(
+      `SELECT 1 FROM leads
+        WHERE tenant_id = $1 AND desfecho IS NULL AND status = ANY($3::text[])
+          AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = ANY($2::text[])
+        LIMIT 1`,
+      [tenantId, keys, _FUNIL_ATIVO_GUARD]));
+    return r.rowCount > 0;
+  } catch { return false; }   // falha → não bloqueia (conservador: segue a decisão do rescue)
+}
+
 // Decisão do gate SEM agir: { hard, presignal, roleId, roleKey }. Papel 'hard' tem
 // precedência; senão 'presignal' (papel explícito OU histórico dentro do TTL).
 async function _evaluateGateSuppression(tenantId, phone, cfg) {
@@ -1181,7 +1201,14 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       }
       // FLIP: só em rescue_conv_mode='on' a CONVERSA manda na ação; em off/shadow a ação segue o
       // message-only (produção atual). convResgata=null (não computado/falhou) → cai no message-only.
-      const resgata = (gateCfg.rescueConvMode === 'on' && convResgata !== null) ? convResgata : msgResgata;
+      let resgata = (gateCfg.rescueConvMode === 'on' && convResgata !== null) ? convResgata : msgResgata;
+      // SALVAGUARDA funil ativo: nunca descarta lead vivo (recepção trabalhando). Só consulta quando
+      // ia descartar (economia). Zera o falso-descarte grave do backtest (lead QUALIFIED/QUALIFYING).
+      let funilAtivoGuard = false;
+      if (!resgata) {
+        funilAtivoGuard = await _leadEmFunilAtivo(tenantId, phone);
+        if (funilAtivoGuard) resgata = true;   // força MANTER
+      }
       const decisao = resgata ? 'keep' : 'discard';
       // AUDITORIA side-by-side (presta contas do shadow): TODA decisão vai pro gate_shadow_log — keep E
       // discard. `rescue:<ação real>` (backward-compat) + msg:/conv:/div: p/ responder "quantos
@@ -1189,10 +1216,11 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       // mudaria (filtro do Monitor). Sem veredito-conversa (off/falha) → mantém o formato legado.
       const msgDec = msgResgata ? 'keep' : 'discard';
       const convDec = convResgata === null ? null : (convResgata ? 'keep' : 'discard');
-      const reason = convDec === null
+      const reason = (convDec === null
         ? `role:${sup.roleKey || ''}|rescue:${decisao}${msgMotivo ? '|' + msgMotivo.slice(0, 100) : ''}`
         : `role:${sup.roleKey || ''}|rescue:${decisao}|msg:${msgDec}|conv:${convDec}|div:${convDec !== msgDec ? 'Y' : 'N'}`
-          + `${msgMotivo ? '|motivo:' + msgMotivo.slice(0, 80) : ''}${convMotivo ? '|conv_motivo:' + convMotivo.slice(0, 80) : ''}`;
+          + `${msgMotivo ? '|motivo:' + msgMotivo.slice(0, 80) : ''}${convMotivo ? '|conv_motivo:' + convMotivo.slice(0, 80) : ''}`)
+        + (funilAtivoGuard ? '|guard:funil_ativo' : '');   // salvaguarda: rescue queria descartar, funil ativo vetou
       gateShadowId = await _shadowLog(tenantId, { phone, channel, wouldAction: 'hard',
         roleId: sup.roleId, reason, externalMessageId: msg.externalMessageId });
       if (gateCfg.mode === 'on' && !resgata) {
@@ -1806,7 +1834,7 @@ module.exports = {
   // Helpers puros expostos p/ teste (resiliência 503).
   _isTransientAIError, _pendingWindowExpired, _decideConversaRoute, PENDING_CLASSIFICATION_WINDOW_MS,
   // ADR-029 fatia 3 — expostos p/ o teste de isolamento multi-tenant (§7).
-  _gateConfig, _lookupRole, _presignalActive, _evaluateGateSuppression, _shadowLog, _shadowOutcome,
+  _gateConfig, _lookupRole, _presignalActive, _evaluateGateSuppression, _leadEmFunilAtivo, _shadowLog, _shadowOutcome,
   // Gate 0 rescue com conversa — expostos p/ itest (conversa passada à rescue question).
   _carregarConversaSaida, _rescueConversation, RESCUE_CONV_MAX,
   // ADR-030 Passo 2 — classificação da saída (estado semântico da bola), shadow-only.

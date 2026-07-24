@@ -30,7 +30,8 @@ before(async () => {
     CREATE TABLE conversations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, external_id text, updated_at timestamptz DEFAULT now());
     CREATE TABLE messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), conversation_id uuid, role text, body text, media_type text, media_transcription text, received_at timestamptz);
     CREATE TABLE staff_outbound_samples (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, external_id text, body text, received_at timestamptz, raw jsonb);
-    CREATE TABLE pending_approvals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid, status text, suggested_response text, created_at timestamptz);`);
+    CREATE TABLE pending_approvals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid, status text, suggested_response text, created_at timestamptz);
+    CREATE TABLE leads (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, phone text, meta_psid text, status text, desfecho text);`);
 
   // T1 — conversa de ROTINA de responsável (padrão Jörg): responsável avisa falta, atendimento
   // responde, responsável agradece. NENHUM sinal de novo aluno.
@@ -101,4 +102,26 @@ test('(4) CONTRASTE Jörg: com a conversa, a rescue julga a CONVERSA, não o "Ol
   assert.equal(conteudoRescue({ message: 'Olá;', conversation: conv }), 'CONVERSA');
   assert.ok(conv.map((m) => m.content).some((t) => /Nico vai faltar/.test(t)), 'a conversa de rotina chega à rescue');
   assert.equal(conv[conv.length - 1].content, 'Olá;', 'e a mensagem atual também');
+});
+
+// (5) SALVAGUARDA funil ativo (backtest 2026-07-24): o rescue nunca descarta lead vivo. _leadEmFunilAtivo
+// protege QUALIFYING/QUALIFIED/EXPERIMENTAL_AGENDADA (desfecho NULL); NEW e terminais ficam de fora.
+test('(5) salvaguarda: _leadEmFunilAtivo protege funil ativo, ignora NEW/convertido/perdido', async () => {
+  const { _leadEmFunilAtivo } = engine;
+  const seed = (ph, status, desfecho = null) => c.query(
+    'INSERT INTO leads (tenant_id, phone, status, desfecho) VALUES ($1,$2,$3,$4)', [T1, ph, status, desfecho]);
+  await seed('5519990001111', 'QUALIFIED');
+  await seed('5519990002222', 'EXPERIMENTAL_AGENDADA');
+  await seed('5519990003333', 'NEW');
+  await seed('5519990004444', 'CONVERTED', 'matriculado');
+  await seed('5519990005555', 'QUALIFYING', 'nao_e_lead');   // desfecho ≠ NULL → não protege
+
+  assert.equal(await _leadEmFunilAtivo(T1, '5519990001111'), true, 'QUALIFIED protegido');
+  assert.equal(await _leadEmFunilAtivo(T1, '5519990002222'), true, 'EXPERIMENTAL_AGENDADA protegido');
+  assert.equal(await _leadEmFunilAtivo(T1, '19990001111'), true, 'match BR-aware (sem 55)');
+  assert.equal(await _leadEmFunilAtivo(T1, '5519990003333'), false, 'NEW NÃO protege (intake)');
+  assert.equal(await _leadEmFunilAtivo(T1, '5519990004444'), false, 'CONVERTED/matriculado NÃO protege');
+  assert.equal(await _leadEmFunilAtivo(T1, '5519990005555'), false, 'desfecho≠NULL NÃO protege');
+  assert.equal(await _leadEmFunilAtivo(T1, '5519999999999'), false, 'sem lead → false');
+  assert.equal(await _leadEmFunilAtivo(T2, '5519990001111'), false, 'multi-tenant: T2 não vê lead do T1');
 });
