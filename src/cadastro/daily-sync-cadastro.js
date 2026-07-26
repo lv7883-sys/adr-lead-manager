@@ -15,6 +15,7 @@ const { pool, withTenant } = require('../db');
 const logger = require('../logger');
 const valinhosContratos = require('./adapters/valinhos-contratos');
 const { syncCadastro } = require('./sync-cadastro');
+const { runContractConvert, loadConfig } = require('./contractConvert');
 
 const MAX_DROP_FRAC = Number(process.env.CADASTRO_SAFEGUARD_MAX_DROP ?? 0.34);
 
@@ -109,11 +110,41 @@ async function runDailySync() {
       summary[res.status === 'OK' ? 'ok' : 'error']++;
     }
   }
+  // CONVERTIDO POR CONTRATO (079): passa a base atualizada contra os leads ATIVOS. Independe do sync
+  // ter tido sucesso (é idempotente e lê o que está presente); gated por contract_convert_mode. Nunca lança.
+  summary.contractConvert = await runContractConvertAllTenants(tenants);
   logger.info('cadastro_sync.done', summary);
   return summary;
 }
 
-module.exports = { runDailySync, processBinding, classifyError, safeguard };
+// Roda o casador contrato→lead para cada tenant ATIVO, conforme contract_convert_mode. Best-effort.
+// FORWARD-LOOKING: contrato novo com lead vinculado só vira 'convertido' se a 1ª MENSAGEM do lead for
+// anterior à matrícula (com a janela do tenant); senão vira 'cliente'. A régua vive no contractConvert.
+async function runContractConvertAllTenants(tenants) {
+  const out = { tenants: 0, convertido: 0, cliente: 0, queued: 0, byTenant: [] };
+  for (const { tenant_id: tenantId } of tenants) {
+    try {
+      const r = await withTenant(tenantId, async (c) => {
+        const cfg = await loadConfig(c, tenantId);
+        if (cfg.mode === 'off') return { ...cfg, skipped: true };
+        const stats = await runContractConvert(c, { tenantId, mode: cfg.mode, janelaDias: cfg.janelaDias });
+        return { ...cfg, ...stats };
+      });
+      if (!r.skipped) {
+        out.tenants++;
+        out.convertido += r.convertido || 0; out.cliente += r.cliente || 0; out.queued += r.queued || 0;
+      }
+      out.byTenant.push({ tenant: tenantId, ...r });
+      if (!r.skipped) logger.info('contract_convert.tenant_done', { tenant_id: tenantId, ...r });
+    } catch (e) {
+      logger.error('contract_convert.tenant_error', { tenant_id: tenantId, error: e.message });
+      out.byTenant.push({ tenant: tenantId, error: e.message });
+    }
+  }
+  return out;
+}
+
+module.exports = { runDailySync, processBinding, classifyError, safeguard, runContractConvertAllTenants };
 
 if (require.main === module) {
   runDailySync().then((s) => process.exit(s.error ? 1 : 0)).catch((e) => { logger.error('cadastro_sync.fatal', { error: e.message }); process.exit(1); });

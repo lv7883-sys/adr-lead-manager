@@ -27,6 +27,12 @@ const PERDIDO_DESFECHOS = [
   'nao_matriculado_desistiu', 'nao_compareceu_aula', 'outro',
 ];
 
+// CLIENTE (079) — desfecho do PRÉ-EXISTENTE: pagante reconhecido pelo cadastro cujo contrato é
+// ANTERIOR à existência dele como lead no Regente. NÃO é conversão (não nasceu no funil) e NÃO é
+// perda (não perdemos ninguém) — é um terceiro terminal, fora da fila e fora da taxa. Distinto de
+// 'nao_e_lead' (spam/interno). Só a régua de ORIGEM do contractConvert grava este desfecho.
+const CLIENTE_DESFECHO = 'cliente';
+
 // Motivos de "perdido" com rótulo (viram o `desfecho`). Espelha o dashboard (MOTIVOS_PERDA);
 // agora servido pela API pra o dashboard consumir em vez de manter cópia.
 const MOTIVOS_PERDA = [
@@ -78,6 +84,11 @@ const STAGES = [
     proxyFallback: (a) => `${col(a, 'desfecho')} = 'matriculado'` },
   { ordinal: 6, key: 'perdido',       status: 'PERDIDO',               emoji: '❌', label: 'Perdido',
     requerMotivo: true, column: true },
+  // ⚠ 'cliente' (079) NÃO é coluna do kanban nem bucket do funil: é o terminal do PRÉ-EXISTENTE
+  //   (contrato anterior ao lead). Fica na régua para stageKey/stageSql o nomearem honestamente —
+  //   antes ele caía em 'qualificando' por eliminação. status NOT_LEAD mantém fora de todo o BI.
+  { ordinal: 7, key: 'cliente',       status: 'NOT_LEAD',              emoji: '🧾', label: 'Cliente',
+    dica: 'Já era cliente antes de virar lead — fora do funil e da taxa', column: false, terminal: true },
 ];
 
 const _byKey = Object.fromEntries(STAGES.map((s) => [s.key, s]));
@@ -103,6 +114,9 @@ const KANBAN_TRANSICOES = Object.fromEntries(
 // — réplica fiel do comportamento anterior (zero mudança). stageSql() é o gêmeo em SQL (prova SQL≡JS).
 function stageKey(status, desfecho) {
   if (PERDIDO_DESFECHOS.includes(desfecho)) return 'perdido';
+  // 079: 'cliente' antes de 'convertido' — pré-existente NÃO conta como matrícula do funil. (Não
+  // colidem: a régua de origem nunca grava 'cliente' sobre desfecho='matriculado'.)
+  if (desfecho === CLIENTE_DESFECHO) return 'cliente';
   if (desfecho === 'matriculado' || status === 'CONVERTED') return 'convertido';
   if (status === 'NEW') return 'novo';
   if (status === 'EXPERIMENTAL_AGENDADA') return 'experimental';
@@ -117,6 +131,7 @@ function isStage(l, key) { return stageOfLead(l) === key; }
 function stageSql(alias = 'l') {
   return `CASE
     WHEN ${col(alias, 'desfecho')} IN (${q(PERDIDO_DESFECHOS)}) THEN 'perdido'
+    WHEN ${col(alias, 'desfecho')} = '${CLIENTE_DESFECHO}' THEN 'cliente'
     WHEN ${col(alias, 'desfecho')} = 'matriculado' OR ${col(alias, 'status')} = 'CONVERTED' THEN 'convertido'
     WHEN ${col(alias, 'status')} = 'NEW' THEN 'novo'
     WHEN ${col(alias, 'status')} = 'EXPERIMENTAL_AGENDADA' THEN 'experimental'
@@ -191,7 +206,7 @@ async function loadStages(tenantId, deps = {}) {
 
 module.exports = {
   STAGES, KANBAN_STAGES, KANBAN_KEYS, ETAPAS_TRABALHO,
-  PERDIDO_DESFECHOS, MOTIVOS_PERDA, KANBAN_TRANSICOES, KEY_TO_STATUS, STATUS_TO_KEY,
+  PERDIDO_DESFECHOS, CLIENTE_DESFECHO, MOTIVOS_PERDA, KANBAN_TRANSICOES, KEY_TO_STATUS, STATUS_TO_KEY,
   stageKey, stageOfLead, isStage, stageSql,
   detectSql, funilBucketSql, stageCatalog, loadStages,
   terminalParaSugestaoSql, sugestaoAtivaSql, isSugestaoAtiva,

@@ -24,6 +24,7 @@ const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna
 const KANBAN_BADGE_DAYS = KANBAN_PERIODS[KANBAN_DEFAULT_PERIOD];
 const stages = require('../stages');   // Passo 1: régua canônica de estágios (fonte única servida ao dashboard)
 const { generateDraftForLead, classificarSaida, _isTransientAIError, loadRealHistory } = require('../engine');   // Bloco 2: rascunho; ADR-030: saída; _isTransientAIError: resiliência 503; loadRealHistory: histórico completo p/ o Melhorar
+const contractConvert = require('../cadastro/contractConvert');   // 079: fila "confirmar matrícula" (contrato→lead)
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
 const multer = require('multer');                        // ADR-016 P1: upload de mídia
@@ -3283,6 +3284,71 @@ router.post('/:tenantId/stage-autoapply/decisions/:logId/reverter', authenticate
   } catch (err) {
     logger.error('stage_autoapply.decisions.reverter.error', { tenant_id: req.tenantId, log_id: lid, error: err.message });
     res.status(500).json({ error: 'falha ao reverter o movimento automático' });
+  }
+});
+
+// CONVERTIDO POR ORIGEM + CLIENTE (079) — FILA de confirmação. GET lista os pendentes com as duas
+// datas (1ª mensagem vs matrícula original) e a decisão da régua ('convertido' = nasceu no funil e
+// fechou depois | 'cliente' = já era pagante antes de virar lead). Confirmar aplica (revertível no
+// Monitor da 078); dispensar descarta. O casamento roda no cron de cadastro (04h) — aqui é o "1 clique".
+router.get('/:tenantId/contract-match/pending', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const out = await withTenant(req.tenantId, (c) => c.query(
+      // As DUAS DATAS lado a lado (marco_lead vs matricula_primeira) + o gap: é o que a recepção
+      // precisa ver para confirmar "nasceu no funil" (convertido) ou "já era cliente" (cliente).
+      `SELECT p.id, p.lead_id, l.name AS lead_name, l.phone AS lead_phone, p.account_id, p.decisao,
+              p.marco_lead, p.matricula_primeira, (p.matricula_primeira - p.marco_lead) AS gap_dias,
+              p.contract_ini_vigencia, p.contract_names, p.matched_phone, p.reason, p.created_at
+         FROM lead_manager.contract_match_pending p
+         JOIN lead_manager.leads l ON l.id = p.lead_id
+        WHERE p.status = 'pending'
+        ORDER BY p.created_at DESC`));
+    res.json(out.rows);
+  } catch (err) {
+    logger.error('contract_match.pending.list.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao listar a fila de matrícula' });
+  }
+});
+
+// Backfill em modo LISTA (read-only, NÃO move nada) — a lista que o Leo revisa antes de aplicar.
+router.get('/:tenantId/contract-match/backfill-preview', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const janela = Number.isNaN(Number(req.query.janela_dias)) ? undefined : Number(req.query.janela_dias);
+    const out = await withTenant(req.tenantId, (c) =>
+      contractConvert.buildBackfillList(c, { tenantId: req.tenantId, janelaDias: Number.isInteger(janela) ? janela : undefined }));
+    res.json({ total_conversao: out.converte.length, total_cliente: out.clientes.length, ...out });
+  } catch (err) {
+    logger.error('contract_match.backfill_preview.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao montar o preview do backfill' });
+  }
+});
+
+router.post('/:tenantId/contract-match/pending/:id/confirmar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const id = String(req.params.id);
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid id' });
+  const actor = (req.user && (req.user.sub || req.user.role)) || req.tenantRole || 'recepcao';
+  try {
+    const out = await withTenant(req.tenantId, (c) => contractConvert.confirmPending(c, { tenantId: req.tenantId, pendingId: id, actor }));
+    if (out.erro) return res.status(out.code || 400).json({ error: out.erro });
+    logger.info('contract_match.confirmed', { tenant_id: req.tenantId, pending_id: id, lead_id: out.lead_id, by: actor });
+    res.json(out);
+  } catch (err) {
+    logger.error('contract_match.confirmar.error', { tenant_id: req.tenantId, pending_id: id, error: err.message });
+    res.status(500).json({ error: 'falha ao confirmar a matrícula' });
+  }
+});
+
+router.post('/:tenantId/contract-match/pending/:id/dispensar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const id = String(req.params.id);
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid id' });
+  const actor = (req.user && (req.user.sub || req.user.role)) || req.tenantRole || 'recepcao';
+  try {
+    const out = await withTenant(req.tenantId, (c) => contractConvert.dismissPending(c, { tenantId: req.tenantId, pendingId: id, actor }));
+    if (out.erro) return res.status(out.code || 400).json({ error: out.erro });
+    res.json(out);
+  } catch (err) {
+    logger.error('contract_match.dispensar.error', { tenant_id: req.tenantId, pending_id: id, error: err.message });
+    res.status(500).json({ error: 'falha ao dispensar' });
   }
 });
 

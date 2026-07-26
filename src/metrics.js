@@ -131,6 +131,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
              LEFT JOIN lead_qualifications q ON q.lead_id = l.id
             WHERE l.created_at >= now() - ($2 || ' days')::interval
               AND l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')   -- só leads reais (Bloco 2)
+              AND coalesce(l.desfecho, '') <> 'cliente'          -- 079: pré-existente fora do BI (numerador E denominador)
          ),
          inb AS (
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
@@ -677,6 +678,10 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
            FROM leads
           WHERE created_at >= $1::date AND created_at < $2::date
             AND status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
+            -- 079 (TAXA POR ORIGEM): o CLIENTE pré-existente sai do NUMERADOR *e* do DENOMINADOR.
+            -- O denominador segue sendo "leads criados no período" — quem nasceu no Regente —, e o
+            -- veterano que só apareceu no WhatsApp não entra nem como lead nem como matrícula.
+            AND coalesce(desfecho, '') <> 'cliente'
           GROUP BY 1`,
         [start, end]
       )
@@ -988,7 +993,9 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
            LEFT JOIN draft d ON d.lead_id = l.id
           WHERE l.created_at >= now() - ($2 || ' days')::interval
             AND l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
-            AND coalesce(l.desfecho, '') <> 'nao_e_lead'`,
+            -- 079: 'cliente' (pré-existente) fora da fila junto com o spam/interno. Redundante com o
+            -- filtro de status (cliente vem com NOT_LEAD), mas explícito — a fila não depende disso.
+            AND coalesce(l.desfecho, '') NOT IN ('nao_e_lead', 'cliente')`,
         [tenantId, days]
       )
     ).rows;
@@ -1006,6 +1013,9 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
       if (ultLead) { bucket = fout == null ? 'sem_resposta' : 'responder_agora'; esperandoSeg = Math.max(0, Math.round((agora - lin) / 1000)); }
       const ultimaMsgMs = Math.max(lin || 0, lout || 0) || null;
       const coluna = kanbanColuna(l.status, l.desfecho);
+      // 079: a régua canônica tem estágios que NÃO são coluna ('realizada', 'cliente'). O WHERE já
+      // os exclui; a guarda existe para que um estágio novo nunca derrube o kanban com cols[x].push.
+      if (!cols[coluna]) continue;
       // tempo na coluna (aprox.): terminais desde desfecho_em; ativos desde created_at.
       const ref = (coluna === 'perdido' || coluna === 'convertido') && l.desfecho_em ? l.desfecho_em : l.created_at;
       cols[coluna].push({
