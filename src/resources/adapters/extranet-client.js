@@ -21,6 +21,10 @@ const EXTRANET = 'https://dash.academiadorock.com.br';
 // UA da receita ADR-BI (Windows Chrome 147): a forma que volta 200; o UA antigo tomava 429.
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/147.0.0.0 Safari/537.36';
 const VALINHOS_ID_UNIDADE = 13;
+// A extranet migrou o login p/ SSO/Keycloak (OIDC): dois hosts distintos, cada um com
+// cookies próprios → o login usa cookie jar POR HOST (ver login() abaixo).
+const DASH_HOST = new URL(EXTRANET).host;         // dash.academiadorock.com.br
+const AUTH_HOST = 'auth.academiadorock.com.br';   // Keycloak (realm "academia")
 
 const MIN_GAP_MS       = Math.max(10000, Number(process.env.EXTRANET_MIN_GAP_MS ?? 25000)); // gap serial (default 25s)
 const GAP_JITTER_MS    = 4000;
@@ -53,6 +57,9 @@ function mergeSetCookies(headers, jar) {
   return jar;
 }
 const cookieHeader = (jar) => Object.entries(jar).map(([k, v]) => `${k}=${v}`).join('; ');
+// cookie jar POR HOST (o login SSO cruza dash ↔ Keycloak; cada um seta cookies próprios).
+function _mergeSetCookiesHost(jars, host, headers) { mergeSetCookies(headers, (jars[host] = jars[host] || {})); }
+function _cookieHeaderHost(jars, host) { return cookieHeader(jars[host] || {}); }
 
 // ---- persistência de sessão + cooldown (mesmo arquivo, chave reservada) ----
 function _readFile() { try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch { return {}; } }
@@ -123,44 +130,78 @@ function _assertValinhos(unidade, ctx) {
   }
 }
 
-// ---- LOGIN: GET / (cap) → POST send_login (302 c/ cookie de unidade) ----
-// A senha decifrada chega só aqui, vai no corpo do POST e nunca toca log/disco.
+// Caminha os redirects À MÃO acumulando cookies POR HOST. Manual porque o fetch nativo
+// não tem cookie jar e o redirect:'follow' descartaria o PHPSESSID (setado no 1º hop) que
+// carrega o code_verifier PKCE necessário pro callback. Cada hop passa por _request →
+// herda gap serial + cooldown + timeout + detectBlock (403/429). Para no 1º não-3xx.
+async function _walk(jars, method, url, { body, headers = {} } = {}, maxHops = 8) {
+  let curMethod = method, curUrl = url, curBody = body, curHeaders = headers;
+  for (let i = 0; i < maxHops; i++) {
+    const host = new URL(curUrl).host;
+    const h = { 'User-Agent': UA, ...curHeaders };
+    const ck = _cookieHeaderHost(jars, host);
+    if (ck) h['Cookie'] = ck;
+    const r = await _request(curUrl, { method: curMethod, headers: h, body: curBody, redirect: 'manual' });
+    _mergeSetCookiesHost(jars, host, r.headers);
+    const loc = (r.headers && typeof r.headers.get === 'function') ? (r.headers.get('location') || '') : '';
+    if (r.status >= 300 && r.status < 400 && loc) {
+      curUrl = new URL(loc, curUrl).toString();
+      curMethod = 'GET'; curBody = undefined; curHeaders = {};
+      continue;
+    }
+    return { status: r.status, url: curUrl, ok: r.ok, body: r.body, headers: r.headers, location: loc };
+  }
+  throw tag(new Error('login: excesso de redirects'), 'BLOCK');
+}
+
+// ---- LOGIN via SSO/Keycloak (OIDC Authorization Code + PKCE) ----
+// A extranet aposentou o form próprio (cap + send_login.php). Fluxo (mesmo do scheduler,
+// dashboard/lib/extranet.js): 1) GET / → cadeia até o form do Keycloak (PHPSESSID do 1º
+// hop guarda o code_verifier PKCE); 2) POST username/senha no login-actions/authenticate
+// → 302 callback.php?code=…; 3) GET callback.php (com o PHPSESSID) → o dash troca
+// code→token → /logon.php autenticado. Retorna { cookie } com os cookies do DASH.
+// A senha decifrada chega só aqui, vai no corpo do POST ao Keycloak e nunca toca log/disco.
 async function login(creds) {
   if (!creds || !creds.email || !creds.senha) throw tag(new Error('login: email/senha obrigatórios'), 'CREDENTIAL');
   _assertValinhos(creds.unidade, 'login');
-  const jar = {};
+  const jars = {};
 
-  const r1 = await _request(`${EXTRANET}/`, { headers: { 'User-Agent': UA }, redirect: 'follow' }, { expectCap: true });
-  mergeSetCookies(r1.headers, jar);
-  const capMatch = r1.body.match(/name="cap"[^>]*value="([^"]+)"/);
-  if (!capMatch) throw tag(new Error('login: campo `cap` não encontrado (provável desafio/bloqueio)'), 'BLOCK');
-  const cap = capMatch[1];
+  // 1) GET / → segue até o form do Keycloak.
+  const form = await _walk(jars, 'GET', `${EXTRANET}/`);
+  if (form.status !== 200 || new URL(form.url).host !== AUTH_HOST) {
+    throw tag(new Error(`login: não chegou ao form do Keycloak (status ${form.status})`), 'BLOCK');
+  }
+  const actionM = form.body.match(/<form[^>]*id="kc-form-login"[^>]*action="([^"]+)"/i)
+             || form.body.match(/<form[^>]*action="([^"]*login-actions\/authenticate[^"]*)"/i);
+  if (!actionM) throw tag(new Error('login: form do Keycloak (kc-form-login) não encontrado'), 'BLOCK');
+  const action = new URL(actionM[1].replace(/&amp;/g, '&'), form.url).toString();
+  const authHost = new URL(action).host;
 
-  const body = new URLSearchParams({
-    email:      creds.email,
-    senha:      creds.senha,
-    perfil:     String(creds.perfil ?? 1),
-    id_unidade: String(creds.unidade ?? ''),
-    cap,
-  }).toString();
-  const nAntes = Object.keys(jar).length;
-  const r2 = await _request(`${EXTRANET}/send_login.php`, {
+  // 2) POST credenciais no Keycloak. Sucesso → 302 callback.php?code=… ; 200 = recusa.
+  const body = new URLSearchParams({ username: creds.email, password: creds.senha, credentialId: '' }).toString();
+  const r2 = await _request(action, {
     method: 'POST',
     headers: {
-      'User-Agent': UA, 'Cookie': cookieHeader(jar), 'Origin': EXTRANET,
-      'Referer': `${EXTRANET}/`, 'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': UA, 'Cookie': _cookieHeaderHost(jars, authHost), 'Origin': `https://${authHost}`,
+      'Referer': form.url, 'Content-Type': 'application/x-www-form-urlencoded',
     },
     body, redirect: 'manual',
   });
-  mergeSetCookies(r2.headers, jar);
+  _mergeSetCookiesHost(jars, authHost, r2.headers);
   const loc2 = (r2.headers && typeof r2.headers.get === 'function') ? (r2.headers.get('location') || '') : '';
-  if (/\/erro_login\.php(\?|$)/.test(loc2) || /\/erro_login\.php(\?|$)/.test(r2.url)) {
-    throw tag(new Error('login: falha na autenticação (credenciais ou unidade incorretas)'), 'CREDENTIAL');
+  if (r2.status === 200) throw tag(new Error('login: falha na autenticação (Keycloak recusou email/senha)'), 'CREDENTIAL');
+  if (!(r2.status >= 300 && r2.status < 400) || !/\/auth\/callback\.php/.test(loc2)) {
+    throw tag(new Error(`login: resposta inesperada do Keycloak (status ${r2.status})`), 'BLOCK');
   }
-  if (/\/sair\.php(\?|$)/.test(loc2)) throw tag(new Error('login: sessão inválida (redirect p/ /sair.php)'), 'CREDENTIAL');
-  if (Object.keys(jar).length <= nAntes) throw tag(new Error('login: sessão não autenticada (sem cookie de unidade)'), 'CREDENTIAL');
+
+  // 3) GET callback.php (com o PHPSESSID do passo 1) → dash conclui o PKCE e autentica.
+  const cb = await _walk(jars, 'GET', new URL(loc2, action).toString());
+  const cbUrl = new URL(cb.url);
+  const voltouLogin = cbUrl.host === AUTH_HOST || /\/(sso|auth)\//.test(cbUrl.pathname) || /kc-form-login|send_login/.test(cb.body || '');
+  const dashCookie = _cookieHeaderHost(jars, DASH_HOST);
+  if (voltouLogin || !dashCookie) throw tag(new Error('login: sessão não autenticada após callback'), 'BLOCK');
   _stats.logins++;
-  return { cookie: cookieHeader(jar) };
+  return { cookie: dashCookie };
 }
 
 // ---- SESSÃO de vida longa: memória → disco → login (último recurso) ----
@@ -199,8 +240,12 @@ async function fetchAuthed(p, session, { noGap = false } = {}) {
     headers: { 'User-Agent': UA, 'Cookie': session.cookie, 'X-Requested-With': 'fetch' },
     redirect: 'follow',
   }, { noGap });
-  const urlLogin = /\/(index|logon)\.php(\?|$)/.test(r.url) && !/api-salas-grade|monta_lista/.test(p);
-  if (urlLogin || /send_login\.php/.test(r.body)) throw tag(new Error('fetchAuthed: sessão expirada (redirect/conteúdo de login)'), 'SESSION_EXPIRED');
+  // Sessão caída agora redireciona p/ o SSO/Keycloak (não mais p/ logon.php, que virou a
+  // HOME autenticada). Detecta por host/caminho do SSO e por conteudo do form do Keycloak.
+  let hostFinal = ''; try { hostFinal = new URL(r.url).host; } catch { /* url atípica */ }
+  const urlLogin = hostFinal === AUTH_HOST || /\/(sso|auth)\//.test(r.url);
+  const conteudoLogin = /send_login\.php|kc-form-login|login-actions\/authenticate/.test(r.body);
+  if (urlLogin || conteudoLogin) throw tag(new Error('fetchAuthed: sessão expirada (redirect/conteúdo de login)'), 'SESSION_EXPIRED');
   return r.body;
 }
 
