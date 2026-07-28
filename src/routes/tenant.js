@@ -25,6 +25,8 @@ const KANBAN_BADGE_DAYS = KANBAN_PERIODS[KANBAN_DEFAULT_PERIOD];
 const stages = require('../stages');   // Passo 1: régua canônica de estágios (fonte única servida ao dashboard)
 const { generateDraftForLead, classificarSaida, _isTransientAIError, loadRealHistory } = require('../engine');   // Bloco 2: rascunho; ADR-030: saída; _isTransientAIError: resiliência 503; loadRealHistory: histórico completo p/ o Melhorar
 const contractConvert = require('../cadastro/contractConvert');   // 079: fila "confirmar matrícula" (contrato→lead)
+const { fetchTimeline } = require('../timeline');   // ADR-042: timeline compartilhada (fonte única) — /leads/:id e inbox
+const { registrarSaida: _registrarSaida, msgCitada: _msgCitada } = require('../outbound');   // ADR-042: outbound compartilhado (fonte única)
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
 const multer = require('multer');                        // ADR-016 P1: upload de mídia
@@ -889,147 +891,9 @@ router.get(
         // Cada linha expõe `id` (id interno da própria linha) e, quando cita outra
         // mensagem, `reply_to_id` (FK -> messages.id). O LEFT JOIN `rt` resolve a
         // citada (sempre uma linha de messages) p/ montar reply_to {id, author, preview}.
-        const timelineRows = ident
-          ? (
-              await c.query(
-                `WITH reac AS (
-                   -- ADR-031 item 3: reações em escopo, com emoji e id da mensagem-alvo.
-                   SELECT m.raw#>>'{data,message,reactionMessage,text}'   AS emoji,
-                          m.raw#>>'{data,message,reactionMessage,key,id}'  AS target_key,
-                          m.received_at
-                     FROM messages m
-                     JOIN conversations cv ON cv.id = m.conversation_id
-                    WHERE cv.tenant_id = $1
-                      AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
-                      AND m.role = 'USER'
-                      AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') <> ''
-                 ),
-                 bubkeys AS (
-                   -- external_message_ids das bolhas que podem RECEBER reação
-                   -- (recepção + mensagem do lead que NÃO é reação).
-                   SELECT s.external_message_id AS k
-                     FROM staff_outbound_samples s
-                    WHERE s.tenant_id = $1 AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
-                      AND s.external_message_id IS NOT NULL
-                   UNION
-                   SELECT m.external_message_id
-                     FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
-                      AND m.role = 'USER' AND m.external_message_id IS NOT NULL
-                      AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') = ''
-                 )
-                 SELECT t.id, t.received_at, t.kind, t.sender, t.body,
-                        t.media_url, t.media_type, t.media_filename, t.media_transcription, t.reactions, t.ack_status, t.edited_at, t.deleted_at,
-                        t.reply_to_id, rt.role AS rt_role, rt.body AS rt_body, rt.media_type AS rt_media_type
-                   FROM (
-                   -- Entrada do LEAD (USER). Rascunhos da IA (ASSISTANT) NÃO entram na
-                   -- conversa: os pendentes pertencem ao bloco "Resposta sugerida".
-                   SELECT m.id, m.reply_to_message_id AS reply_to_id, m.received_at, 'lead' AS kind, m.sender, m.body,
-                          m.media_url, m.media_type, m.media_filename, m.media_transcription,
-                          (SELECT array_agg(r.emoji ORDER BY r.received_at) FROM reac r
-                            WHERE r.target_key = m.external_message_id) AS reactions,
-                          NULL::text AS ack_status,   -- inbound (lead) não tem check
-                          m.edited_at,                -- Fatia 2: marcador "editada"
-                          m.deleted_at                -- Fatia 3: marcador "apagada"
-                     FROM messages m
-                     JOIN conversations cv ON cv.id = m.conversation_id
-                    WHERE cv.tenant_id = $1
-                      AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
-                      AND m.role = 'USER'
-                      -- ADR-031 item 3: some da lista a reação QUE GRUDOU num alvo visível; a
-                      -- que não casou (sem alvo capturado) permanece como bolha "[reação] X".
-                      AND NOT ( coalesce(m.raw#>>'{data,message,reactionMessage,text}','') <> ''
-                                AND m.raw#>>'{data,message,reactionMessage,key,id}' IN (SELECT k FROM bubkeys) )
-                   UNION ALL
-                   -- Respostas REAIS da recepção (fromMe). Exclui GRUPOS (@g.us — nunca
-                   -- são conversa com o lead) e os textos que a IA já enviou (mostrados
-                   -- abaixo como 'ia', pra não duplicar).
-                   SELECT s.id, s.reply_to_message_id AS reply_to_id, s.received_at, 'recepcao' AS kind, s.sender, s.body,
-                          s.media_url, s.media_type, s.media_filename, NULL AS media_transcription,
-                          (SELECT array_agg(r.emoji ORDER BY r.received_at) FROM reac r
-                            WHERE r.target_key = s.external_message_id) AS reactions,
-                          s.ack_status,   -- check da recepção (direto da saída)
-                          s.edited_at,   -- AÇÃO-2: edição da recepção (direto da saída)
-                          s.deleted_at   -- AÇÃO-1: exclusão da recepção (direto da saída)
-                     FROM staff_outbound_samples s
-                    WHERE s.tenant_id = $1
-                      AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
-                      AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
-                      AND s.body NOT IN (
-                        SELECT pa.suggested_response FROM pending_approvals pa
-                         WHERE pa.tenant_id = $1 AND pa.lead_id = $3
-                           AND pa.status IN ('APPROVED', 'EDITED')
-                           AND pa.suggested_response IS NOT NULL
-                      )
-                   UNION ALL
-                   -- Respostas da IA que foram APROVADAS/ENVIADAS ao cliente (tag "IA").
-                   -- received_at = hora do ENVIO real (eco, mesmo JOIN por corpo do ack/edited/
-                   -- deleted); só cai em pa.created_at se ainda não houver eco (rascunho não
-                   -- enviado). Isso alinha a janela de 15min do editar, o horário exibido e a
-                   -- ordenação cronológica ao envio real, não à geração do rascunho.
-                   SELECT pa.id, pa.reply_to_message_id AS reply_to_id,
-                          COALESCE((SELECT so.received_at FROM staff_outbound_samples so
-                                     WHERE so.tenant_id = $1
-                                       AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
-                                       AND so.body = pa.suggested_response
-                                     ORDER BY so.received_at DESC LIMIT 1), pa.created_at) AS received_at,
-                          'ia' AS kind, NULL AS sender,
-                          pa.suggested_response AS body,
-                          NULL AS media_url, NULL AS media_type, NULL AS media_filename, NULL AS media_transcription,
-                          NULL::text[] AS reactions,
-                          -- check da IA: o id da Evolution está na saída (eco), deduplicada
-                          -- fora da timeline; casa pelo corpo (mesmo critério do NOT IN acima).
-                          (SELECT so.ack_status FROM staff_outbound_samples so
-                            WHERE so.tenant_id = $1
-                              AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
-                              AND so.body = pa.suggested_response
-                            ORDER BY so.received_at DESC LIMIT 1) AS ack_status,
-                          -- AÇÃO-2: edição da IA — edited_at vive no eco (mesmo JOIN por corpo)
-                          (SELECT so.edited_at FROM staff_outbound_samples so
-                            WHERE so.tenant_id = $1
-                              AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
-                              AND so.body = pa.suggested_response
-                            ORDER BY so.received_at DESC LIMIT 1) AS edited_at,
-                          -- AÇÃO-1: exclusão da IA — deleted_at vive no eco (mesmo JOIN por corpo do ack)
-                          (SELECT so.deleted_at FROM staff_outbound_samples so
-                            WHERE so.tenant_id = $1
-                              AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
-                              AND so.body = pa.suggested_response
-                            ORDER BY so.received_at DESC LIMIT 1) AS deleted_at
-                     FROM pending_approvals pa
-                    WHERE pa.tenant_id = $1 AND pa.lead_id = $3
-                      AND pa.status IN ('APPROVED', 'EDITED')
-                      AND pa.suggested_response IS NOT NULL
-                 ) t
-                 LEFT JOIN messages rt ON rt.id = t.reply_to_id
-                 ORDER BY t.received_at ASC`,
-                [req.tenantId, ident, id]
-              )
-            ).rows
-          : [];
-        // Monta reply_to {id, author:"lead"|"staff", preview}. author vem do papel da
-        // citada (USER=lead; ASSISTANT=escola/IA=staff). preview: ~80 chars ou "[mídia]".
-        const timeline = timelineRows.map((r) => {
-          const row = {
-            id: r.id, received_at: r.received_at, kind: r.kind, sender: r.sender, body: r.body,
-            media_url: r.media_url, media_type: r.media_type, media_filename: r.media_filename,
-            media_transcription: r.media_transcription,
-            reactions: Array.isArray(r.reactions) ? r.reactions : null,   // ADR-031 item 3
-            ack_status: r.ack_status || null,   // Fatia 1 — check só nas saídas (null no inbound)
-            edited_at: r.edited_at || null,      // Fatia 2 — marcador "editada" (inbound)
-            deleted_at: r.deleted_at || null,    // Fatia 3 — marcador "apagada" (inbound)
-            reply_to: null,
-          };
-          if (r.reply_to_id) {
-            const txt = r.rt_body && r.rt_body.trim() ? r.rt_body.trim() : null;
-            row.reply_to = {
-              id: r.reply_to_id,
-              author: r.rt_role === 'USER' ? 'lead' : 'staff',
-              preview: txt ? txt.slice(0, 80) : (r.rt_media_type ? '[mídia]' : ''),
-            };
-          }
-          return row;
-        });
+        // ADR-042: timeline extraída p/ src/timeline.js (fonte única). Comportamento
+        // idêntico ao inline anterior — mesma query, mesmos params [tenant, ident, leadId].
+        const timeline = await fetchTimeline(c, { tenantId: req.tenantId, ident, leadId: id });
 
         const pending = (
           await c.query(
@@ -1221,34 +1085,13 @@ async function _resolverKeyMensagem(c, tenantId, mid) {
 
 // Registra a saída da recepção em staff_outbound_samples (timeline 'recepcao').
 // O eco fromMe do webhook deduplica pela unique (tenant_id, external_message_id).
-async function _registrarSaida(tenantId, { phone, externalMessageId, sender, body, media, replyToMessageId }) {
-  await withTenant(tenantId, (c) => c.query(
-    `INSERT INTO staff_outbound_samples
-       (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
-        media_url, media_type, media_filename, reply_to_message_id)
-     VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, NULL, $6, $7, $8, $9)
-     ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
-    [tenantId, phone, externalMessageId || null, sender || 'Recepção', body || null,
-     (media && media.url) || null, (media && media.type) || null, (media && media.filename) || null,
-     replyToMessageId || null]
-  ));
-}
+// _registrarSaida movido p/ src/outbound.js (fonte única — ADR-042). Importado no topo.
 
 // Citação: resolve a mensagem citada (sempre uma linha de messages, FK reply_to_message_id).
 // Devolve { id, role, body, media_type, wa_key } ou null se o id for inválido/inexistente —
 // nesse caso degrada para envio sem quoted, sem violar a FK. wa_key = key do WhatsApp
 // (raw->'data'->'key') usada no quoted da Evolution; null p/ msg da IA (raw vazio) ou Z-API.
-async function _msgCitada(tenantId, replyToMessageId) {
-  if (!replyToMessageId || !isUuid(replyToMessageId)) return null;
-  return withTenant(tenantId, async (c) => {
-    const r = await c.query(
-      `SELECT id, role, body, media_type, raw->'data'->'key' AS wa_key
-         FROM messages WHERE id = $1`,
-      [replyToMessageId]
-    );
-    return r.rows[0] || null;
-  });
-}
+// _msgCitada movido p/ src/outbound.js (fonte única — ADR-042). Importado no topo.
 
 // Registra feedback de classificação (aprendizado — ADR-011 Fase 2) com o
 // confidence/reasoning ORIGINAIS do classificador. Roda dentro de um client `c`.

@@ -1,14 +1,23 @@
 # ADR-007 — Multicanal (Instagram, Facebook, Google)
 
-- **Status:** 🚧 **PENDENTE — não implementado** (placeholder para revisão futura)
-- **Data:** 2026-06-08
+- **Status:** 🟡 **PARCIALMENTE IMPLEMENTADO** (ingestão + envio in-window já vivos; falta
+  App Review + UI + identidade cross-canal). Atualizado 2026-07-28 pelo spike E16.
+- **Data:** 2026-06-08 · **Atualizado:** 2026-07-28
 - **Autor:** rascunho de escopo (sessão Claude Code)
 - **Relacionados:** ADR-003 (funil de triagem; Decisão 5 — abstração de canal e
-  identidade cross-canal), E8-09 (abstração `ChannelAdapter` no backlog),
+  identidade cross-canal), ADR-042 (Central de Mensagens — consome este ADR na Fase 5/E16),
+  E8-09 (abstração `ChannelAdapter` no backlog),
   [[no-auto-send-until-receptionists-onboarded]] (envio só sob supervisão).
 
-> ⚠️ Este documento **registra escopo para revisão**, não uma decisão tomada.
-> Nada aqui está implementado. Não usar como referência de comportamento atual.
+> ⚠️ **CORREÇÃO 2026-07-28 (spike E16, `docs/adr/SPIKE-E16-envio-meta.md`):** a afirmação
+> original "nada está implementado" está **DESATUALIZADA**. Já vivem no código:
+> **ingestão** completa (Lead Ads + IG DM + Messenger, `webhook-meta.js`/`metaIngest.js`),
+> Page Token cifrado por tenant, e **envio in-window** (`meta.sendMessage` + rota
+> `POST /tenant/:tid/leads/:id/mensagem-meta`, `tenant.js:1492`). O bloqueio real de E16
+> é **compliance (Meta App Review / Advanced Access) + UI omnichannel**, não construir o
+> sender. Falta ainda: inscrever `messages`/`messaging_postbacks` no onboarding; guardrail
+> de janela 24h + `HUMAN_AGENT` (`meta.js:69` fixa `messaging_type='RESPONSE'`); mídia via
+> Meta; dedup de pessoa cross-canal. **Não** promover a "completo" até review aprovado.
 
 > **Nota de numeração:** o backlog (`docs/backlog-adicional.md`, tabela "ADRs
 > futuros") reservava **ADR-007** para "identidade unificada de contato
