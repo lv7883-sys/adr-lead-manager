@@ -37,6 +37,37 @@ async function msgCitada(tenantId, replyToMessageId) {
   });
 }
 
+// Resolve a KEY do WhatsApp de uma bolha OUTBOUND nossa a partir do `mid` (id-da-linha).
+// Serve p/ APAGAR e EDITAR (mesma key). Cobre recepcao (staff_outbound_samples) e IA
+// (pending_approvals → eco em staff_outbound). Tenant-scoped (NÃO precisa de lead) — por
+// isso serve o inbox conversation-centric. Devolve { key, soId, deleted_at, phone, paId } ou
+// null (não é saída nossa / bolha do lead / sem id da Evolution). Extraído de tenant.js.
+async function resolverKeyMensagem(c, tenantId, mid) {
+  let r = (await c.query(
+    `SELECT id AS so_id, external_message_id AS msg_id,
+            raw#>>'{data,key,remoteJid}' AS remote_jid,
+            regexp_replace(external_id, '[^0-9]', '', 'g') AS phone,
+            deleted_at, NULL::uuid AS pa_id
+       FROM staff_outbound_samples
+      WHERE tenant_id = $1 AND id = $2`, [tenantId, mid])).rows[0];
+  if (!r) {
+    r = (await c.query(
+      `SELECT s.id AS so_id, s.external_message_id AS msg_id,
+              s.raw#>>'{data,key,remoteJid}' AS remote_jid,
+              regexp_replace(s.external_id, '[^0-9]', '', 'g') AS phone,
+              s.deleted_at, pa.id AS pa_id
+         FROM pending_approvals pa
+         JOIN staff_outbound_samples s
+           ON s.tenant_id = pa.tenant_id AND s.body = pa.suggested_response
+        WHERE pa.tenant_id = $1 AND pa.id = $2 AND pa.status IN ('APPROVED', 'EDITED')
+        ORDER BY s.received_at DESC LIMIT 1`, [tenantId, mid])).rows[0];
+  }
+  if (!r || !r.msg_id) return null;
+  const remoteJid = r.remote_jid || (r.phone ? `${r.phone}@s.whatsapp.net` : null);
+  if (!remoteJid) return null;
+  return { key: { id: r.msg_id, remoteJid, fromMe: true }, soId: r.so_id, deleted_at: r.deleted_at, phone: r.phone, paId: r.pa_id };
+}
+
 // Credenciais Evolution do tenant (instance + apikey decifrada). Sem lead — chave por tenant.
 async function credsForTenant(tenantId) {
   return withTenant(tenantId, async (c) => {
@@ -47,4 +78,4 @@ async function credsForTenant(tenantId) {
   });
 }
 
-module.exports = { registrarSaida, msgCitada, credsForTenant };
+module.exports = { registrarSaida, msgCitada, credsForTenant, resolverKeyMensagem };

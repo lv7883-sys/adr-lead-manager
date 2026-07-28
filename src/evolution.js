@@ -163,4 +163,17 @@ async function editMessage({ instance, apikey }, key, number, text) {
   }
 }
 
-module.exports = { status, sendText, sendMedia, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, _toggle9BR };
+// Reagir a uma mensagem (👍 etc.). `key` = key do WhatsApp da mensagem-alvo (inbound do
+// cliente OU outbound nossa); `reaction` = emoji ('' remove a reação). Best-effort: { ok, error }.
+async function sendReaction({ instance, apikey }, key, reaction) {
+  try {
+    const d = await req('POST', `/message/sendReaction/${encodeURIComponent(instance)}`, apikey, { key, reaction });
+    return { ok: true, raw: d };
+  } catch (e) {
+    const b = e && e.body;
+    const detail = (b && (b.response?.message || b.message || b.error)) || (e && e.message) || 'erro ao reagir';
+    return { ok: false, error: Array.isArray(detail) ? detail.join('; ') : String(detail), status: e && e.status };
+  }
+}
+
+module.exports = { status, sendText, sendMedia, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, _toggle9BR };

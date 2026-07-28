@@ -26,7 +26,7 @@ const stages = require('../stages');   // Passo 1: régua canônica de estágios
 const { generateDraftForLead, classificarSaida, _isTransientAIError, loadRealHistory } = require('../engine');   // Bloco 2: rascunho; ADR-030: saída; _isTransientAIError: resiliência 503; loadRealHistory: histórico completo p/ o Melhorar
 const contractConvert = require('../cadastro/contractConvert');   // 079: fila "confirmar matrícula" (contrato→lead)
 const { fetchTimeline } = require('../timeline');   // ADR-042: timeline compartilhada (fonte única) — /leads/:id e inbox
-const { registrarSaida: _registrarSaida, msgCitada: _msgCitada } = require('../outbound');   // ADR-042: outbound compartilhado (fonte única)
+const { registrarSaida: _registrarSaida, msgCitada: _msgCitada, resolverKeyMensagem: _resolverKeyMensagem } = require('../outbound');   // ADR-042: outbound compartilhado (fonte única)
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
 const multer = require('multer');                        // ADR-016 P1: upload de mídia
@@ -1055,33 +1055,7 @@ async function _credsLead(tenantId, leadId) {
 // p/ as ~80 linhas síncronas sem raw), fromMe: true }. Devolve { key, soId, deleted_at, phone }
 // (phone = número do destinatário, p/ o updateMessage do editar) ou null (mid não é nossa
 // saída — ex.: bolha do LEAD → nunca apagável/editável — ou sem id da Evolution).
-async function _resolverKeyMensagem(c, tenantId, mid) {
-  let r = (await c.query(
-    `SELECT id AS so_id, external_message_id AS msg_id,
-            raw#>>'{data,key,remoteJid}' AS remote_jid,
-            regexp_replace(external_id, '[^0-9]', '', 'g') AS phone,
-            deleted_at, NULL::uuid AS pa_id
-       FROM staff_outbound_samples
-      WHERE tenant_id = $1 AND id = $2`, [tenantId, mid])).rows[0];
-  if (!r) {
-    r = (await c.query(
-      `SELECT s.id AS so_id, s.external_message_id AS msg_id,
-              s.raw#>>'{data,key,remoteJid}' AS remote_jid,
-              regexp_replace(s.external_id, '[^0-9]', '', 'g') AS phone,
-              s.deleted_at, pa.id AS pa_id
-         FROM pending_approvals pa
-         JOIN staff_outbound_samples s
-           ON s.tenant_id = pa.tenant_id AND s.body = pa.suggested_response
-        WHERE pa.tenant_id = $1 AND pa.id = $2 AND pa.status IN ('APPROVED', 'EDITED')
-        ORDER BY s.received_at DESC LIMIT 1`, [tenantId, mid])).rows[0];
-  }
-  if (!r || !r.msg_id) return null;   // não é saída nossa / sem id da Evolution → não apagável/editável
-  const remoteJid = r.remote_jid || (r.phone ? `${r.phone}@s.whatsapp.net` : null);
-  if (!remoteJid) return null;
-  // paId (≠ null) = bolha IA: o corpo vem de pending_approvals; ao editar, atualiza-se lá também
-  // p/ manter o dedup-por-corpo da timeline consistente (senão a msg duplicaria).
-  return { key: { id: r.msg_id, remoteJid, fromMe: true }, soId: r.so_id, deleted_at: r.deleted_at, phone: r.phone, paId: r.pa_id };
-}
+// _resolverKeyMensagem movido p/ src/outbound.js (fonte única — ADR-042). Importado no topo.
 
 // Registra a saída da recepção em staff_outbound_samples (timeline 'recepcao').
 // O eco fromMe do webhook deduplica pela unique (tenant_id, external_message_id).

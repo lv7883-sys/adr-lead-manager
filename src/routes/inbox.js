@@ -26,9 +26,15 @@ const { terminalSql, statusVivoSql } = require('../lifecycle');
 const { fetchTimeline } = require('../timeline');
 const outbound = require('../outbound');
 const evolutionDefault = require('../evolution');
+const gemini = require('../gemini');
+const { loadRealHistory } = require('../engine');
+const { resolveSystemPrompt } = require('../templates');
+const mediaLib = require('../media');
+const multer = require('multer');
 const logger = require('../logger');
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 // Mesmos papéis do resto do namespace /tenant (tenant.js).
 const READ_ROLES = ['TENANT_ADMIN', 'RECEPCAO', 'VISUALIZADOR'];
@@ -397,6 +403,255 @@ router.post('/:tenantId/inbox/conversations/:conversationId/marcar-lido', authen
   }
 });
 
+// Apaga NOSSA mensagem (deleteMessageForEveryone) e reflete "apagada" (E12-07). Só bolhas
+// outbound (resolver não casa bolha do lead → notFound). Idempotente. `deps` p/ o itest.
+async function deleteInboxMessage(tenantId, mid, deps = {}) {
+  const evolution = deps.evolution || evolutionDefault;
+  const credsForTenant = deps.credsForTenant || outbound.credsForTenant;
+  const resolverKeyMensagem = deps.resolverKeyMensagem || outbound.resolverKeyMensagem;
+
+  const alvo = await withTenant(tenantId, (c) => resolverKeyMensagem(c, tenantId, mid));
+  if (!alvo) return { notFound: true };
+  if (alvo.deleted_at) return { ok: true, ja_apagada: true };
+  const creds = await credsForTenant(tenantId);
+  if (!creds.instance || !creds.apikey) return { reason: 'tenant_sem_evolution' };
+  const del = await evolution.deleteMessage({ instance: creds.instance, apikey: creds.apikey }, alvo.key);
+  if (!del.ok) return { reason: 'nao_apagou', detail: del.error };
+  await withTenant(tenantId, (c) => c.query(
+    'UPDATE staff_outbound_samples SET deleted_at = COALESCE(deleted_at, now()) WHERE tenant_id = $1 AND id = $2',
+    [tenantId, alvo.soId]));
+  return { ok: true };
+}
+
+// Edita NOSSA mensagem (updateMessage, janela de 15min validada pela Evolution) e reflete o
+// texto novo + "editada". Só bolhas outbound. `deps` p/ o itest.
+async function editInboxMessage(tenantId, mid, text, deps = {}) {
+  const evolution = deps.evolution || evolutionDefault;
+  const credsForTenant = deps.credsForTenant || outbound.credsForTenant;
+  const resolverKeyMensagem = deps.resolverKeyMensagem || outbound.resolverKeyMensagem;
+
+  const alvo = await withTenant(tenantId, (c) => resolverKeyMensagem(c, tenantId, mid));
+  if (!alvo) return { notFound: true };
+  const creds = await credsForTenant(tenantId);
+  if (!creds.instance || !creds.apikey) return { reason: 'tenant_sem_evolution' };
+  const ed = await evolution.editMessage({ instance: creds.instance, apikey: creds.apikey }, alvo.key, alvo.phone, text);
+  if (!ed.ok) return { reason: 'nao_editou', detail: ed.error };
+  await withTenant(tenantId, async (c) => {
+    await c.query(
+      `UPDATE staff_outbound_samples SET original_body = COALESCE(original_body, body), body = $3, edited_at = now()
+        WHERE tenant_id = $1 AND id = $2`, [tenantId, alvo.soId, text]);
+    if (alvo.paId) {
+      await c.query('UPDATE pending_approvals SET suggested_response = $3 WHERE tenant_id = $1 AND id = $2',
+        [tenantId, alvo.paId, text]);
+    }
+  });
+  return { ok: true, body: text };
+}
+
+// Traduz o resultado dos helpers de editar/apagar em status HTTP.
+function _respostaAcao(res, out) {
+  if (out.notFound) return res.status(404).json({ error: 'nao_encontrada' });   // bloqueia bolha do lead/inbound
+  if (out.reason === 'tenant_sem_evolution') return res.status(400).json({ error: 'tenant_sem_evolution' });
+  if (out.reason) return res.status(502).json({ error: out.reason, detail: out.detail });
+  return res.json(out);
+}
+
+// POST /tenant/:tenantId/inbox/conversations/:cid/mensagem/:mid/apagar (E12-07)
+router.post('/:tenantId/inbox/conversations/:conversationId/mensagem/:mid/apagar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  if (!isUuid(req.params.mid)) return res.status(400).json({ error: 'invalid_mid' });
+  try {
+    _respostaAcao(res, await deleteInboxMessage(req.tenantId, req.params.mid));
+  } catch (err) {
+    logger.error('tenant.inbox.apagar.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tenantId/inbox/conversations/:cid/mensagem/:mid/editar { text } (E12-07)
+router.post('/:tenantId/inbox/conversations/:conversationId/mensagem/:mid/editar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  if (!isUuid(req.params.mid)) return res.status(400).json({ error: 'invalid_mid' });
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  if (!text) return res.status(400).json({ error: 'empty_text' });
+  try {
+    _respostaAcao(res, await editInboxMessage(req.tenantId, req.params.mid, text));
+  } catch (err) {
+    logger.error('tenant.inbox.editar.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// ---- #2 REAGIR (curtir etc.) — Fase 1.5 -----------------------------------------------------
+// Resolve a key do WhatsApp de QUALQUER bolha (nossa outbound OU inbound do cliente).
+async function _keyParaReacao(c, tenantId, mid) {
+  const nosso = await outbound.resolverKeyMensagem(c, tenantId, mid);
+  if (nosso) return nosso.key;
+  const m = (await c.query(
+    `SELECT m.external_message_id, m.raw#>'{data,key}' AS wa_key,
+            regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS phone
+       FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+      WHERE cv.tenant_id = $1 AND m.id = $2`, [tenantId, mid])).rows[0];
+  if (!m) return null;
+  if (m.wa_key) return m.wa_key;                                            // key crua do webhook
+  if (m.external_message_id && m.phone) return { id: m.external_message_id, remoteJid: `${m.phone}@s.whatsapp.net`, fromMe: false };
+  return null;
+}
+async function reactToMessage(tenantId, mid, emoji, deps = {}) {
+  const evolution = deps.evolution || evolutionDefault;
+  const credsForTenant = deps.credsForTenant || outbound.credsForTenant;
+  const key = await withTenant(tenantId, (c) => _keyParaReacao(c, tenantId, mid));
+  if (!key) return { notFound: true };
+  const creds = await credsForTenant(tenantId);
+  if (!creds.instance || !creds.apikey) return { reason: 'tenant_sem_evolution' };
+  const rr = await evolution.sendReaction({ instance: creds.instance, apikey: creds.apikey }, key, emoji);
+  if (!rr.ok) return { reason: 'nao_reagiu', detail: rr.error };
+  return { ok: true };
+}
+router.post('/:tenantId/inbox/conversations/:conversationId/mensagem/:mid/reagir', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  if (!isUuid(req.params.mid)) return res.status(400).json({ error: 'invalid_mid' });
+  const emoji = typeof req.body?.emoji === 'string' ? req.body.emoji : '👍';
+  try {
+    _respostaAcao(res, await reactToMessage(req.tenantId, req.params.mid, emoji));
+  } catch (err) {
+    logger.error('tenant.inbox.reagir.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// ---- #3 ANEXAR ARQUIVO — Fase 1.5 (reusa evolution.sendMedia + outbound.registrarSaida) ------
+const _PLACEHOLDER_MIDIA = { audio: '[áudio]', image: '[imagem]', video: '[vídeo]', document: '[documento]' };
+async function sendInboxMedia(tenantId, conversationId, file, caption, sender, deps = {}) {
+  const evolution = deps.evolution || evolutionDefault;
+  const credsForTenant = deps.credsForTenant || outbound.credsForTenant;
+  const registrarSaida = deps.registrarSaida || outbound.registrarSaida;
+  const saveBuffer = deps.saveBuffer || mediaLib.salvarBuffer;
+
+  const cv = await withTenant(tenantId, (c) =>
+    c.query('SELECT channel, external_id FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, tenantId]).then((r) => r.rows[0] || null));
+  if (!cv) return { notFound: true };
+  if (cv.channel !== 'whatsapp') return { unsupported: cv.channel };
+  const creds = await credsForTenant(tenantId);
+  if (!creds.instance || !creds.apikey) return { reason: 'tenant_sem_evolution' };
+  const st = await evolution.status({ instance: creds.instance, apikey: creds.apikey });
+  if (st.state !== 'open') return { reason: 'instancia=' + st.state };
+
+  const mimetype = file.mimetype || 'application/octet-stream';
+  const filename = file.originalname || 'arquivo';
+  const saved = saveBuffer({ tenantId, buffer: file.buffer, mimetype, filename });
+  const r = await evolution.sendMedia({ instance: creds.instance, apikey: creds.apikey }, cv.external_id, {
+    mediatype: saved.media_type, mimetype, media: saved.base64, fileName: filename, caption: caption || undefined,
+  });
+  const messageId = evolution.pickMessageId(r);
+  const ph = caption || (saved.media_type === 'document' ? `[documento: ${filename}]` : (_PLACEHOLDER_MIDIA[saved.media_type] || '[mídia]'));
+  await registrarSaida(tenantId, {
+    phone: cv.external_id, externalMessageId: messageId, sender, body: ph,
+    media: { url: saved.media_url, type: saved.media_type, filename: saved.media_type === 'document' ? filename : null },
+  });
+  return { ok: true, message_id: messageId, media_url: saved.media_url, media_type: saved.media_type };
+}
+router.post('/:tenantId/inbox/conversations/:conversationId/midia', authenticate, requireTenantAccess(WRITE_ROLES), upload.single('file'), async (req, res) => {
+  if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'no_file' });
+  const caption = typeof req.body?.caption === 'string' ? req.body.caption.trim() : '';
+  try {
+    const out = await sendInboxMedia(req.tenantId, req.params.conversationId, req.file, caption, req.tenantRole);
+    if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
+    if (out.unsupported) return res.status(422).json({ error: 'canal_nao_suportado', channel: out.unsupported });
+    if (out.reason === 'tenant_sem_evolution') return res.status(400).json({ error: 'tenant_sem_evolution' });
+    if (out.reason && out.reason.startsWith('instancia=')) return res.status(409).json({ error: out.reason });
+    res.json(out);
+  } catch (err) {
+    logger.error('tenant.inbox.midia.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
+
+// ---- #4 SUGERIR RESPOSTA DA IA (sob demanda, sem persistir) — Fase 1.5 -----------------------
+// Reusa loadRealHistory + gemini.generateReply + resolveSystemPrompt (compõe como o
+// generateDraftForLead, mas SEM criar pending_approval — só devolve o texto p/ preencher o campo).
+async function suggestReply(tenantId, conversationId, deps = {}) {
+  const generate = deps.generate || gemini.generateReply;
+  const info = await withTenant(tenantId, async (c) => {
+    const cv = (await c.query(
+      `SELECT id, regexp_replace(external_id, '[^0-9]', '', 'g') AS ident
+         FROM conversations WHERE id = $1 AND tenant_id = $2`, [conversationId, tenantId])).rows[0];
+    if (!cv) return null;
+    const leadRow = (await c.query(
+      `SELECT id FROM leads WHERE tenant_id = $1 AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+        ORDER BY created_at ASC LIMIT 1`, [tenantId, cv.ident])).rows[0];
+    const last = (await c.query(
+      `SELECT body FROM messages WHERE conversation_id = $1 AND role = 'USER' ORDER BY received_at DESC LIMIT 1`, [cv.id])).rows[0];
+    const cfg = (await c.query(
+      `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
+         FROM tenant_lead_config WHERE tenant_id = $1`, [tenantId])).rows[0];
+    const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
+    return {
+      convId: cv.id, ident: cv.ident, leadId: (leadRow && leadRow.id) || null, lastBody: (last && last.body) || '',
+      config: cfg || { school_name: tname || 'Escola', system_prompt_override: null, available_instruments: [], business_hours: {}, notification_whatsapp: null },
+    };
+  });
+  if (!info) return { notFound: true };
+  const history = await loadRealHistory(tenantId, { conversationId: info.convId, ident: info.ident, leadId: info.leadId });
+  try {
+    const suggestion = await generate({ systemPrompt: resolveSystemPrompt(info.config), history, message: info.lastBody, retomada: history.length > 0 });
+    return { ok: true, suggestion };
+  } catch (e) {
+    return { reason: 'generate_error', detail: e.message };
+  }
+}
+router.post('/:tenantId/inbox/conversations/:conversationId/sugerir', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  try {
+    const out = await suggestReply(req.tenantId, req.params.conversationId);
+    if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
+    if (out.reason) return res.status(502).json({ error: out.reason, detail: out.detail });
+    res.json(out);
+  } catch (err) {
+    logger.error('tenant.inbox.sugerir.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// ---- #5 MARCAR COMO LEAD — Fase 1.5 (promove lead casável OU cria a partir da conversa) -------
+async function marcarComoLead(tenantId, conversationId, sender) {
+  return withTenant(tenantId, async (c) => {
+    const cv = (await c.query(
+      `SELECT external_id, channel, regexp_replace(external_id, '[^0-9]', '', 'g') AS ident
+         FROM conversations WHERE id = $1 AND tenant_id = $2`, [conversationId, tenantId])).rows[0];
+    if (!cv) return { notFound: true };
+    if (!cv.ident) return { noPhone: true };
+    const existing = (await c.query(
+      `SELECT id FROM leads WHERE tenant_id = $1 AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+        ORDER BY created_at ASC LIMIT 1`, [tenantId, cv.ident])).rows[0];
+    if (existing) {
+      await c.query(
+        `UPDATE leads SET status = 'QUALIFYING', review_queue = false, review_result = 'confirmed_lead',
+                          review_em = now(), review_by = $2, updated_at = now()
+          WHERE id = $1`, [existing.id, sender || null]);
+      return { ok: true, lead_id: existing.id, created: false };
+    }
+    const nm = (await c.query(
+      `SELECT sender FROM messages WHERE conversation_id = $1 AND role = 'USER' AND sender IS NOT NULL
+        ORDER BY received_at ASC LIMIT 1`, [conversationId])).rows[0];
+    const r = await c.query(
+      `INSERT INTO leads (tenant_id, name, phone, status, origem)
+       VALUES ($1, $2, $3, 'QUALIFYING', $4) RETURNING id`,
+      [tenantId, (nm && nm.sender) || null, cv.external_id, cv.channel]);
+    return { ok: true, lead_id: r.rows[0].id, created: true };
+  });
+}
+router.post('/:tenantId/inbox/conversations/:conversationId/marcar-lead', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  try {
+    const out = await marcarComoLead(req.tenantId, req.params.conversationId, req.tenantRole);
+    if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
+    if (out.noPhone) return res.status(422).json({ error: 'sem_telefone' });
+    res.json(out);
+  } catch (err) {
+    logger.error('tenant.inbox.marcar_lead.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 module.exports = router;
 // Superfície testável (itest exercita a lógica SQL contra Postgres real).
 module.exports.buildConversationsSql = buildConversationsSql;
@@ -404,6 +659,12 @@ module.exports.mapConversationRow = mapConversationRow;
 module.exports.listConversations = listConversations;
 module.exports.getConversationThread = getConversationThread;
 module.exports.sendMessage = sendMessage;
+module.exports.deleteInboxMessage = deleteInboxMessage;
+module.exports.editInboxMessage = editInboxMessage;
+module.exports.reactToMessage = reactToMessage;
+module.exports.sendInboxMedia = sendInboxMedia;
+module.exports.suggestReply = suggestReply;
+module.exports.marcarComoLead = marcarComoLead;
 module.exports.markRead = markRead;
 module.exports.encodeCursor = encodeCursor;
 module.exports.decodeCursor = decodeCursor;
