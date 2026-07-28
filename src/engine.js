@@ -1437,8 +1437,10 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       // no existente — seta meta_leadgen_id se NULL, completa nome/email, registra o
       // evento. origem fica a do first-touch (não atualiza). Sem duplicata, sem evento
       // perdido, sem unique_violation no índice de phone (que o ON CONFLICT não cobre).
-      const existing = await findByPhone();
-      if (existing) {
+      // Merge do leadgen num lead JÁ existente (achado por telefone): seta meta_leadgen_id
+      // se NULL, completa nome/email e registra o evento. Reusado pelo caminho normal E
+      // pela blindagem de corrida abaixo (mesma semântica nos dois).
+      const mergeLeadgenInto = async (existing) => {
         await c.query(
           `UPDATE leads SET meta_leadgen_id = COALESCE(meta_leadgen_id, $2),
                             name  = COALESCE(name, $3),
@@ -1452,21 +1454,41 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
            VALUES ($1, $2, 'meta_form_recebido', 'meta', $3)`,
           [tenantId, existing.id, 'Formulário Lead Ads recebido (vínculo por telefone)']
         );
-        lead = { rows: [{ id: existing.id, status: existing.status, inserted: false }] };
+        return { rows: [{ id: existing.id, status: existing.status, inserted: false }] };
+      };
+
+      const existing = await findByPhone();
+      if (existing) {
+        lead = await mergeLeadgenInto(existing);
       } else {
-        // Não achou: cria com origem=meta_lead_ads (first-touch). ON CONFLICT cobre
-        // reentrega do MESMO leadgen (idempotência); origem fora do DO UPDATE = imutável.
-        lead = await c.query(
-          `INSERT INTO leads (tenant_id, name, phone, email, status, meta_leadgen_id, origem)
-           VALUES ($1, $2, $3, $4, 'NEW', $5, 'meta_lead_ads')
-           ON CONFLICT (tenant_id, meta_leadgen_id) WHERE meta_leadgen_id IS NOT NULL
-           DO UPDATE SET name = COALESCE(EXCLUDED.name, leads.name),
-                         phone = COALESCE(EXCLUDED.phone, leads.phone),
-                         email = COALESCE(EXCLUDED.email, leads.email),
-                         updated_at = now()
-           RETURNING id, status, (xmax = 0) AS inserted`,
-          [tenantId, msg.sender || phone, phone, msg.email || null, msg.leadgenId]
-        );
+        // Não achou por telefone: cria com origem=meta_lead_ads (first-touch). ON CONFLICT
+        // cobre reentrega do MESMO leadgen (idempotência); origem fora do DO UPDATE = imutável.
+        // BLINDAGEM DE CORRIDA (SPIKE-E16 Cenário B): o pré-lookup + INSERT NÃO é atômico — uma
+        // tx concorrente de WhatsApp com o MESMO telefone pode commitar entre o findByPhone e
+        // este INSERT, disparando 23505 no índice parcial uq_leads_tenant_phone (que o
+        // ON CONFLICT(meta_leadgen_id) NÃO cobre). O SAVEPOINT isola o INSERT: no 23505 de phone
+        // desfaz só ele (a tx segue viva), reconsulta e faz o MERGE no lead que venceu a corrida.
+        await c.query('SAVEPOINT leadgen_insert');
+        try {
+          lead = await c.query(
+            `INSERT INTO leads (tenant_id, name, phone, email, status, meta_leadgen_id, origem)
+             VALUES ($1, $2, $3, $4, 'NEW', $5, 'meta_lead_ads')
+             ON CONFLICT (tenant_id, meta_leadgen_id) WHERE meta_leadgen_id IS NOT NULL
+             DO UPDATE SET name = COALESCE(EXCLUDED.name, leads.name),
+                           phone = COALESCE(EXCLUDED.phone, leads.phone),
+                           email = COALESCE(EXCLUDED.email, leads.email),
+                           updated_at = now()
+             RETURNING id, status, (xmax = 0) AS inserted`,
+            [tenantId, msg.sender || phone, phone, msg.email || null, msg.leadgenId]
+          );
+          await c.query('RELEASE SAVEPOINT leadgen_insert');
+        } catch (e) {
+          if (!(e && e.code === '23505' && e.constraint === 'uq_leads_tenant_phone')) throw e;
+          await c.query('ROLLBACK TO SAVEPOINT leadgen_insert');
+          const raced = await findByPhone();
+          if (!raced) throw e;   // 23505 de phone sem lead achável não deveria ocorrer: repropaga
+          lead = await mergeLeadgenInto(raced);
+        }
       }
     } else if (psid) {
       lead = await c.query(

@@ -83,6 +83,41 @@ async function leads() { return q('SELECT id, phone, email, status, origem, meta
     const ev = await q(`SELECT 1 FROM lead_eventos WHERE tenant_id=$1 AND lead_id=$2 AND tipo='meta_form_recebido'`, [T, merged.id]);
     ok(ev.length === 1, 'B5: evento meta_form_recebido registrado (evento NÃO perdido)');
 
+    // ===== GATE 2b: Cenário B sob CORRIDA — blindagem do SAVEPOINT (23505 de phone) =====
+    // Reproduz a janela não-atômica: uma tx de WhatsApp com o MESMO telefone commita ENTRE o
+    // findByPhone e o INSERT do leadgen. O pré-lookup do leadgen não vê a linha não-commitada,
+    // tenta INSERT, BLOQUEIA no índice uq_leads_tenant_phone e — ao A commitar — leva 23505.
+    // O ON CONFLICT(meta_leadgen_id) NÃO cobre esse conflito: sem o SAVEPOINT, estouraria
+    // unique_violation e o vínculo se perderia. Com ele: rollback do INSERT, reconsulta, MERGE.
+    {
+      const raceP = '+5519955554444';
+      const canon = telBR.toE164BR(raceP);
+      const a = await pool.connect();
+      try {
+        await a.query('BEGIN');
+        await a.query("SELECT set_config('app.current_tenant', $1, true)", [T]);
+        // linha WhatsApp NÃO commitada: ocupa o slot do índice de phone, invisível ao leadgen.
+        await a.query(
+          `INSERT INTO leads (tenant_id, name, phone, status, origem) VALUES ($1,$2,$3,'NEW','whatsapp')`,
+          [T, 'Cliente WA Corrida', canon]
+        );
+        // dispara o leadgen concorrente: findByPhone (não vê A) → INSERT → trava esperando A.
+        const leadgenDone = engine.processInbound(
+          { id: T }, leadgenMsg(raceP, 'LG-RACE', 'race@forj.com'), { meta_leadgen: {} }, deps()
+        );
+        // tempo p/ o leadgen passar do findByPhone e travar no INSERT; então A commita → 23505.
+        await new Promise((r) => setTimeout(r, 500));
+        await a.query('COMMIT');
+        await leadgenDone;   // NÃO deve rejeitar: unique_violation tratada pelo SAVEPOINT.
+      } finally {
+        a.release();
+      }
+      const race = (await leads()).filter((l) => l.phone === canon);
+      ok(race.length === 1, 'RACE1: WhatsApp+leadgen concorrentes no MESMO telefone NÃO duplicam (1 lead)');
+      ok(race[0] && race[0].meta_leadgen_id === 'LG-RACE', 'RACE2: vínculo meta_leadgen_id preservado sob corrida (23505 tratada, não escapa)');
+      ok(race[0] && race[0].origem === 'whatsapp', 'RACE3: origem = first-touch (whatsapp) após merge sob corrida');
+    }
+
     // ===== GATE: no-regression — WhatsApp puro novo entra no funil =====
     await engine.processInbound({ id: T }, waMsg('+5519933332222', 'wa-C1'), {}, deps());
     const C = (await leads()).find((l) => l.phone && l.phone.includes('93333'));
