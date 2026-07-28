@@ -135,7 +135,8 @@ test('O5 borda da janela: contrato 5 dias ANTES da 1ª mensagem → convertido; 
   const lDentro = await seedLead(A, { name: 'Borda Dentro', phone: dentro });
   await seedConversa(A, fora, '2026-06-20T10:00:00Z');
   await seedContract(A, { ini: '2026-06-11', fim: FUT, aluno: 'Borda Fora', alunoPhone: fora });
-  const lFora = await seedLead(A, { name: 'Borda Fora', phone: fora });
+  // fora do funil → o 'cliente' aplica sozinho (o lead VIVO vai para a fila; O13 cobre esse caso).
+  const lFora = await seedLead(A, { name: 'Borda Fora', phone: fora, status: 'NOT_LEAD' });
   const st = await run(A, 'auto', [lDentro, lFora], 7);
   assert.equal(st.convertido, 1); assert.equal(st.cliente, 1);
   assert.equal((await leadOf(A, lDentro)).desfecho, 'matriculado', '5 dias antes cabe na tolerância');
@@ -146,7 +147,7 @@ test('O6 janela por-tenant: com janela=0 o mesmo caso de 5 dias antes vira clien
   const phone = '5519991230007';
   await seedConversa(A, phone, '2026-06-20T10:00:00Z');
   await seedContract(A, { ini: '2026-06-15', fim: FUT, aluno: 'Janela Zero', alunoPhone: phone });
-  const lead = await seedLead(A, { name: 'Janela Zero', phone });
+  const lead = await seedLead(A, { name: 'Janela Zero', phone, status: 'NOT_LEAD' });
   assert.equal((await run(A, 'auto', [lead], 0)).cliente, 1);
   assert.equal((await leadOf(A, lead)).desfecho, 'cliente');
 });

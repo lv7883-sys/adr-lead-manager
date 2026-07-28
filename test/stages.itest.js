@@ -113,7 +113,7 @@ test('(5) loadStages: default sem config; funde defs do tenant; multi-tenant iso
 test('(6) loadStages sem tabela/erro → default puro (degrada elegante)', async () => {
   const boom = () => { throw new Error('sem config'); };
   const out = await loadStages(T1, { withTenant: boom });
-  assert.equal(out.length, 7, 'régua completa (inclui realizada funil-only)');
+  assert.equal(out.length, 8, 'régua completa (inclui realizada funil-only e cliente pré-existente/079)');
   for (const s of out) assert.equal(s.definition, null);
   assert.deepEqual(PERDIDO_DESFECHOS.includes('nao_compareceu_aula'), true);
 });
