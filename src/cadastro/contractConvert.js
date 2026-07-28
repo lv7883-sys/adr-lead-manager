@@ -54,11 +54,15 @@ const _humanLatched = (l) => l.review_result === 'confirmed_not_lead' && !!l.rev
 const _vivoNoFunil = (l) => !l.desfecho
   && !['NOT_LEAD', 'REVIEW_QUEUE', 'PENDING_CLASSIFICATION'].includes(String(l.status || '').toUpperCase());
 
-// Config por-tenant (mode + janela). Sem linha → default inerte.
+// Config por-tenant (mode + janela). Sem linha → default inerte. Sem as colunas (migration 079 ainda
+// não aplicada) → mesmo default, sem explodir: degrada elegante como o loadStages.
 async function loadConfig(c, tenantId) {
-  const r = (await c.query(
-    'SELECT contract_convert_mode, contract_convert_janela_dias FROM lead_manager.tenant_lead_config WHERE tenant_id=$1',
-    [tenantId])).rows[0] || {};
+  let r = {};
+  try {
+    r = (await c.query(
+      'SELECT contract_convert_mode, contract_convert_janela_dias FROM lead_manager.tenant_lead_config WHERE tenant_id=$1',
+      [tenantId])).rows[0] || {};
+  } catch { r = {}; }
   return {
     mode: r.contract_convert_mode || 'off',
     janelaDias: Number.isInteger(r.contract_convert_janela_dias) ? r.contract_convert_janela_dias : JANELA_PADRAO_DIAS,
