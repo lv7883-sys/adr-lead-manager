@@ -382,6 +382,24 @@ router.get('/:tenantId/inbox/conversations', authenticate, requireTenantAccess(R
   }
 });
 
+// GET /tenant/:tenantId/inbox/nao-lidas — total de mensagens não-lidas (soma), p/ o badge do nav.
+router.get('/:tenantId/inbox/nao-lidas', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const total = await withTenant(req.tenantId, async (c) => (await c.query(
+      `SELECT COALESCE(SUM(n), 0)::int AS total FROM (
+         SELECT (SELECT count(*) FROM messages m
+                  WHERE m.conversation_id = cv.id AND m.role = 'USER'
+                    AND (cv.last_read_at IS NULL OR m.received_at > cv.last_read_at)) AS n
+           FROM conversations cv
+          WHERE cv.tenant_id = $1 AND coalesce(cv.external_id, '') NOT LIKE '%@g.us'
+       ) u`, [req.tenantId])).rows[0].total);
+    res.json({ total });
+  } catch (err) {
+    logger.error('tenant.inbox.nao_lidas.error', { tenant_id: req.tenantId, error: err.message });
+    res.json({ total: 0 });
+  }
+});
+
 // POST /tenant/:tenantId/inbox/conversations/:conversationId/marcar-lido
 //   body: { up_to?: timestamptz }  — default now(). Cursor compartilhado por tenant (migr. 080).
 router.post('/:tenantId/inbox/conversations/:conversationId/marcar-lido', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
