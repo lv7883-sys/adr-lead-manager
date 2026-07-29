@@ -366,10 +366,17 @@ async function handleZapiWebhook(req, res) {
     log.info('webhook.no_message', { reason: 'unparseable_payload' });
     return;
   }
-  // Grupo (@g.us) NUNCA vira lead — guard genérico, antes de qualquer ingestão
-  // (sem criar lead nem capturar staff_sample; o id de grupo não é telefone).
+  // Grupo (@g.us) NUNCA vira lead. ADR-042 E14/B1: em vez de descartar, INGERE a mensagem
+  // (kind='GROUP') p/ aparecer na Caixa de Entrada — SEM funil de lead, isolado do 1:1.
+  // Só inbound (mensagem de participante); fromMe (nosso envio no grupo) fica p/ o B3.
   if (msg.isGroup) {
-    log.info('webhook.skipped', { reason: 'group_message' });
+    const jid = (req.body && req.body.data && req.body.data.key && req.body.data.key.remoteJid)
+      || (req.body && req.body.phone) || null;
+    if (!msg.fromMe && jid) {
+      engine.captureGroupInbound(tenant.id, String(jid), msg, req.body)
+        .catch((e) => log.warn('group.capture_unhandled', { error: e.message }));
+    }
+    log.info('webhook.group', { captured: !msg.fromMe, from_me: msg.fromMe });
     return;
   }
   if (msg.fromMe) {

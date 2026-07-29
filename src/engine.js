@@ -395,6 +395,36 @@ async function captureInboundOnly(tenantId, channel, externalId, msg, rawBody) {
   }
 }
 
+// ADR-042 (E14 / B1) — captura mensagem de GRUPO (jid @g.us). NÃO passa pelo funil de lead
+// (grupo nunca é lead). Cria a conversa com kind='GROUP' e external_id = jid COMPLETO (com
+// @g.us, distinto dos telefones 1:1). sender = pushName do participante (autor). Aditivo e
+// isolado do 1:1. Best-effort. Dedup por (tenant, external_message_id).
+async function captureGroupInbound(tenantId, jid, msg, rawBody) {
+  if (!jid || !/@g\.us$/i.test(String(jid)) || !msg.body) return;
+  try {
+    await withTenant(tenantId, async (c) => {
+      const conv = (await c.query(
+        `INSERT INTO conversations (tenant_id, channel, external_id, conversation_kind)
+         VALUES ($1, 'whatsapp', $2, 'GROUP')
+         ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
+         RETURNING id`,
+        [tenantId, jid]
+      )).rows[0];
+      await c.query(
+        `INSERT INTO messages
+           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw,
+            media_url, media_type, media_filename, media_transcription)
+         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (tenant_id, external_message_id)
+           WHERE external_message_id IS NOT NULL DO NOTHING`,
+        [tenantId, conv.id, msg.externalMessageId, msg.sender, msg.body, rawBody, ..._mediaCols(msg)]
+      );
+    });
+  } catch (e) {
+    logger.warn('group.capture_failed', { tenant_id: tenantId, error: e.message });
+  }
+}
+
 // ADR-019 — captura uma mensagem DESCARTADA (gate0) sem criar lead. Upsert da
 // conversa + message com discarded=true. Best-effort. Alimenta "Não classificadas".
 async function captureDiscarded(tenantId, channel, externalId, msg, rawBody, reason) {
@@ -1852,6 +1882,7 @@ async function generateDraftForLead(tenantId, leadId, deps = {}) {
 
 module.exports = {
   processInbound, generateDraftForLead, mergeQualification, loadRealHistory, reprocessPendingLead,
+  captureGroupInbound,   // ADR-042 E14/B1 — ingestão de mensagem de grupo
   CONFIDENCE_THRESHOLD,
   // Helpers puros expostos p/ teste (resiliência 503).
   _isTransientAIError, _pendingWindowExpired, _decideConversaRoute, PENDING_CLASSIFICATION_WINDOW_MS,
