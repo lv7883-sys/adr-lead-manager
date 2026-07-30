@@ -275,7 +275,7 @@ async function markUnread(client, tenantId, conversationId) {
 // Abre a thread de UMA conversa (E12-05), ancorada em conversation_id — funciona para
 // conversa de NÃO-LEAD (leadId null => timeline sem o ramo IA). Retorna null se a conversa
 // não existe no tenant.
-async function getConversationThread(client, tenantId, conversationId) {
+async function getConversationThread(client, tenantId, conversationId, usuario) {
   const cv = (await client.query(
     `SELECT id, channel, external_id, last_read_at, conversation_kind,
             regexp_replace(external_id, '[^0-9]', '', 'g') AS ident
@@ -294,11 +294,11 @@ async function getConversationThread(client, tenantId, conversationId) {
 
   const timeline = await fetchTimeline(client, { tenantId, ident: cv.ident, leadId: lead ? lead.id : null });
 
-  // ADR-042 — marca as bolhas FAVORITADAS (estrela). message_id é único por tenant entre as
-  // 3 fontes, então casa por id direto. Alimenta o marcador na bolha + o painel "favoritas".
+  // ADR-042 — marca as bolhas FAVORITADAS (estrela) DO USUÁRIO (favorited_by). Cada recepcionista
+  // vê só as suas. Sem usuario => nenhuma (favorited_by nunca é null nas linhas gravadas).
   const favSet = new Set((await client.query(
-    `SELECT message_id FROM message_favorites WHERE tenant_id = $1 AND conversation_id = $2`,
-    [tenantId, conversationId])).rows.map((r) => r.message_id));
+    `SELECT message_id FROM message_favorites WHERE tenant_id = $1 AND conversation_id = $2 AND favorited_by = $3`,
+    [tenantId, conversationId, usuario ? String(usuario) : ''])).rows.map((r) => r.message_id));
   if (favSet.size) for (const m of timeline) if (favSet.has(m.id)) m.favorito = true;
 
   const is_lead = !!lead && lead.status !== 'NOT_LEAD' && lead.status !== 'REVIEW_QUEUE';
@@ -408,8 +408,9 @@ router.post('/:tenantId/inbox/conversations/:conversationId/mensagem', authentic
 router.get('/:tenantId/inbox/conversations/:conversationId', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   const { conversationId } = req.params;
   if (!isUuid(conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  const usuario = typeof req.query.usuario === 'string' ? req.query.usuario : '';
   try {
-    const out = await withTenant(req.tenantId, (c) => getConversationThread(c, req.tenantId, conversationId));
+    const out = await withTenant(req.tenantId, (c) => getConversationThread(c, req.tenantId, conversationId, usuario));
     if (!out) return res.status(404).json({ error: 'conversation_not_found' });
     res.json({ tenant_id: req.tenantId, ...out });
   } catch (err) {
@@ -608,16 +609,19 @@ router.post('/:tenantId/inbox/conversations/:conversationId/mensagem/:mid/reagir
 // Toggle local (NÃO chama o WhatsApp — favorito é visão interna da recepção). Referencia a bolha
 // por (conversation_id, kind, message_id). Existe → desfavorita (DELETE); senão → favorita.
 const _FAV_KINDS = new Set(['lead', 'recepcao', 'ia']);
-async function toggleFavorito(tenantId, conversationId, mid, kind, sender) {
+// Favoritas são POR USUÁRIO (favorited_by = id do usuário do dashboard). Toggle escopado ao dono:
+// cada recepcionista favorita/desfavorita as SUAS. Índice único (tenant, message, favorited_by).
+async function toggleFavorito(tenantId, conversationId, mid, kind, usuario) {
+  const dono = usuario ? String(usuario) : '';
   return withTenant(tenantId, async (c) => {
     const del = await c.query(
-      'DELETE FROM message_favorites WHERE tenant_id = $1 AND message_id = $2 RETURNING id',
-      [tenantId, mid]);
+      'DELETE FROM message_favorites WHERE tenant_id = $1 AND message_id = $2 AND favorited_by = $3 RETURNING id',
+      [tenantId, mid, dono]);
     if (del.rows.length) return { ok: true, favorito: false };
     await c.query(
       `INSERT INTO message_favorites (tenant_id, conversation_id, message_kind, message_id, favorited_by)
-       VALUES ($1, $2, $3, $4, $5) ON CONFLICT (tenant_id, message_id) DO NOTHING`,
-      [tenantId, conversationId, _FAV_KINDS.has(kind) ? kind : 'lead', mid, sender || null]);
+       VALUES ($1, $2, $3, $4, $5) ON CONFLICT (tenant_id, message_id, favorited_by) DO NOTHING`,
+      [tenantId, conversationId, _FAV_KINDS.has(kind) ? kind : 'lead', mid, dono]);
     return { ok: true, favorito: true };
   });
 }
@@ -625,8 +629,9 @@ router.post('/:tenantId/inbox/conversations/:conversationId/mensagem/:mid/favori
   if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
   if (!isUuid(req.params.mid)) return res.status(400).json({ error: 'invalid_mid' });
   const kind = typeof req.body?.kind === 'string' ? req.body.kind : 'lead';
+  const usuario = req.body?.usuario != null ? String(req.body.usuario) : '';
   try {
-    const out = await toggleFavorito(req.tenantId, req.params.conversationId, req.params.mid, kind, req.tenantRole);
+    const out = await toggleFavorito(req.tenantId, req.params.conversationId, req.params.mid, kind, usuario);
     res.json(out);
   } catch (err) {
     logger.error('tenant.inbox.favoritar.error', { tenant_id: req.tenantId, error: err.message });
