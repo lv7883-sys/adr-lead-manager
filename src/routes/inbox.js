@@ -26,6 +26,7 @@ const { terminalSql, statusVivoSql } = require('../lifecycle');
 const { fetchTimeline } = require('../timeline');
 const outbound = require('../outbound');
 const evolutionDefault = require('../evolution');
+const metaDefault = require('../meta');
 const gemini = require('../gemini');
 const { loadRealHistory } = require('../engine');
 const { resolveSystemPrompt } = require('../templates');
@@ -340,7 +341,27 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
     c.query('SELECT channel, external_id FROM conversations WHERE id = $1 AND tenant_id = $2',
       [conversationId, tenantId]).then((r) => r.rows[0] || null));
   if (!cv) return { notFound: true };
-  if (cv.channel !== 'whatsapp') return { unsupported: cv.channel };   // Fase 1: só WhatsApp
+
+  // Meta (Instagram DM / Facebook Messenger): envia pela Graph API (meta.sendMessage), pelo PSID
+  // (= external_id). Persiste a saída como o WhatsApp (staff_outbound_samples), então aparece na
+  // thread. Sem "quoted"/edição (a Graph não expõe o mesmo modelo). Janela de 24h: erro legível.
+  if (cv.channel === 'instagram_dm' || cv.channel === 'facebook_messenger') {
+    const meta = deps.meta || metaDefault;
+    const pageCreds = deps.pageCredsForTenant || meta.pageCredsForTenant;
+    const creds = await pageCreds(tenantId);
+    if (!creds || !creds.pageId || !creds.token) return { reason: 'tenant_sem_meta' };
+    let r;
+    try {
+      r = await meta.sendMessage({ pageId: creds.pageId, token: creds.token }, cv.external_id, text);
+    } catch (e) {
+      return { reason: 'meta_falhou', detail: e.message };
+    }
+    const messageId = (r && (r.message_id || r.mid)) || null;
+    await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: text, replyToMessageId: null });
+    return { ok: true, message_id: messageId, channel: cv.channel };
+  }
+
+  if (cv.channel !== 'whatsapp') return { unsupported: cv.channel };
   const phone = cv.external_id;
 
   const creds = await credsForTenant(tenantId);
@@ -373,6 +394,8 @@ router.post('/:tenantId/inbox/conversations/:conversationId/mensagem', authentic
     if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
     if (out.unsupported) return res.status(422).json({ error: 'canal_nao_suportado', channel: out.unsupported });
     if (out.reason === 'tenant_sem_evolution') return res.status(400).json({ error: 'tenant_sem_evolution' });
+    if (out.reason === 'tenant_sem_meta') return res.status(400).json({ error: 'tenant_sem_meta' });
+    if (out.reason === 'meta_falhou') return res.status(502).json({ error: 'meta_falhou', detail: out.detail });
     if (out.reason && out.reason.startsWith('instancia=')) return res.status(409).json({ error: out.reason });
     res.json({ ok: true, message_id: out.message_id, quoted: out.quoted });
   } catch (err) {

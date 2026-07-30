@@ -32,15 +32,16 @@ const H = (n) => `+5519${String(n).padStart(9, '0')}`;
 async function conv(tenant, ext, channel = 'whatsapp') {
   return (await c.query(`INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1,$2,$3) RETURNING id`, [tenant, channel, ext])).rows[0].id;
 }
-// Evolution mockada com espião de envio. credsForTenant mockada (sem tocar tenants/crypto).
-function mkDeps({ state = 'open', creds = { instance: 'inst', apikey: 'key' } } = {}) {
-  const spy = { sends: 0 };
+// Evolution + Meta mockadas com espião de envio. Creds mockadas (sem tocar tenants/crypto).
+function mkDeps({ state = 'open', creds = { instance: 'inst', apikey: 'key' }, metaCreds = { pageId: 'PID', token: 'TOK' } } = {}) {
+  const spy = { sends: 0, metaSends: 0 };
   const evolution = {
     status: async () => ({ state }),
     sendText: async () => { spy.sends++; return { key: { id: 'MSGID1' } }; },
     pickMessageId: () => 'MSGID1',
   };
-  return { deps: { evolution, credsForTenant: async () => creds }, spy };
+  const meta = { sendMessage: async () => { spy.metaSends++; return { message_id: 'MMSG1' }; } };
+  return { deps: { evolution, credsForTenant: async () => creds, meta, pageCredsForTenant: async () => metaCreds }, spy };
 }
 const soRows = async (tenant) => (await c.query('SELECT * FROM staff_outbound_samples WHERE tenant_id=$1', [tenant])).rows;
 
@@ -69,12 +70,29 @@ test('(2) conversa inexistente -> notFound, sem chamar a API externa', async () 
   assert.equal(spy.sends, 0);
 });
 
-test('(3) canal nao suportado (Fase 1 = so whatsapp) -> unsupported, sem envio', async () => {
-  const cv = await conv(T1, H(3), 'instagram_dm');
+test('(3) canal nao suportado (ex.: google) -> unsupported, sem envio', async () => {
+  const cv = await conv(T1, H(3), 'google');
   const { deps, spy } = mkDeps();
   const out = await inbox.sendMessage(T1, cv, { text: 'oi' }, deps);
-  assert.deepEqual(out, { unsupported: 'instagram_dm' });
-  assert.equal(spy.sends, 0);
+  assert.deepEqual(out, { unsupported: 'google' });
+  assert.equal(spy.sends, 0); assert.equal(spy.metaSends, 0);
+});
+
+test('(3b) Instagram DM -> envia via Meta (PSID) e persiste a saida', async () => {
+  const cv = await conv(T1, '17841400000000001', 'instagram_dm');
+  const { deps, spy } = mkDeps();
+  const out = await inbox.sendMessage(T1, cv, { text: 'oi pelo insta', sender: 'RECEPCAO' }, deps);
+  assert.equal(out.ok, true); assert.equal(out.channel, 'instagram_dm'); assert.equal(out.message_id, 'MMSG1');
+  assert.equal(spy.metaSends, 1); assert.equal(spy.sends, 0, 'nao chamou Evolution');
+  const row = (await soRows(T1)).find((r) => r.external_message_id === 'MMSG1');
+  assert.ok(row); assert.equal(row.body, 'oi pelo insta'); assert.equal(row.external_id, '17841400000000001');
+});
+
+test('(3c) Messenger sem credenciais Meta -> tenant_sem_meta, sem envio', async () => {
+  const cv = await conv(T1, '2000000000001', 'facebook_messenger');
+  const { deps, spy } = mkDeps({ metaCreds: { pageId: null, token: null } });
+  const out = await inbox.sendMessage(T1, cv, { text: 'oi' }, deps);
+  assert.equal(out.reason, 'tenant_sem_meta'); assert.equal(spy.metaSends, 0);
 });
 
 test('(4) tenant sem evolution -> reason, sem envio', async () => {
