@@ -70,8 +70,13 @@ async function status({ instance, apikey }) {
 // `quoted` (opcional) = citação do WhatsApp: { key: { id, remoteJid, fromMe, ... } }.
 // Incluído no corpo SÓ quando presente — sem `quoted`, o comportamento é idêntico ao anterior.
 async function sendText({ instance, apikey }, number, text, quoted) {
-  const n = String(number || '').replace(/\D+/g, '');
   const corpo = (num) => ({ number: num, text, ...(quoted ? { quoted } : {}) });
+  // ADR-042 B3 — GRUPO/comunidade: o jid @g.us vai INTEIRO no campo `number` (sem strip de
+  // dígitos nem toggle-9, que valem só p/ telefone individual). A Evolution roteia pelo jid.
+  if (/@g\.us$/i.test(String(number || ''))) {
+    return await req('POST', `/message/sendText/${encodeURIComponent(instance)}`, apikey, corpo(String(number)));
+  }
+  const n = String(number || '').replace(/\D+/g, '');
   try {
     return await req('POST', `/message/sendText/${encodeURIComponent(instance)}`, apikey, corpo(n));
   } catch (e) {
@@ -110,7 +115,6 @@ async function getBase64FromMediaMessage({ instance, apikey }, message) {
 // ADR-016 P1 — envia mídia (base64) ao lead. `opts` = { mediatype, mimetype, media
 // (base64), fileName, caption? }. Mesmo retry 9-dígitos do sendText.
 async function sendMedia({ instance, apikey }, number, opts) {
-  const n = String(number || '').replace(/\D+/g, '');
   const corpo = (num) => ({
     number: num,
     mediatype: opts.mediatype,
@@ -119,6 +123,11 @@ async function sendMedia({ instance, apikey }, number, opts) {
     fileName: opts.fileName,
     ...(opts.caption ? { caption: opts.caption } : {}),
   });
+  // ADR-042 B3 — GRUPO: jid @g.us inteiro no `number` (sem strip/toggle-9).
+  if (/@g\.us$/i.test(String(number || ''))) {
+    return await req('POST', `/message/sendMedia/${encodeURIComponent(instance)}`, apikey, corpo(String(number)));
+  }
+  const n = String(number || '').replace(/\D+/g, '');
   try {
     return await req('POST', `/message/sendMedia/${encodeURIComponent(instance)}`, apikey, corpo(n));
   } catch (e) {
