@@ -16,6 +16,7 @@ const { resumoPlantao } = require('../plantao');   // ADR-040: plantão (resumo 
 const { retomadaLateral, reengajouExists } = require('../reativacao');   // #8 Fatia B: fonte única da retomada
 const evolution = require('../evolution');   // E4: envio direto via Evolution
 const meta = require('../meta');              // E6: envio outbound via Messenger/IG
+const onboardingMeta = require('../onboardingMeta');   // conexão Meta por token de System User
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
@@ -1306,6 +1307,31 @@ router.post('/:tenantId/leads/:id/mensagem/:mid/editar', authenticate, requireTe
 // POST /tenant/:tid/leads/:id/mensagem-meta — E6: responde um lead de DM (Messenger/IG)
 // PELO MESMO CANAL que ele usou, via Graph API (POST /{page_id}/messages). Usa o
 // meta_psid do lead + o Page Token do tenant. Grava em staff_outbound_samples.
+// Estado vivo da conexão Meta (nome da página, IG, se assina os webhooks) p/ a tela de admin.
+router.get('/:tenantId/meta/status', authenticate, requireTenantAccess(['TENANT_ADMIN']), async (req, res) => {
+  try {
+    const st = await onboardingMeta.connectionStatus(req.tenantId);
+    res.json(st);
+  } catch (err) {
+    logger.warn('tenant.meta.status.error', { tenant_id: req.tenantId, error: err.message });
+    res.json({ connected: false, error: 'status_error' });
+  }
+});
+// Conectar Meta (Instagram/Messenger) colando um TOKEN de System User — só admin. O token NÃO
+// é logado; é validado na Graph, cifrado e gravado. Multi-tenant (cada unidade cola o seu).
+router.post('/:tenantId/meta/connect-token', authenticate, requireTenantAccess(['TENANT_ADMIN']), async (req, res) => {
+  const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  if (!token) return res.status(400).json({ error: 'empty_token' });
+  try {
+    const out = await onboardingMeta.connectByToken(req.tenantId, token);
+    res.json({ ok: true, page_name: out.pageName, page_id: out.pageId, ig_id: out.igId, subscribed: out.subscribed });
+  } catch (err) {
+    // Erros comuns: token inválido/sem página/sem permissão de messaging.
+    logger.warn('tenant.meta.connect_token.error', { tenant_id: req.tenantId, code: err.code, error: err.message });
+    const map = { bad_token: 'token_invalido', no_page: 'nenhuma_pagina_no_token', no_page_token: 'pagina_sem_token', enc_fail: 'falha_ao_cifrar' };
+    res.status(400).json({ error: map[err.code] || 'falha_ao_conectar', detail: err.message });
+  }
+});
 router.post('/:tenantId/leads/:id/mensagem-meta', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   const { id } = req.params;
   if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });

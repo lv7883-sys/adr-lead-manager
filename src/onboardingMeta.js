@@ -249,6 +249,30 @@ async function handleCallback({ code, state }) {
   return { tenantId, returnTo, pageId: page.pageId, pageName: page.pageName, igId: page.igId, subscribed };
 }
 
+// Conecta uma unidade colando um TOKEN de System User (permanente) direto — pula o OAuth
+// (exchangeCode). Reusa resolveGrantedPage (via /me/accounts) → persistConnection (cifra+grava
+// +dupla-escrita) → subscribe (leadgen+messages+messaging_postbacks). Multi-tenant: cada tenant
+// cola o token do PRÓPRIO System User. `deps` injeta os helpers p/ o teste (sem Graph/DB).
+async function connectByToken(tenantId, token, deps = {}) {
+  const resolve = deps.resolveGrantedPage || resolveGrantedPage;
+  const persist = deps.persistConnection || persistConnection;
+  const subscribe = deps.subscribeLeadgen || subscribeLeadgen;
+  const listFields = deps.listSubscribedFields || listSubscribedFields;
+  if (!token || String(token).length < 20) { const e = new Error('token_invalido'); e.code = 'bad_token'; throw e; }
+  const page = await resolve(String(token).trim());
+  await persist({ tenantId, pageId: page.pageId, pageToken: page.pageToken, igId: page.igId });
+  let subscribed = { messages: false, leadgen: false };
+  try {
+    await subscribe(page.pageId, page.pageToken);
+    const set = await listFields(page.pageId, page.pageToken);
+    subscribed = { messages: set.has('messages'), leadgen: set.has('leadgen'), postbacks: set.has('messaging_postbacks') };
+  } catch (e) {
+    logger.error('meta.onboarding.subscribe_failed', { tenant_id: tenantId, page_id: page.pageId, error: e.message, body: e.body });
+  }
+  logger.info('meta.onboarding.connected_by_token', { tenant_id: tenantId, page_id: page.pageId, ig_id: page.igId, messages_subscribed: subscribed.messages });
+  return { pageId: page.pageId, pageName: page.pageName, igId: page.igId, subscribed };
+}
+
 // Status legível p/ o dashboard. Checagem VIVA contra a Graph (verdade, não flag que pode driftar):
 // também valida o token (expirado/revogado => connected=false, "Erro").
 async function connectionStatus(tenantId) {
@@ -269,7 +293,7 @@ async function connectionStatus(tenantId) {
 }
 
 module.exports = {
-  buildStartUrl, verifyState, handleCallback, connectionStatus,
+  buildStartUrl, verifyState, handleCallback, connectByToken, connectionStatus,
   isAllowedReturnTo, returnToFromState,
   // exportados p/ teste do gate:
   exchangeCode, resolveGrantedPage, subscribeLeadgen, listSubscribedFields, persistConnection,
