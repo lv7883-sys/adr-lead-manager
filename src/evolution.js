@@ -139,6 +139,27 @@ async function sendMedia({ instance, apikey }, number, opts) {
   }
 }
 
+// ADR-042 — NOTA DE VOZ (ptt) gravada no navegador. A Evolution converte o áudio (webm/opus
+// do browser) p/ ogg/opus ptt server-side, então vira uma "mensagem de voz" de verdade no
+// WhatsApp (não um anexo). `audioBase64` = base64 cru do áudio gravado. Mesmo tratamento de
+// jid @g.us (grupo) / dígitos+toggle-9 (1:1) do sendText.
+async function sendWhatsAppAudio({ instance, apikey }, number, audioBase64) {
+  const corpo = (num) => ({ number: num, audio: audioBase64 });
+  if (/@g\.us$/i.test(String(number || ''))) {
+    return await req('POST', `/message/sendWhatsAppAudio/${encodeURIComponent(instance)}`, apikey, corpo(String(number)));
+  }
+  const n = String(number || '').replace(/\D+/g, '');
+  try {
+    return await req('POST', `/message/sendWhatsAppAudio/${encodeURIComponent(instance)}`, apikey, corpo(n));
+  } catch (e) {
+    if (e && e.status === 400) {
+      const alt = _toggle9BR(n);
+      if (alt && alt !== n) return req('POST', `/message/sendWhatsAppAudio/${encodeURIComponent(instance)}`, apikey, corpo(alt));
+    }
+    throw e;
+  }
+}
+
 // Fatia AÇÃO-1 — APAGAR para todos (deleteMessageForEveryone). `key` = a key do WhatsApp
 // da mensagem NOSSA: { id, remoteJid, fromMe:true, participant? }. O body É a key crua
 // (a Evolution 2.3.7 faz sendMessage(key.remoteJid, { delete: key })). Best-effort: NÃO
@@ -185,4 +206,4 @@ async function sendReaction({ instance, apikey }, key, reaction) {
   }
 }
 
-module.exports = { status, sendText, sendMedia, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, _toggle9BR };
+module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, _toggle9BR };

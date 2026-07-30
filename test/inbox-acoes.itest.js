@@ -79,6 +79,37 @@ test('(midia-2) canal não suportado → unsupported', async () => {
   assert.deepEqual(await inbox.sendInboxMedia(T1, cv, { buffer: Buffer.from('x'), mimetype: 'image/jpeg', originalname: 'x.jpg' }, '', 'RECEPCAO', deps), { unsupported: 'instagram_dm' });
 });
 
+// ---- NOTA DE VOZ (ptt) -----------------------------------------------------
+test('(audio-1) happy-path: envia via sendWhatsAppAudio e persiste saída de áudio', async () => {
+  const cv = await conv('+5519999990009');
+  let ptt = 0;
+  const deps = {
+    evolution: { status: async () => ({ state: 'open' }), sendWhatsAppAudio: async () => { ptt++; return { key: { id: 'WAUD1' } }; }, pickMessageId: () => 'WAUD1' },
+    credsForTenant: async () => ({ instance: 'i', apikey: 'k' }),
+    saveBuffer: () => ({ media_type: 'audio', base64: 'B64', media_url: '/media/v.ogg' }),
+  };
+  const out = await inbox.sendInboxAudio(T1, cv, { buffer: Buffer.from('x'), mimetype: 'audio/ogg', originalname: 'v.ogg' }, 'RECEPCAO', deps);
+  assert.equal(out.ok, true); assert.equal(out.media_type, 'audio'); assert.equal(ptt, 1);
+  const row = (await c.query(`SELECT * FROM staff_outbound_samples WHERE external_message_id='WAUD1'`)).rows[0];
+  assert.ok(row); assert.equal(row.media_type, 'audio'); assert.equal(row.body, '[áudio]');
+});
+
+test('(audio-2) ptt indisponível → fallback p/ sendMedia', async () => {
+  const cv = await conv('+5519999990010');
+  let media = 0;
+  const deps = {
+    evolution: {
+      status: async () => ({ state: 'open' }),
+      sendWhatsAppAudio: async () => { throw Object.assign(new Error('404'), { status: 404 }); },
+      sendMedia: async () => { media++; return { key: { id: 'WAUD2' } }; }, pickMessageId: () => 'WAUD2',
+    },
+    credsForTenant: async () => ({ instance: 'i', apikey: 'k' }),
+    saveBuffer: () => ({ media_type: 'audio', base64: 'B64', media_url: '/media/v2.ogg' }),
+  };
+  const out = await inbox.sendInboxAudio(T1, cv, { buffer: Buffer.from('x'), mimetype: 'audio/ogg', originalname: 'v.ogg' }, 'RECEPCAO', deps);
+  assert.equal(out.ok, true); assert.equal(media, 1, 'usou o fallback sendMedia');
+});
+
 // ---- #5 MARCAR COMO LEAD ---------------------------------------------------
 test('(lead-1) promove lead casável (NOT_LEAD) → QUALIFYING + confirmed_lead', async () => {
   const cv = await conv('+5519999990005');

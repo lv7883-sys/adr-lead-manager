@@ -659,6 +659,58 @@ router.post('/:tenantId/inbox/conversations/:conversationId/midia', authenticate
   }
 });
 
+// ---- NOTA DE VOZ (ptt) gravada no navegador — ADR-042 ---------------------------------------
+// Salva o áudio (p/ a thread exibir o player), envia via evolution.sendWhatsAppAudio (ptt, com
+// conversão server-side); se a Evolution não suportar/derrubar o ptt, cai no sendMedia (áudio
+// normal). Persiste como saída de mídia 'audio'. `deps` p/ o itest.
+async function sendInboxAudio(tenantId, conversationId, file, sender, deps = {}) {
+  const evolution = deps.evolution || evolutionDefault;
+  const credsForTenant = deps.credsForTenant || outbound.credsForTenant;
+  const registrarSaida = deps.registrarSaida || outbound.registrarSaida;
+  const saveBuffer = deps.saveBuffer || mediaLib.salvarBuffer;
+
+  const cv = await withTenant(tenantId, (c) =>
+    c.query('SELECT channel, external_id FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, tenantId]).then((r) => r.rows[0] || null));
+  if (!cv) return { notFound: true };
+  if (cv.channel !== 'whatsapp') return { unsupported: cv.channel };
+  const creds = await credsForTenant(tenantId);
+  if (!creds.instance || !creds.apikey) return { reason: 'tenant_sem_evolution' };
+  const st = await evolution.status({ instance: creds.instance, apikey: creds.apikey });
+  if (st.state !== 'open') return { reason: 'instancia=' + st.state };
+
+  const mimetype = file.mimetype || 'audio/ogg';
+  const saved = saveBuffer({ tenantId, buffer: file.buffer, mimetype, filename: file.originalname || 'nota-de-voz.ogg' });
+  let r;
+  try {
+    r = await evolution.sendWhatsAppAudio({ instance: creds.instance, apikey: creds.apikey }, cv.external_id, saved.base64);
+  } catch (e) {
+    logger.warn('tenant.inbox.audio.ptt_fallback', { tenant_id: tenantId, error: e.message });
+    r = await evolution.sendMedia({ instance: creds.instance, apikey: creds.apikey }, cv.external_id, {
+      mediatype: 'audio', mimetype, media: saved.base64, fileName: saved.media_filename || 'nota-de-voz.ogg' });
+  }
+  const messageId = evolution.pickMessageId(r);
+  await registrarSaida(tenantId, {
+    phone: cv.external_id, externalMessageId: messageId, sender, body: '[áudio]',
+    media: { url: saved.media_url, type: 'audio', filename: null },
+  });
+  return { ok: true, message_id: messageId, media_url: saved.media_url, media_type: 'audio' };
+}
+router.post('/:tenantId/inbox/conversations/:conversationId/audio', authenticate, requireTenantAccess(WRITE_ROLES), upload.single('file'), async (req, res) => {
+  if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'no_file' });
+  try {
+    const out = await sendInboxAudio(req.tenantId, req.params.conversationId, req.file, req.tenantRole);
+    if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
+    if (out.unsupported) return res.status(422).json({ error: 'canal_nao_suportado', channel: out.unsupported });
+    if (out.reason === 'tenant_sem_evolution') return res.status(400).json({ error: 'tenant_sem_evolution' });
+    if (out.reason && out.reason.startsWith('instancia=')) return res.status(409).json({ error: out.reason });
+    res.json(out);
+  } catch (err) {
+    logger.error('tenant.inbox.audio.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
+
 // ---- #4 SUGERIR RESPOSTA DA IA (sob demanda, sem persistir) — Fase 1.5 -----------------------
 // Reusa loadRealHistory + gemini.generateReply + resolveSystemPrompt (compõe como o
 // generateDraftForLead, mas SEM criar pending_approval — só devolve o texto p/ preencher o campo).
@@ -757,6 +809,7 @@ module.exports.deleteInboxMessage = deleteInboxMessage;
 module.exports.editInboxMessage = editInboxMessage;
 module.exports.reactToMessage = reactToMessage;
 module.exports.sendInboxMedia = sendInboxMedia;
+module.exports.sendInboxAudio = sendInboxAudio;
 module.exports.suggestReply = suggestReply;
 module.exports.marcarComoLead = marcarComoLead;
 module.exports.toggleFavorito = toggleFavorito;
