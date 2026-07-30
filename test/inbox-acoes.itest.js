@@ -132,3 +132,21 @@ test('(lead-2) conversa sem lead → cria lead QUALIFYING', async () => {
 test('(lead-3) conversa inexistente → notFound', async () => {
   assert.deepEqual(await inbox.marcarComoLead(T1, '00000000-0000-0000-0000-0000000000ff', 'RECEPCAO'), { notFound: true });
 });
+
+// ---- NÃO É LEAD (inverso) — Valéria/gestora capturada como lead ----------------------------
+test('(naolead-1) lead existente → NOT_LEAD + confirmed_not_lead', async () => {
+  const cv = await conv('+5519999990007');
+  const leadId = (await c.query(`INSERT INTO leads (tenant_id, phone, status) VALUES ($1,'5519999990007','QUALIFYING') RETURNING id`, [T1])).rows[0].id;
+  const out = await inbox.marcarComoNaoLead(T1, cv, 'RECEPCAO');
+  assert.equal(out.ok, true); assert.equal(out.created, false); assert.equal(out.lead_id, leadId);
+  const l = (await c.query('SELECT status, review_result FROM leads WHERE id=$1', [leadId])).rows[0];
+  assert.equal(l.status, 'NOT_LEAD'); assert.equal(l.review_result, 'confirmed_not_lead');
+});
+
+test('(naolead-2) conversa sem lead → cria registro NOT_LEAD', async () => {
+  const cv = await conv('+5519999990008');
+  const out = await inbox.marcarComoNaoLead(T1, cv, 'RECEPCAO');
+  assert.equal(out.ok, true); assert.equal(out.created, true);
+  const l = (await c.query('SELECT status, review_result FROM leads WHERE id=$1', [out.lead_id])).rows[0];
+  assert.equal(l.status, 'NOT_LEAD'); assert.equal(l.review_result, 'confirmed_not_lead');
+});

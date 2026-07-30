@@ -821,6 +821,50 @@ router.post('/:tenantId/inbox/conversations/:conversationId/marcar-lead', authen
   }
 });
 
+// ---- MARCAR "NÃO É LEAD" — ADR-042 (inverso de marcarComoLead) -------------------------------
+// Reclassifica o contato como NOT_LEAD (ex.: gestora/fornecedor que mandou mensagem e caiu como
+// lead). Some da lista de Leads. Se existir lead casável, atualiza; senão cria um registro
+// NOT_LEAD (fica explícito e evita recaptura). NÃO confundir com "marcar-nao-lido" (leitura).
+async function marcarComoNaoLead(tenantId, conversationId, sender) {
+  return withTenant(tenantId, async (c) => {
+    const cv = (await c.query(
+      `SELECT external_id, channel, regexp_replace(external_id, '[^0-9]', '', 'g') AS ident
+         FROM conversations WHERE id = $1 AND tenant_id = $2`, [conversationId, tenantId])).rows[0];
+    if (!cv) return { notFound: true };
+    if (!cv.ident) return { noPhone: true };
+    const existing = (await c.query(
+      `SELECT id FROM leads WHERE tenant_id = $1 AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+        ORDER BY created_at ASC LIMIT 1`, [tenantId, cv.ident])).rows[0];
+    if (existing) {
+      await c.query(
+        `UPDATE leads SET status = 'NOT_LEAD', review_queue = false, review_result = 'confirmed_not_lead',
+                          review_em = now(), review_by = $2, updated_at = now()
+          WHERE id = $1`, [existing.id, sender || null]);
+      return { ok: true, lead_id: existing.id, created: false };
+    }
+    const nm = (await c.query(
+      `SELECT sender FROM messages WHERE conversation_id = $1 AND role = 'USER' AND sender IS NOT NULL
+        ORDER BY received_at ASC LIMIT 1`, [conversationId])).rows[0];
+    const r = await c.query(
+      `INSERT INTO leads (tenant_id, name, phone, status, origem, review_queue, review_result, review_em, review_by)
+       VALUES ($1, $2, $3, 'NOT_LEAD', $4, false, 'confirmed_not_lead', now(), $5) RETURNING id`,
+      [tenantId, (nm && nm.sender) || null, cv.external_id, cv.channel, sender || null]);
+    return { ok: true, lead_id: r.rows[0].id, created: true };
+  });
+}
+router.post('/:tenantId/inbox/conversations/:conversationId/desmarcar-lead', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  try {
+    const out = await marcarComoNaoLead(req.tenantId, req.params.conversationId, req.tenantRole);
+    if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
+    if (out.noPhone) return res.status(422).json({ error: 'sem_telefone' });
+    res.json(out);
+  } catch (err) {
+    logger.error('tenant.inbox.desmarcar_lead.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 module.exports = router;
 // Superfície testável (itest exercita a lógica SQL contra Postgres real).
 module.exports.buildConversationsSql = buildConversationsSql;
@@ -835,6 +879,7 @@ module.exports.sendInboxMedia = sendInboxMedia;
 module.exports.sendInboxAudio = sendInboxAudio;
 module.exports.suggestReply = suggestReply;
 module.exports.marcarComoLead = marcarComoLead;
+module.exports.marcarComoNaoLead = marcarComoNaoLead;
 module.exports.toggleFavorito = toggleFavorito;
 module.exports.markRead = markRead;
 module.exports.markUnread = markUnread;
