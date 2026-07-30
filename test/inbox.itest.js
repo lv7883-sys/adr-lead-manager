@@ -174,6 +174,13 @@ test('(4) não-lidas + marcar-lido (migr. 080, compartilhado por tenant)', async
 
   // tenant errado não mexe na conversa
   assert.equal(await inbox.markRead(c, T1, cv, null), null);
+
+  // marcar como NÃO-LIDA: recua o cursor -> volta a contar (>=1); tenant errado -> null
+  const u = await inbox.markUnread(c, tenant, cv);
+  assert.equal(u.ok, true); assert.ok(u.nao_lidas >= 1, 'marcar não-lido volta a contar');
+  it = byExt((await list(tenant, { limit: 50 })).items, H(300));
+  assert.ok(it.nao_lidas >= 1, 'lista reflete não-lida');
+  assert.equal(await inbox.markUnread(c, T1, cv), null);
 });
 
 test('(5) filtros view / fonte / q', async () => {

@@ -249,6 +249,28 @@ async function markRead(client, tenantId, conversationId, upTo = null) {
   return { last_read_at: upd.rows[0].last_read_at, nao_lidas: n.rows[0].n };
 }
 
+// Marca a conversa como NÃO-LIDA (igual WhatsApp): recua o cursor p/ 1ms ANTES da última
+// mensagem RECEBIDA, de modo que ela (e posteriores) voltem a contar como não-lidas. Se não
+// houver mensagem recebida, não há o que marcar. Retorna null se a conversa não é do tenant.
+async function markUnread(client, tenantId, conversationId) {
+  const last = (await client.query(
+    `SELECT received_at FROM messages WHERE conversation_id = $1 AND role = 'USER'
+      ORDER BY received_at DESC LIMIT 1`, [conversationId])).rows[0];
+  if (!last) {
+    const ok = (await client.query('SELECT 1 FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, tenantId])).rows[0];
+    return ok ? { ok: true, nao_lidas: 0 } : null;
+  }
+  const upd = await client.query(
+    `UPDATE conversations SET last_read_at = $2::timestamptz - interval '1 millisecond'
+      WHERE id = $1 AND tenant_id = $3 RETURNING id`,
+    [conversationId, last.received_at, tenantId]);
+  if (!upd.rows.length) return null;
+  const n = (await client.query(
+    `SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1 AND role = 'USER'
+      AND received_at > $2::timestamptz - interval '1 millisecond'`, [conversationId, last.received_at])).rows[0].n;
+  return { ok: true, nao_lidas: n };
+}
+
 // Abre a thread de UMA conversa (E12-05), ancorada em conversation_id — funciona para
 // conversa de NÃO-LEAD (leadId null => timeline sem o ramo IA). Retorna null se a conversa
 // não existe no tenant.
@@ -426,6 +448,21 @@ router.post('/:tenantId/inbox/conversations/:conversationId/marcar-lido', authen
     res.json({ ok: true, ...out });
   } catch (err) {
     logger.error('tenant.inbox.marcar_lido.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tenantId/inbox/conversations/:conversationId/marcar-nao-lido — recua o cursor
+// p/ a conversa voltar a aparecer como NÃO-LIDA (igual WhatsApp). Sem body.
+router.post('/:tenantId/inbox/conversations/:conversationId/marcar-nao-lido', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { conversationId } = req.params;
+  if (!isUuid(conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  try {
+    const out = await withTenant(req.tenantId, (c) => markUnread(c, req.tenantId, conversationId));
+    if (!out) return res.status(404).json({ error: 'conversation_not_found' });
+    res.json(out);
+  } catch (err) {
+    logger.error('tenant.inbox.marcar_nao_lido.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
   }
 });
@@ -724,6 +761,7 @@ module.exports.suggestReply = suggestReply;
 module.exports.marcarComoLead = marcarComoLead;
 module.exports.toggleFavorito = toggleFavorito;
 module.exports.markRead = markRead;
+module.exports.markUnread = markUnread;
 module.exports.encodeCursor = encodeCursor;
 module.exports.decodeCursor = decodeCursor;
 module.exports.preview = preview;

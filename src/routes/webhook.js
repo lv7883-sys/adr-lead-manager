@@ -451,6 +451,24 @@ async function handleZapiWebhook(req, res) {
       } catch (e) { log.warn('media.capture_error', { error: e.message }); }
     }
     await engine.processInbound(tenant, msg, req.body);
+    // CURA (ADR-016): garante que a mídia baixada pouse na linha persistida. Sob carga (Gemini
+    // lento) ou entrega duplicada, o insert do funil pode gravar a mensagem ANTES/sem a mídia
+    // (dedup ON CONFLICT DO NOTHING) — deixando bolha vazia. COALESCE só preenche o que está
+    // nulo; idempotente e barato. Casa por (tenant, external_message_id).
+    if (msg.media && (msg.media.url || msg.media.transcription) && msg.externalMessageId) {
+      try {
+        await withTenant(tenant.id, (c) => c.query(
+          `UPDATE messages
+              SET media_url            = COALESCE(media_url, $3),
+                  media_type           = COALESCE(media_type, $4),
+                  media_filename       = COALESCE(media_filename, $5),
+                  media_transcription  = COALESCE(media_transcription, $6)
+            WHERE tenant_id = $1 AND external_message_id = $2
+              AND (media_url IS NULL OR (media_type = 'audio' AND media_transcription IS NULL))`,
+          [tenant.id, msg.externalMessageId, msg.media.url || null, msg.media.type || null,
+           msg.media.filename || null, msg.media.transcription || null]));
+      } catch (e) { log.warn('media.heal_failed', { error: e.message }); }
+    }
   };
   // Funil de triagem (Portões 0/1/2). Fire-and-forget com captura de erro.
   processar().catch((err) => log.error('engine.unhandled_error', { error: err.message }));
