@@ -112,10 +112,9 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     ),
     conv AS (
       SELECT cv.id AS conversation_id, cv.channel, cv.external_id, cv.last_read_at,
-             cv.updated_at, ${IDENT_CONV} AS ident
+             cv.updated_at, cv.conversation_kind, ${IDENT_CONV} AS ident
         FROM conversations cv
        WHERE cv.tenant_id = $1
-         AND coalesce(cv.external_id, '') NOT LIKE '%@g.us'
     ),
     matched AS (
       SELECT c.*, l.id AS lead_id, l.name AS lead_name, l.phone AS lead_phone,
@@ -156,7 +155,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     ),
     projected AS (
       SELECT
-        m.conversation_id, m.channel, m.external_id, m.ident,
+        m.conversation_id, m.channel, m.external_id, m.ident, m.conversation_kind,
         m.lead_id, m.lead_status, m.lead_desfecho,
         COALESCE(m.lead_name, m.external_id) AS nome,
         m.lead_phone, m.lead_psid,
@@ -200,6 +199,7 @@ function mapConversationRow(r) {
     external_id: r.external_id,
     ident: r.ident,
     fonte: r.fonte,
+    is_group: r.conversation_kind === 'GROUP',
     is_lead: r.is_lead === true,
     is_lead_ativo: r.is_lead_ativo === null || r.is_lead_ativo === undefined ? null : r.is_lead_ativo === true,
     lead_id: r.lead_id || null,
@@ -254,7 +254,7 @@ async function markRead(client, tenantId, conversationId, upTo = null) {
 // não existe no tenant.
 async function getConversationThread(client, tenantId, conversationId) {
   const cv = (await client.query(
-    `SELECT id, channel, external_id, last_read_at,
+    `SELECT id, channel, external_id, last_read_at, conversation_kind,
             regexp_replace(external_id, '[^0-9]', '', 'g') AS ident
        FROM conversations WHERE id = $1 AND tenant_id = $2`,
     [conversationId, tenantId]
@@ -279,6 +279,8 @@ async function getConversationThread(client, tenantId, conversationId) {
       external_id: cv.external_id,
       ident: cv.ident,
       fonte: (lead && lead.origem) || cv.channel,
+      is_group: cv.conversation_kind === 'GROUP',
+      conversation_kind: cv.conversation_kind || 'DIRECT',
       is_lead,
       lead_id: lead ? lead.id : null,
       lead_status: lead ? lead.status : null,
