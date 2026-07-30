@@ -271,6 +271,13 @@ async function getConversationThread(client, tenantId, conversationId) {
 
   const timeline = await fetchTimeline(client, { tenantId, ident: cv.ident, leadId: lead ? lead.id : null });
 
+  // ADR-042 — marca as bolhas FAVORITADAS (estrela). message_id é único por tenant entre as
+  // 3 fontes, então casa por id direto. Alimenta o marcador na bolha + o painel "favoritas".
+  const favSet = new Set((await client.query(
+    `SELECT message_id FROM message_favorites WHERE tenant_id = $1 AND conversation_id = $2`,
+    [tenantId, conversationId])).rows.map((r) => r.message_id));
+  if (favSet.size) for (const m of timeline) if (favSet.has(m.id)) m.favorito = true;
+
   const is_lead = !!lead && lead.status !== 'NOT_LEAD' && lead.status !== 'REVIEW_QUEUE';
   return {
     conversation: {
@@ -537,6 +544,36 @@ router.post('/:tenantId/inbox/conversations/:conversationId/mensagem/:mid/reagir
   }
 });
 
+// ---- FAVORITAR (estrela) — ADR-042 ----------------------------------------------------------
+// Toggle local (NÃO chama o WhatsApp — favorito é visão interna da recepção). Referencia a bolha
+// por (conversation_id, kind, message_id). Existe → desfavorita (DELETE); senão → favorita.
+const _FAV_KINDS = new Set(['lead', 'recepcao', 'ia']);
+async function toggleFavorito(tenantId, conversationId, mid, kind, sender) {
+  return withTenant(tenantId, async (c) => {
+    const del = await c.query(
+      'DELETE FROM message_favorites WHERE tenant_id = $1 AND message_id = $2 RETURNING id',
+      [tenantId, mid]);
+    if (del.rows.length) return { ok: true, favorito: false };
+    await c.query(
+      `INSERT INTO message_favorites (tenant_id, conversation_id, message_kind, message_id, favorited_by)
+       VALUES ($1, $2, $3, $4, $5) ON CONFLICT (tenant_id, message_id) DO NOTHING`,
+      [tenantId, conversationId, _FAV_KINDS.has(kind) ? kind : 'lead', mid, sender || null]);
+    return { ok: true, favorito: true };
+  });
+}
+router.post('/:tenantId/inbox/conversations/:conversationId/mensagem/:mid/favoritar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  if (!isUuid(req.params.mid)) return res.status(400).json({ error: 'invalid_mid' });
+  const kind = typeof req.body?.kind === 'string' ? req.body.kind : 'lead';
+  try {
+    const out = await toggleFavorito(req.tenantId, req.params.conversationId, req.params.mid, kind, req.tenantRole);
+    res.json(out);
+  } catch (err) {
+    logger.error('tenant.inbox.favoritar.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // ---- #3 ANEXAR ARQUIVO — Fase 1.5 (reusa evolution.sendMedia + outbound.registrarSaida) ------
 const _PLACEHOLDER_MIDIA = { audio: '[áudio]', image: '[imagem]', video: '[vídeo]', document: '[documento]' };
 async function sendInboxMedia(tenantId, conversationId, file, caption, sender, deps = {}) {
@@ -685,6 +722,7 @@ module.exports.reactToMessage = reactToMessage;
 module.exports.sendInboxMedia = sendInboxMedia;
 module.exports.suggestReply = suggestReply;
 module.exports.marcarComoLead = marcarComoLead;
+module.exports.toggleFavorito = toggleFavorito;
 module.exports.markRead = markRead;
 module.exports.encodeCursor = encodeCursor;
 module.exports.decodeCursor = decodeCursor;

@@ -38,6 +38,9 @@ before(async () => {
     CREATE TABLE leads (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, phone text,
       meta_psid text, status text, desfecho text, origem text, created_at timestamptz DEFAULT now());
+    CREATE TABLE message_favorites (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
+      message_kind text, message_id uuid, favorited_by text, favorited_at timestamptz DEFAULT now());
   `);
 });
 after(async () => { await c.end(); });
