@@ -284,8 +284,13 @@ async function connectionStatus(tenantId) {
   if (!token) return { connected: false, error: 'token_ilegivel' };
   try {
     const pg = await graphFetch('GET', '/' + encodeURIComponent(creds.meta_page_id), { fields: 'name', access_token: token });
-    const subscribed = (await listSubscribedFields(creds.meta_page_id, token)).has('leadgen');
-    return { connected: true, page_name: (pg && pg.name) || null, leadgen_subscribed: subscribed, ig_id: creds.meta_ig_id || null };
+    const fields = await listSubscribedFields(creds.meta_page_id, token);
+    return {
+      connected: true, page_name: (pg && pg.name) || null,
+      messages_subscribed: fields.has('messages'),   // o que importa p/ DM (não confundir com leadgen)
+      leadgen_subscribed: fields.has('leadgen'),
+      ig_id: creds.meta_ig_id || null,
+    };
   } catch (e) {
     logger.warn('meta.onboarding.status_graph_error', { tenant_id: tenantId, error: e.message });
     return { connected: false, error: 'graph_error' };
