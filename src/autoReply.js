@@ -13,6 +13,7 @@
 //
 const { withTenant } = require('./db');
 const gemini = require('./gemini');
+const { loadRealHistory } = require('./engine');   // mesma timeline usada pela "sugestão de resposta"
 const outbound = require('./outbound');
 const evolutionDefault = require('./evolution');
 const metaDefault = require('./meta');
@@ -110,6 +111,7 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText }, deps
   if (process.env.AUTOREPLY_PAUSE === '1') return { skipped: 'paused' };
   const tenantId = tenant && tenant.id;
   if (!tenantId || !channel || !externalId) return { skipped: 'args' };
+  const ident = String(externalId).replace(/\D/g, '');
   try {
     const info = await withTenant(tenantId, async (c) => {
       const conv = (await c.query(
@@ -118,9 +120,12 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText }, deps
             AND regexp_replace(external_id, '[^0-9]', '', 'g') = regexp_replace($3, '[^0-9]', '', 'g')
           ORDER BY updated_at DESC LIMIT 1`, [tenantId, channel, String(externalId)])).rows[0];
       const auto = (await c.query('SELECT modo_fora_horario, modo_fds, nome_ia FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
-      const cfg = (await c.query('SELECT school_name, business_hours FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
+      const cfg = (await c.query('SELECT school_name, business_hours, available_instruments FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
       const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0];
-      return { conv, auto, cfg, tname: tname && tname.name };
+      const lead = ident ? (await c.query(
+        `SELECT id FROM leads WHERE tenant_id = $1 AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+          ORDER BY created_at ASC LIMIT 1`, [tenantId, ident])).rows[0] : null;
+      return { conv, auto, cfg, tname: tname && tname.name, leadId: lead && lead.id };
     });
     if (!info.conv) return { skipped: 'no_conv' };
     if (info.conv.conversation_kind && info.conv.conversation_kind !== 'DIRECT') return { skipped: 'nao_direct' };
@@ -147,16 +152,26 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText }, deps
     const nomeIa = (info.auto.nome_ia && info.auto.nome_ia.trim()) || 'Atendimento';
     const escola = (info.cfg && info.cfg.school_name) || info.tname || 'a escola';
     const proxima = formatNextOpen(st.nextOpen, now);
+
+    // LÊ a conversa (mesma timeline da "sugestão de resposta") p/ responder no contexto — como
+    // um humano faria. Best-effort: sem histórico se falhar.
+    const loadHist = deps.loadRealHistory || loadRealHistory;
+    let history = [];
+    try { history = await loadHist(tenantId, { conversationId: info.conv.id, ident, leadId: info.leadId || null }); }
+    catch (e) { logger.warn('autoreply.history_failed', { tenant_id: tenantId, error: e.message }); }
+
+    const instrs = (info.cfg && Array.isArray(info.cfg.available_instruments) && info.cfg.available_instruments.length)
+      ? ` A escola oferece: ${info.cfg.available_instruments.join(', ')}.` : '';
     const systemPrompt =
-      `Você é ${nomeIa}, atendente virtual de ${escola}. AGORA é FORA do horário de atendimento. ` +
-      `Responda em português do Brasil, cordial e curto (1 a 2 frases): reconheça brevemente a mensagem da pessoa, ` +
-      `diga que a equipe retorna ${proxima || 'no próximo horário de atendimento'} e que a mensagem foi anotada. ` +
-      `NÃO invente preços, NÃO agende, NÃO prometa nada específico. Pode assinar como ${nomeIa}.`;
+      `Você é ${nomeIa}, do atendimento de ${escola} — fale como um atendente HUMANO real, caloroso e natural (nada robótico, nada genérico).${instrs} ` +
+      `AGORA é FORA do horário de atendimento. LEIA o histórico da conversa e responda de forma PERSONALIZADA e curta (1 a 3 frases), em português do Brasil: ` +
+      `reconheça o contexto/assunto do que a pessoa vinha falando, mostre que anotou, e diga que a equipe humana retorna ${proxima || 'no próximo horário de atendimento'}. ` +
+      `REGRAS (fora do horário, sem humano por trás): NÃO invente preços/valores, NÃO agende, NÃO confirme datas nem prometa nada específico — isso fica para o atendimento humano. Pode assinar como ${nomeIa}.`;
 
     const generate = deps.generate || gemini.generateReply;
     let texto;
     try {
-      texto = await generate({ systemPrompt, history: [], message: inboundText || '', retomada: false });
+      texto = await generate({ systemPrompt, history, message: inboundText || '', retomada: history.length > 0 });
     } catch (e) {
       logger.warn('autoreply.generate_failed', { tenant_id: tenantId, error: e.message });
       texto = `Oi! Aqui é a ${nomeIa}, de ${escola}. Recebemos sua mensagem 🙌 No momento estamos fora do horário de atendimento; a equipe retorna ${proxima || 'assim que abrirmos'}. Já anotamos por aqui!`;
