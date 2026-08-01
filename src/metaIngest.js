@@ -8,6 +8,7 @@
 //
 const meta = require('./meta');
 const engine = require('./engine');
+const autoReply = require('./autoReply');   // ADR-006+ resposta automática fora do horário
 const logger = require('./logger');
 
 // Default do mapeamento de campos do Lead Ad. ESPELHO EXATO do field_map seedado em
@@ -135,6 +136,9 @@ async function ingestMessage(pageId, m, channel, rawBody) {
   };
   log.info('meta.message.ingesting', { tenant_id: tenantId, mid });
   await engine.processInbound({ id: tenantId }, msg, rawBody);
+  // ADR-006+ — resposta automática fora do horário (Messenger/Instagram). Best-effort.
+  autoReply.maybeAutoReply({ id: tenantId }, { channel, externalId: psid, inboundText: text })
+    .catch((e) => log.warn('autoreply.unhandled', { error: e.message }));
 }
 
 // Ponto de entrada: processa o corpo inteiro do webhook (várias entries).

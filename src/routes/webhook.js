@@ -9,6 +9,7 @@ const staffSamples = require('../staffSamples');
 const evolution = require('../evolution');
 const gemini = require('../gemini');
 const media = require('../media');
+const autoReply = require('../autoReply');   // ADR-006+ resposta automática fora do horário
 const { decrypt } = require('../crypto');
 
 const router = express.Router();
@@ -469,6 +470,10 @@ async function handleZapiWebhook(req, res) {
            msg.media.filename || null, msg.media.transcription || null]));
       } catch (e) { log.warn('media.heal_failed', { error: e.message }); }
     }
+    // ADR-006+ — resposta automática FORA DO HORÁRIO (a "Janis"). Best-effort: roda DEPOIS de
+    // persistir o inbound; nunca bloqueia/derruba a ingestão. Só 1:1 (inbound já filtrado acima).
+    autoReply.maybeAutoReply(tenant, { channel: 'whatsapp', externalId: msg.externalId, inboundText: msg.body })
+      .catch((e) => log.warn('autoreply.unhandled', { error: e.message }));
   };
   // Funil de triagem (Portões 0/1/2). Fire-and-forget com captura de erro.
   processar().catch((err) => log.error('engine.unhandled_error', { error: err.message }));
