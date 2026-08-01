@@ -93,6 +93,15 @@ test('(5) grupo -> nunca responde', async () => {
   assert.equal(out.skipped, 'nao_direct'); assert.equal(deps.spy.sends, 0);
 });
 
+test('(7) sem business_hours configurado -> não responde (evita 24/7)', async () => {
+  await conv(); await setModo('auto');
+  await c.query(`UPDATE tenant_lead_config SET business_hours = '{}'::jsonb WHERE tenant_id=$1`, [T1]);
+  const deps = mkDeps(NOITE);
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi' }, deps);
+  assert.equal(out.skipped, 'sem_horario'); assert.equal(deps.spy.sends, 0);
+  await c.query(`UPDATE tenant_lead_config SET business_hours = $2 WHERE tenant_id=$1`, [T1, JSON.stringify(BH)]);
+});
+
 test('(6) pausa global AUTOREPLY_PAUSE=1 -> não envia', async () => {
   await conv(); await setModo('auto');
   process.env.AUTOREPLY_PAUSE = '1';

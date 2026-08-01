@@ -126,8 +126,13 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText }, deps
     if (info.conv.conversation_kind && info.conv.conversation_kind !== 'DIRECT') return { skipped: 'nao_direct' };
     if (!info.auto) return { skipped: 'sem_automacao_config' };
 
+    // Sem horário de atendimento configurado NÃO respondemos (senão pareceria "sempre fechado"
+    // e responderia 24/7). Exige business_hours preenchido no tenant.
+    const bh = (info.cfg && info.cfg.business_hours) || {};
+    if (!bh || typeof bh !== 'object' || Object.keys(bh).length === 0) return { skipped: 'sem_horario' };
+
     const now = deps.now || new Date();
-    const st = businessState((info.cfg && info.cfg.business_hours) || {}, now);
+    const st = businessState(bh, now);
     if (st.open) return { skipped: 'aberto' };
 
     const fimDeSemana = ([0, 6].includes(_local(now).dow));

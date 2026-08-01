@@ -2302,6 +2302,7 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
     qualificacao_auto: b.qualificacao_auto !== false,
     proposta_sempre_manual: b.proposta_sempre_manual !== false,
     agendamento_sempre_manual: b.agendamento_sempre_manual !== false,
+    nome_ia: typeof b.nome_ia === 'string' ? b.nome_ia.trim().slice(0, 60) : null,   // nome da IA nas respostas automáticas
   };
   for (const k of ['modo_comercial', 'modo_fora_horario', 'modo_fds']) {
     if (!MODOS.includes(novo[k])) return res.status(400).json({ error: `${k} inválido` });
@@ -2319,8 +2320,8 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
         `INSERT INTO automacao_config
            (tenant_id, modo_comercial, modo_fora_horario, modo_fds,
             primeira_resposta_auto, qualificacao_auto, proposta_sempre_manual, agendamento_sempre_manual,
-            updated_at, updated_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now(), $9)
+            nome_ia, updated_at, updated_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now(), $10)
          ON CONFLICT (tenant_id) DO UPDATE SET
            modo_comercial = EXCLUDED.modo_comercial,
            modo_fora_horario = EXCLUDED.modo_fora_horario,
@@ -2329,11 +2330,12 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
            qualificacao_auto = EXCLUDED.qualificacao_auto,
            proposta_sempre_manual = EXCLUDED.proposta_sempre_manual,
            agendamento_sempre_manual = EXCLUDED.agendamento_sempre_manual,
+           nome_ia = EXCLUDED.nome_ia,
            updated_at = now(), updated_by = EXCLUDED.updated_by
          RETURNING *`,
         [req.tenantId, novo.modo_comercial, novo.modo_fora_horario, novo.modo_fds,
          novo.primeira_resposta_auto, novo.qualificacao_auto, novo.proposta_sempre_manual,
-         novo.agendamento_sempre_manual, usuario]
+         novo.agendamento_sempre_manual, novo.nome_ia, usuario]
       );
       await c.query(
         `INSERT INTO automacao_log (tenant_id, usuario, modo_anterior, modo_novo, motivo)
