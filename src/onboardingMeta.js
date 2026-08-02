@@ -171,10 +171,12 @@ async function resolveGrantedPage(userToken) {
 }
 
 // Inscreve a Página nos webhooks que usamos: leadgen (Lead Ads) + messages/messaging_postbacks
-// (DMs de Messenger/Instagram → Caixa de Entrada). Idempotente.
+// (DMs de Messenger/Instagram → Caixa de Entrada) + messaging_referrals (ATRIBUIÇÃO de campanha:
+// referral de anúncios "enviar mensagem" p/ usuário existente; o de usuário novo já vem no postback).
+// Idempotente.
 async function subscribeLeadgen(pageId, pageToken) {
   return graphFetch('POST', '/' + encodeURIComponent(pageId) + '/subscribed_apps', {
-    subscribed_fields: 'leadgen,messages,messaging_postbacks',
+    subscribed_fields: 'leadgen,messages,messaging_postbacks,messaging_referrals',
     access_token: pageToken,
   });
 }

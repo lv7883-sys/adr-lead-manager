@@ -9,6 +9,7 @@
 const meta = require('./meta');
 const engine = require('./engine');
 const autoReply = require('./autoReply');   // ADR-006+ resposta automática fora do horário
+const metaReferral = require('./metaReferral');   // ADR-042 atribuição de campanha (Click-to-Message)
 const logger = require('./logger');
 
 // Default do mapeamento de campos do Lead Ad. ESPELHO EXATO do field_map seedado em
@@ -111,16 +112,28 @@ async function ingestLeadgen(value, isUpdate) {
 
 async function ingestMessage(pageId, m, channel, rawBody) {
   const log = logger.child({ page_id: pageId, channel });
-  if (!m || !m.message) return;                         // delivery/read receipts, etc.
-  if (m.message.is_echo) { log.info('meta.message.skip_echo', {}); return; }
-  const text = m.message.text;
-  if (!text) { log.info('meta.message.skip_no_text', {}); return; }   // anexo/postback: por ora ignora
+  if (!m) return;
+  if (m.message && m.message.is_echo) { log.info('meta.message.skip_echo', {}); return; }
   const psid = m.sender && m.sender.id;
-  const mid = m.message.mid;
   if (!psid) { log.info('meta.message.no_psid', {}); return; }
 
   const tenantId = await meta.tenantByPageId(pageId);
   if (!tenantId) { log.info('meta.message.unknown_page', {}); return; }
+
+  // ADR-042 — ATRIBUIÇÃO DE CAMPANHA: se o contato veio de um anúncio "enviar mensagem",
+  // registra o toque (first-touch). Chega em m.referral / m.postback.referral / m.message.referral,
+  // e PODE vir num evento só-referral (sem mensagem). Best-effort, antes dos guards de texto.
+  const referral = metaReferral.extractReferral(m);
+  if (referral) {
+    await metaReferral.recordReferral(tenantId, channel, psid, referral)
+      .then(() => log.info('meta.referral.recorded', { tenant_id: tenantId, ad_id: referral.adId || null, ref: referral.ref || null }))
+      .catch((e) => log.warn('meta.referral.record_failed', { tenant_id: tenantId, error: e.message }));
+  }
+
+  if (!m.message) return;                               // referral/postback puro, sem mensagem
+  const text = m.message.text;
+  if (!text) { log.info('meta.message.skip_no_text', {}); return; }   // anexo: por ora ignora
+  const mid = m.message.mid;
 
   const creds = await meta.pageCredsForTenant(tenantId);
   if (!creds || !creds.token) { log.warn('meta.message.no_page_token', { tenant_id: tenantId }); return; }

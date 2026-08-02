@@ -334,6 +334,25 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
     [tenantId, conversationId, usuario ? String(usuario) : ''])).rows.map((r) => r.message_id));
   if (favSet.size) for (const m of timeline) if (favSet.has(m.id)) m.favorito = true;
 
+  // ADR-042 — ATRIBUIÇÃO DE CAMPANHA (first-touch): se a conversa Meta veio de um anúncio
+  // "enviar mensagem", pega o toque mais antigo (ad_id/ref/anúncio). null = DM orgânico.
+  let atribuicao = null;
+  if (cv.channel === 'facebook_messenger' || cv.channel === 'instagram_dm') {
+    const r = (await client.query(
+      `SELECT ad_id, ref, source, ref_type, ads_context, received_at
+         FROM meta_ad_referral
+        WHERE tenant_id = $1 AND channel = $2 AND psid = $3
+        ORDER BY received_at ASC LIMIT 1`, [tenantId, cv.channel, cv.external_id])).rows[0];
+    if (r) {
+      const ctx = r.ads_context || {};
+      atribuicao = {
+        ad_id: r.ad_id, ref: r.ref, source: r.source, tipo: r.ref_type,
+        anuncio_titulo: ctx.ad_title || null, anuncio_foto: ctx.photo_url || null, post_id: ctx.post_id || null,
+        em: r.received_at,
+      };
+    }
+  }
+
   const is_lead = !!lead && lead.status !== 'NOT_LEAD' && lead.status !== 'REVIEW_QUEUE';
   return {
     conversation: {
@@ -349,6 +368,7 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
       lead_status: lead ? lead.status : null,
       desfecho: lead ? lead.desfecho : null,
       last_read_at: cv.last_read_at,
+      atribuicao,
       contato: {
         nome: (lead && lead.name) || cv.external_id,
         phone: lead ? lead.phone : null,
