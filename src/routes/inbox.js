@@ -46,7 +46,7 @@ const WRITE_ROLES = ['TENANT_ADMIN', 'RECEPCAO'];
 const IDENT_CONV = "regexp_replace(cv.external_id, '[^0-9]', '', 'g')";
 const IDENT_LEAD = "regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')";
 
-const VIEWS = new Set(['todas', 'leads', 'nao_lead']);
+const VIEWS = new Set(['todas', 'leads', 'nao_lead', 'renovacoes']);
 
 // Cursor keyset opaco = base64("<ISO last_activity_at>|<conversation_id>"). Keyset (não
 // offset) porque a lista muda em tempo real — offset duplica/pula sob inserção concorrente.
@@ -93,6 +93,12 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   }
   if (v === 'leads') extra.push('is_lead = true');
   else if (v === 'nao_lead') extra.push('is_lead = false');
+  // Renovações: contrato com vencimento na janela (≤ hoje+90d) + rastro de vencidos (≥ hoje-30d).
+  // Janela ampla e configurável no futuro (ADR-049 §3.2); por ora fixa. Saída automática = quando
+  // renova, MAX(fim_vigencia) vai pra frente e o contrato deixa a janela sozinho.
+  else if (v === 'renovacoes') {
+    extra.push("venc IS NOT NULL AND venc <= current_date + interval '90 days' AND venc >= current_date - interval '30 days'");
+  }
 
   // Keyset entra como MAIS UM predicado do WHERE (não como cláusula solta — senão vira
   // "FROM projected AND ..." quando não há filtros).
@@ -154,9 +160,27 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
         FROM act a
        ORDER BY a.conversation_id, a.received_at DESC
     ),
+    -- Renovações (ADR-049): vencimento do contrato MAIS RECENTE por telefone (dígitos), lendo o
+    -- canônico service_account via account_member→person→contact_point (mesma ponte do
+    -- contractConvert.js). MAX(fim_vigencia): se renovou (novo contrato futuro), o vencimento vai
+    -- pra frente → a conversa sai da janela sozinha (saída automática). fonte_ausente_em IS NULL =
+    -- contrato ainda presente na fonte (o cancelado/substituído é marcado ausente pela sync).
+    renov AS (
+      SELECT regexp_replace(cp.value_raw, '[^0-9]', '', 'g') AS ident,
+             MAX(sa.fim_vigencia) AS venc
+        FROM service_account sa
+        JOIN account_member am ON am.account_id = sa.id AND am.tenant_id = $1
+        JOIN contact_point cp  ON cp.person_id = am.person_id AND cp.tenant_id = $1
+                              AND cp.kind = 'phone'
+       WHERE sa.tenant_id = $1
+         AND sa.fonte_ausente_em IS NULL
+         AND regexp_replace(cp.value_raw, '[^0-9]', '', 'g') <> ''
+       GROUP BY 1
+    ),
     projected AS (
       SELECT
         m.conversation_id, m.channel, m.external_id, m.ident, m.conversation_kind,
+        rn.venc AS venc, (rn.venc - current_date)::int AS venc_dias,
         m.lead_id, m.lead_status, m.lead_desfecho,
         COALESCE(m.lead_name, m.external_id) AS nome,
         m.lead_phone, m.lead_psid,
@@ -179,6 +203,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       FROM matched m
       CROSS JOIN cfg
       LEFT JOIN last_act la ON la.conversation_id = m.conversation_id
+      LEFT JOIN renov rn ON rn.ident = m.ident AND m.ident <> ''
       -- alias m2 = a MESMA linha de lead, so p/ os fragmentos SQL do lifecycle.js (que
       -- esperam colunas status/desfecho num alias). LATERAL de 1 linha, sem custo.
       LEFT JOIN LATERAL (SELECT m.lead_status AS status, m.lead_desfecho AS desfecho) m2 ON true
@@ -217,6 +242,13 @@ function mapConversationRow(r) {
     } : null,
     last_activity_at: r.last_activity_at,
     nao_lidas: Number(r.nao_lidas) || 0,
+    // ADR-049: presente quando a pessoa tem contrato com vencimento (renovação). venc = data ISO
+    // (YYYY-MM-DD); dias = dias até vencer (negativo = vencido). O estágio (D-45/30/15/7/vencido)
+    // é rotulado no dashboard, reusando a lógica da régua.
+    renovacao: r.venc ? {
+      venc: r.venc instanceof Date ? r.venc.toISOString().slice(0, 10) : String(r.venc).slice(0, 10),
+      dias: r.venc_dias == null ? null : Number(r.venc_dias),
+    } : null,
   };
 }
 

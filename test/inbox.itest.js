@@ -37,6 +37,17 @@ before(async () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, phone text,
       meta_psid text, status text, desfecho text, origem text, created_at timestamptz DEFAULT now());
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, dormancy_days int DEFAULT 7);
+    -- Canônico (ADR-049): contrato ↔ pessoa ↔ telefone. Schema mínimo — só as colunas que a
+    -- view=renovacoes lê (sem FKs, como os demais itests).
+    CREATE TABLE service_account (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid,
+      fim_vigencia date, fonte_ausente_em timestamptz);
+    CREATE TABLE account_member (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid,
+      account_id uuid, person_id uuid, bond text);
+    CREATE TABLE contact_point (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid,
+      person_id uuid, kind text, value_raw text);
   `);
 });
 after(async () => { await c.end(); });
@@ -75,6 +86,21 @@ async function lead(tenant, over = {}) {
      VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
     [tenant, over.name || null, over.phone || null, over.meta_psid || null,
      over.status || 'QUALIFYING', over.desfecho || null, over.origem || null])).rows[0].id;
+}
+
+// Semeia um contrato (service_account) ligado a um telefone via person→contact_point→account_member.
+// `diasAteVencer`: >0 = vence no futuro; <0 = já venceu. Sem person real (sem FK) — uuid solto.
+async function contrato(tenant, phoneRaw, diasAteVencer, over = {}) {
+  const pid = (await c.query('SELECT gen_random_uuid() AS id')).rows[0].id;
+  const said = (await c.query(
+    `INSERT INTO service_account (tenant_id, fim_vigencia, fonte_ausente_em)
+     VALUES ($1, (current_date + make_interval(days => $2))::date, $3) RETURNING id`,
+    [tenant, diasAteVencer, over.fonte_ausente_em || null])).rows[0].id;
+  await c.query(`INSERT INTO account_member (tenant_id, account_id, person_id, bond)
+                 VALUES ($1,$2,$3,$4)`, [tenant, said, pid, over.bond || 'beneficiario']);
+  await c.query(`INSERT INTO contact_point (tenant_id, person_id, kind, value_raw)
+                 VALUES ($1,$2,'phone',$3)`, [tenant, pid, phoneRaw]);
+  return said;
 }
 
 const list = (tenant, opts = {}) => inbox.listConversations(c, tenant, opts);
@@ -208,6 +234,44 @@ test('(6) keyset pagination sem sobreposição', async () => {
   const p2 = await list(tenant, { limit: 2, cursor: inbox.decodeCursor(p1.next_cursor) });
   const ids1 = new Set(p1.items.map((i) => i.conversation_id));
   assert.ok(p2.items.every((i) => !ids1.has(i.conversation_id)), 'página 2 não repete a 1');
+});
+
+test('(8) view=renovacoes: janela + rastro de vencidos + saída automática (ADR-049)', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000e9'; await cfg(tenant, 7);
+  // a) vence em 15d -> ENTRA
+  const cDentro = await conv(tenant, H(700)); await msg(cDentro); await contrato(tenant, D(700), 15);
+  // b) vence em 200d (longe) -> FORA (> hoje+90d)
+  const cLonge = await conv(tenant, H(701)); await msg(cLonge); await contrato(tenant, D(701), 200);
+  // c) venceu há 10d (rastro recuperável) -> ENTRA
+  const cVenc = await conv(tenant, H(702)); await msg(cVenc); await contrato(tenant, D(702), -10);
+  // d) venceu há 60d -> FORA (< hoje-30d)
+  const cVelho = await conv(tenant, H(703)); await msg(cVelho); await contrato(tenant, D(703), -60);
+  // e) sem contrato -> FORA
+  const cSem = await conv(tenant, H(704)); await msg(cSem);
+  // f) RENOVOU: contrato vencia em 5d, mas há um novo +300d -> MAX(fim_vigencia) vai pra frente -> SAI
+  const cRenov = await conv(tenant, H(705)); await msg(cRenov);
+  await contrato(tenant, D(705), 5); await contrato(tenant, D(705), 300);
+  // g) contrato AUSENTE da fonte (soft-delete) -> ignorado
+  const cAus = await conv(tenant, H(706)); await msg(cAus);
+  await contrato(tenant, D(706), 10, { fonte_ausente_em: new Date() });
+
+  const { items } = await list(tenant, { view: 'renovacoes', limit: 50 });
+  const ext = (n) => byExt(items, H(n));
+
+  assert.ok(ext(700), 'vence em 15d entra');
+  assert.equal(ext(700).renovacao.dias, 15, 'dias até vencer = 15');
+  assert.ok(!ext(701), 'vence em 200d fica fora (>90d)');
+  assert.ok(ext(702), 'vencido há 10d entra (rastro)');
+  assert.equal(ext(702).renovacao.dias, -10, 'dias negativo p/ vencido');
+  assert.ok(!ext(703), 'vencido há 60d fica fora (<-30d)');
+  assert.ok(!ext(704), 'sem contrato fica fora');
+  assert.ok(!ext(705), 'renovou (novo contrato +300d) sai sozinho — saída automática');
+  assert.ok(!ext(706), 'contrato ausente da fonte é ignorado');
+
+  // ordenado por atividade, e a etiqueta (renovacao) aparece TAMBÉM na visão geral p/ rotular
+  const todas = (await list(tenant, { view: 'todas', limit: 50 })).items;
+  assert.ok(byExt(todas, H(700)).renovacao, 'renovacao presente na visão todas (etiqueta)');
+  assert.equal(byExt(todas, H(704)).renovacao, null, 'sem contrato => renovacao null');
 });
 
 test('(7) isolamento multi-tenant', async () => {
