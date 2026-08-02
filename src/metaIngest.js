@@ -110,6 +110,55 @@ async function ingestLeadgen(value, isUpdate) {
   await engine.processInbound({ id: tenantId }, msg, { meta_leadgen: lead });
 }
 
+// ADR-042/Meta — normaliza um COMENTÁRIO de post a partir do change do webhook.
+//   - field 'comments' (Instagram): value = { id, text, from:{id,username}, media:{id}, parent_id }
+//   - field 'feed'     (Facebook):  value = { item, verb, comment_id, post_id, parent_id, from:{id,name}, message }
+// Só ingerimos comentários NOVOS (FB: item='comment' & verb='add'). Retorna null p/ o resto
+// (curtidas, posts, edições, remoções — tratadas depois) ou payload incompleto.
+function extractComment(field, value) {
+  const v = value || {};
+  if (field === 'comments') {                 // Instagram
+    const from = v.from || {};
+    if (!v.id || !from.id) return null;
+    return {
+      channel: 'instagram_comment', commentId: v.id, authorId: from.id,
+      authorName: from.username || from.name || null, text: v.text || '',
+      postId: (v.media && v.media.id) || null, parentId: v.parent_id || null,
+      mediaId: (v.media && v.media.id) || null,
+    };
+  }
+  if (field === 'feed') {                      // Facebook
+    if (v.item !== 'comment' || (v.verb && v.verb !== 'add')) return null;
+    const from = v.from || {};
+    if (!v.comment_id || !from.id) return null;
+    return {
+      channel: 'facebook_comment', commentId: v.comment_id, authorId: from.id,
+      authorName: from.name || null, text: v.message || '',
+      postId: v.post_id || null, parentId: v.parent_id || null, mediaId: null,
+    };
+  }
+  return null;
+}
+
+// Ingesta um comentário (change do webhook) como conversa da Caixa de Entrada. entryId = pageId
+// (FB) ou id da conta IG. Best-effort. Pula comentário FEITO PELA PRÓPRIA página/conta (eco da
+// nossa resposta): from.id == entryId.
+async function ingestComment(field, value, entryId, rawBody) {
+  const log = logger.child({ page_id: entryId, field });
+  const cmt = extractComment(field, value);
+  if (!cmt) { log.info('meta.comment.skip', {}); return; }
+  if (String(cmt.authorId) === String(entryId)) { log.info('meta.comment.skip_own', {}); return; }
+
+  const tenantId = await meta.tenantByPageId(entryId);
+  if (!tenantId) { log.info('meta.comment.unknown_page', {}); return; }
+
+  log.info('meta.comment.ingesting', { tenant_id: tenantId, channel: cmt.channel, comment_id: cmt.commentId });
+  await engine.captureComment(tenantId, {
+    channel: cmt.channel, externalId: cmt.authorId, commentId: cmt.commentId,
+    sender: cmt.authorName, body: cmt.text,
+  }, { post_id: cmt.postId, parent_id: cmt.parentId, media_id: cmt.mediaId, from: value && value.from, field });
+}
+
 async function ingestMessage(pageId, m, channel, rawBody) {
   const log = logger.child({ page_id: pageId, channel });
   if (!m) return;
@@ -165,6 +214,10 @@ async function ingest(body) {
         if (ch.field === 'leadgen' || ch.field === 'leadgen_update') {
           await ingestLeadgen(ch.value, ch.field === 'leadgen_update')
             .catch((err) => logger.error('meta.leadgen.error', { error: err.message }));
+        } else if (ch.field === 'feed' || ch.field === 'comments') {
+          // ADR-042 — comentário de post (FB 'feed' item=comment / IG 'comments').
+          await ingestComment(ch.field, ch.value, entry.id, body)
+            .catch((err) => logger.error('meta.comment.error', { error: err.message }));
         }
       }
     }
@@ -180,6 +233,6 @@ async function ingest(body) {
 }
 
 module.exports = {
-  ingest, ingestLeadgen, ingestMessage,
+  ingest, ingestLeadgen, ingestMessage, ingestComment, extractComment,
   applyFieldMap, findInterest, buildLeadgenMessage, DEFAULT_FIELD_MAP,
 };

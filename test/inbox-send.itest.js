@@ -24,6 +24,10 @@ before(async () => {
       external_message_id text, source text, sender text, body text, raw jsonb,
       media_url text, media_type text, media_filename text, reply_to_message_id uuid);
     CREATE UNIQUE INDEX so_uq ON staff_outbound_samples (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL;
+    CREATE TABLE messages (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
+      direction text, role text, external_message_id text, sender text, body text, raw jsonb,
+      received_at timestamptz NOT NULL DEFAULT now());
   `);
 });
 after(async () => { await c.end(); });
@@ -34,14 +38,23 @@ async function conv(tenant, ext, channel = 'whatsapp') {
 }
 // Evolution + Meta mockadas com espião de envio. Creds mockadas (sem tocar tenants/crypto).
 function mkDeps({ state = 'open', creds = { instance: 'inst', apikey: 'key' }, metaCreds = { pageId: 'PID', token: 'TOK' } } = {}) {
-  const spy = { sends: 0, metaSends: 0 };
+  const spy = { sends: 0, metaSends: 0, replies: 0, hides: 0 };
   const evolution = {
     status: async () => ({ state }),
     sendText: async () => { spy.sends++; return { key: { id: 'MSGID1' } }; },
     pickMessageId: () => 'MSGID1',
   };
-  const meta = { sendMessage: async () => { spy.metaSends++; return { message_id: 'MMSG1' }; } };
+  const meta = {
+    sendMessage: async () => { spy.metaSends++; return { message_id: 'MMSG1' }; },
+    replyToComment: async (args) => { spy.replies++; spy.replyArgs = args; return { id: 'RCID1' }; },
+    hideComment: async (args, hidden) => { spy.hides++; spy.hideArgs = { ...args, hidden }; return { success: true }; },
+  };
   return { deps: { evolution, credsForTenant: async () => creds, meta, pageCredsForTenant: async () => metaCreds }, spy };
+}
+// comentário de post (role=USER, external_message_id = comment_id) numa conversa
+async function comentario(tenant, convId, commentId, body = 'tem aula?') {
+  await c.query(`INSERT INTO messages (tenant_id, conversation_id, direction, role, external_message_id, body)
+                 VALUES ($1,$2,'inbound','USER',$3,$4)`, [tenant, convId, commentId, body]);
 }
 const soRows = async (tenant) => (await c.query('SELECT * FROM staff_outbound_samples WHERE tenant_id=$1', [tenant])).rows;
 
@@ -109,4 +122,41 @@ test('(5) instancia desconectada -> reason=instancia=..., sem envio', async () =
   const out = await inbox.sendMessage(T1, cv, { text: 'oi' }, deps);
   assert.equal(out.reason, 'instancia=close');
   assert.equal(spy.sends, 0);
+});
+
+test('(6) comentário FB -> responde ao ÚLTIMO comentário (Graph) e persiste a saída', async () => {
+  const cv = await conv(T1, 'FBUSER1', 'facebook_comment');
+  await comentario(T1, cv, 'CMT_OLD', 'primeiro');
+  await comentario(T1, cv, 'CMT_LAST', 'tem aula de bateria?');
+  const { deps, spy } = mkDeps();
+  const out = await inbox.sendMessage(T1, cv, { text: 'Oi! Temos sim 🥁', sender: 'RECEPCAO' }, deps);
+  assert.equal(out.ok, true); assert.equal(out.channel, 'facebook_comment'); assert.equal(out.message_id, 'RCID1');
+  assert.equal(spy.replies, 1); assert.equal(spy.metaSends, 0); assert.equal(spy.sends, 0);
+  assert.equal(spy.replyArgs.commentId, 'CMT_LAST', 'responde ao comentário mais recente');
+  assert.equal(spy.replyArgs.channel, 'facebook_comment');
+  const row = (await soRows(T1)).find((r) => r.external_message_id === 'RCID1');
+  assert.ok(row); assert.equal(row.body, 'Oi! Temos sim 🥁'); assert.equal(row.external_id, 'FBUSER1');
+});
+
+test('(7) comentário sem alvo (nenhum comment_id) -> reason=sem_comentario_alvo', async () => {
+  const cv = await conv(T1, 'IGUSER9', 'instagram_comment');
+  const { deps, spy } = mkDeps();
+  const out = await inbox.sendMessage(T1, cv, { text: 'oi' }, deps);
+  assert.equal(out.reason, 'sem_comentario_alvo'); assert.equal(spy.replies, 0);
+});
+
+test('(8) ocultar comentário -> chama hideComment com o canal certo', async () => {
+  const cv = await conv(T1, 'IGUSER8', 'instagram_comment');
+  const { deps, spy } = mkDeps();
+  const out = await inbox.ocultarComentario(T1, cv, 'CMT8', true, deps);
+  assert.equal(out.ok, true); assert.equal(out.hidden, true);
+  assert.equal(spy.hides, 1);
+  assert.equal(spy.hideArgs.commentId, 'CMT8'); assert.equal(spy.hideArgs.channel, 'instagram_comment'); assert.equal(spy.hideArgs.hidden, true);
+});
+
+test('(9) ocultar em canal não-comentário -> unsupported, sem chamar Graph', async () => {
+  const cv = await conv(T1, H(9), 'whatsapp');
+  const { deps, spy } = mkDeps();
+  const out = await inbox.ocultarComentario(T1, cv, 'X', true, deps);
+  assert.deepEqual(out, { unsupported: 'whatsapp' }); assert.equal(spy.hides, 0);
 });

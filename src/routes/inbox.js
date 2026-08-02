@@ -414,6 +414,29 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
     return { ok: true, message_id: messageId, channel: cv.channel };
   }
 
+  // Comentários de post (IG/FB): responde PUBLICAMENTE ao ÚLTIMO comentário da conversa (Graph).
+  // Persiste a saída como o WhatsApp (staff_outbound_samples) p/ aparecer na thread.
+  if (cv.channel === 'instagram_comment' || cv.channel === 'facebook_comment') {
+    const meta = deps.meta || metaDefault;
+    const pageCreds = deps.pageCredsForTenant || meta.pageCredsForTenant;
+    const creds = await pageCreds(tenantId);
+    if (!creds || !creds.token) return { reason: 'tenant_sem_meta' };
+    const alvo = await withTenant(tenantId, (c) =>
+      c.query(`SELECT external_message_id FROM messages
+                 WHERE conversation_id = $1 AND role = 'USER' AND external_message_id IS NOT NULL
+                 ORDER BY received_at DESC LIMIT 1`, [conversationId]).then((r) => r.rows[0]));
+    if (!alvo || !alvo.external_message_id) return { reason: 'sem_comentario_alvo' };
+    let r;
+    try {
+      r = await meta.replyToComment({ commentId: alvo.external_message_id, token: creds.token, channel: cv.channel }, text);
+    } catch (e) {
+      return { reason: 'meta_falhou', detail: e.message };
+    }
+    const messageId = (r && r.id) || null;
+    await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: text, replyToMessageId: null });
+    return { ok: true, message_id: messageId, channel: cv.channel };
+  }
+
   if (cv.channel !== 'whatsapp') return { unsupported: cv.channel };
   const phone = cv.external_id;
 
@@ -434,6 +457,45 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
   });
   return { ok: true, message_id: messageId, quoted: !!quoted };
 }
+
+// ADR-042/Meta — oculta/reexibe um comentário de post (IG/FB). commentId = external_message_id
+// da bolha. Resolve o canal pela conversa e o token pelo tenant. Não lança nos casos de negócio.
+async function ocultarComentario(tenantId, conversationId, commentId, hidden, deps = {}) {
+  const meta = deps.meta || metaDefault;
+  const pageCreds = deps.pageCredsForTenant || meta.pageCredsForTenant;
+  const cv = await withTenant(tenantId, (c) =>
+    c.query('SELECT channel FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, tenantId]).then((r) => r.rows[0] || null));
+  if (!cv) return { notFound: true };
+  if (cv.channel !== 'instagram_comment' && cv.channel !== 'facebook_comment') return { unsupported: cv.channel };
+  const creds = await pageCreds(tenantId);
+  if (!creds || !creds.token) return { reason: 'tenant_sem_meta' };
+  try {
+    await meta.hideComment({ commentId, token: creds.token, channel: cv.channel }, hidden);
+  } catch (e) {
+    return { reason: 'meta_falhou', detail: e.message };
+  }
+  return { ok: true, hidden: !!hidden };
+}
+
+// POST /tenant/:tenantId/inbox/conversations/:conversationId/comentario/ocultar — oculta/reexibe (ADR-042).
+router.post('/:tenantId/inbox/conversations/:conversationId/comentario/ocultar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { conversationId } = req.params;
+  if (!isUuid(conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  const commentId = typeof req.body?.comment_id === 'string' ? req.body.comment_id.trim() : '';
+  if (!commentId) return res.status(400).json({ error: 'missing_comment_id' });
+  const hidden = req.body?.hidden !== false;   // default: ocultar
+  try {
+    const out = await ocultarComentario(req.tenantId, conversationId, commentId, hidden);
+    if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
+    if (out.unsupported) return res.status(422).json({ error: 'canal_nao_suportado', channel: out.unsupported });
+    if (out.reason === 'tenant_sem_meta') return res.status(400).json({ error: 'tenant_sem_meta' });
+    if (out.reason === 'meta_falhou') return res.status(502).json({ error: 'meta_falhou', detail: out.detail });
+    res.json({ ok: true, hidden: out.hidden });
+  } catch (err) {
+    logger.error('tenant.inbox.ocultar.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(502).json({ error: 'hide_failed', detail: err.message });
+  }
+});
 
 // POST /tenant/:tenantId/inbox/conversations/:conversationId/mensagem — envio humano (E12-06).
 router.post('/:tenantId/inbox/conversations/:conversationId/mensagem', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
@@ -930,6 +992,7 @@ module.exports.mapConversationRow = mapConversationRow;
 module.exports.listConversations = listConversations;
 module.exports.getConversationThread = getConversationThread;
 module.exports.sendMessage = sendMessage;
+module.exports.ocultarComentario = ocultarComentario;
 module.exports.deleteInboxMessage = deleteInboxMessage;
 module.exports.editInboxMessage = editInboxMessage;
 module.exports.reactToMessage = reactToMessage;

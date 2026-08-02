@@ -176,7 +176,9 @@ async function resolveGrantedPage(userToken) {
 // Idempotente.
 async function subscribeLeadgen(pageId, pageToken) {
   return graphFetch('POST', '/' + encodeURIComponent(pageId) + '/subscribed_apps', {
-    subscribed_fields: 'leadgen,messages,messaging_postbacks,messaging_referrals',
+    // feed = comentários (e outras atividades) da Página no Facebook; comments = comentários do
+    // Instagram. A ingestão filtra só item=comment (ADR-042 comentários na Caixa de Entrada).
+    subscribed_fields: 'leadgen,messages,messaging_postbacks,messaging_referrals,feed,comments',
     access_token: pageToken,
   });
 }

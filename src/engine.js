@@ -425,6 +425,38 @@ async function captureGroupInbound(tenantId, jid, msg, rawBody) {
   }
 }
 
+// ADR-042/Meta — captura um COMENTÁRIO de post (IG/FB) como conversa da Caixa de Entrada,
+// SEM triagem/lead/auto-reply (comentário público ≠ DM). Upsert da conversa (kind='COMMENT',
+// channel instagram_comment/facebook_comment; external_id = id do autor) + message role='USER'
+// (external_message_id = comment_id; raw guarda post_id/parent_id/media_id). Dedup por
+// (tenant, external_message_id). Best-effort: nunca lança. Retorna o conversation_id (ou null).
+async function captureComment(tenantId, { channel, externalId, commentId, sender, body }, rawComment) {
+  if (!tenantId || !channel || !externalId || !commentId) return null;
+  try {
+    return await withTenant(tenantId, async (c) => {
+      const conv = (await c.query(
+        `INSERT INTO conversations (tenant_id, channel, external_id, conversation_kind)
+         VALUES ($1, $2, $3, 'COMMENT')
+         ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
+         RETURNING id`,
+        [tenantId, channel, String(externalId)]
+      )).rows[0];
+      await c.query(
+        `INSERT INTO messages
+           (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw)
+         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6)
+         ON CONFLICT (tenant_id, external_message_id)
+           WHERE external_message_id IS NOT NULL DO NOTHING`,
+        [tenantId, conv.id, String(commentId), sender || null, body || '', rawComment || {}]
+      );
+      return conv.id;
+    });
+  } catch (e) {
+    logger.warn('comment.capture_failed', { tenant_id: tenantId, channel, error: e.message });
+    return null;
+  }
+}
+
 // ADR-019 — captura uma mensagem DESCARTADA (gate0) sem criar lead. Upsert da
 // conversa + message com discarded=true. Best-effort. Alimenta "Não classificadas".
 async function captureDiscarded(tenantId, channel, externalId, msg, rawBody, reason) {
@@ -1883,6 +1915,7 @@ async function generateDraftForLead(tenantId, leadId, deps = {}) {
 module.exports = {
   processInbound, generateDraftForLead, mergeQualification, loadRealHistory, reprocessPendingLead,
   captureGroupInbound,   // ADR-042 E14/B1 — ingestão de mensagem de grupo
+  captureComment,        // ADR-042/Meta — ingestão de comentário de post (IG/FB)
   CONFIDENCE_THRESHOLD,
   // Helpers puros expostos p/ teste (resiliência 503).
   _isTransientAIError, _pendingWindowExpired, _decideConversaRoute, PENDING_CLASSIFICATION_WINDOW_MS,

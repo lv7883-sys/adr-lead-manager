@@ -71,6 +71,25 @@ async function sendMessage({ pageId, token }, psid, text) {
   }, { access_token: token });
 }
 
+// ADR-042/Meta — responde PUBLICAMENTE a um comentário de post.
+//   - Instagram: POST /{ig-comment-id}/replies   (precisa instagram_manage_comments)
+//   - Facebook:  POST /{comment-id}/comments      (precisa pages_manage_engagement)
+// Retorna o corpo da Graph (inclui id do novo comentário). Lança em erro.
+async function replyToComment({ commentId, token, channel }, message) {
+  if (!commentId || !token) { const e = new Error('meta_sem_credenciais'); e.code = 'no_creds'; throw e; }
+  const path = channel === 'instagram_comment'
+    ? '/' + encodeURIComponent(commentId) + '/replies'
+    : '/' + encodeURIComponent(commentId) + '/comments';
+  return graphPost(path, { message: String(message) }, { access_token: token });
+}
+
+// ADR-042/Meta — oculta (ou reexibe) um comentário. FB usa is_hidden; IG usa hide.
+async function hideComment({ commentId, token, channel }, hidden = true) {
+  if (!commentId || !token) { const e = new Error('meta_sem_credenciais'); e.code = 'no_creds'; throw e; }
+  const body = channel === 'instagram_comment' ? { hide: !!hidden } : { is_hidden: !!hidden };
+  return graphPost('/' + encodeURIComponent(commentId), body, { access_token: token });
+}
+
 // Busca os dados reais de um lead de Lead Ad. Retorna { field_data, created_time, ... }.
 // field_data = [{ name: 'full_name', values: ['João'] }, ...].
 async function fetchLead(leadgenId, pageToken) {
@@ -148,6 +167,6 @@ function verifySignature(rawBody, signatureHeader) {
 }
 
 module.exports = {
-  fetchLead, fetchUserName, fieldDataToMap, sendMessage,
+  fetchLead, fetchUserName, fieldDataToMap, sendMessage, replyToComment, hideComment,
   tenantByPageId, leadSourceFieldMap, pageCredsForTenant, verifySignature,
 };
