@@ -48,6 +48,12 @@ before(async () => {
     CREATE TABLE contact_point (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid,
       person_id uuid, kind text, value_raw text);
+    -- Espelho da migr. 085 (a query usa br_phone_key sem schema; aqui vive em public).
+    CREATE OR REPLACE FUNCTION br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
+      WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
+           loc AS (SELECT CASE WHEN length(v) IN (12,13) AND left(v,2)='55' THEN substr(v,3) ELSE v END AS v FROM d)
+      SELECT CASE WHEN length(v)=11 AND substr(v,3,1)='9' THEN left(v,2)||substr(v,4) ELSE v END FROM loc
+    $fn$;
   `);
 });
 after(async () => { await c.end(); });
@@ -98,8 +104,12 @@ async function contrato(tenant, phoneRaw, diasAteVencer, over = {}) {
     [tenant, diasAteVencer, over.fonte_ausente_em || null])).rows[0].id;
   await c.query(`INSERT INTO account_member (tenant_id, account_id, person_id, bond)
                  VALUES ($1,$2,$3,$4)`, [tenant, said, pid, over.bond || 'beneficiario']);
+  // value_raw no formato REAL da Extranet: SEM o DDI 55 e COM pontuação — força a query a
+  // normalizar (br_phone_key) p/ casar com o external_id da conversa (que vem COM 55).
+  const localDig = String(phoneRaw).replace(/\D/g, '').replace(/^55/, '');
+  const valueRaw = over.valueRaw || `((${localDig.slice(0, 2)}))${localDig.slice(2)}`;
   await c.query(`INSERT INTO contact_point (tenant_id, person_id, kind, value_raw)
-                 VALUES ($1,$2,'phone',$3)`, [tenant, pid, phoneRaw]);
+                 VALUES ($1,$2,'phone',$3)`, [tenant, pid, valueRaw]);
   return said;
 }
 

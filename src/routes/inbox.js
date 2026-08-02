@@ -119,7 +119,8 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     ),
     conv AS (
       SELECT cv.id AS conversation_id, cv.channel, cv.external_id, cv.last_read_at,
-             cv.updated_at, cv.conversation_kind, ${IDENT_CONV} AS ident
+             cv.updated_at, cv.conversation_kind, ${IDENT_CONV} AS ident,
+             br_phone_key(cv.external_id) AS rkey   -- chave canônica p/ casar contrato (migr. 085)
         FROM conversations cv
        WHERE cv.tenant_id = $1
     ),
@@ -166,7 +167,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     -- pra frente → a conversa sai da janela sozinha (saída automática). fonte_ausente_em IS NULL =
     -- contrato ainda presente na fonte (o cancelado/substituído é marcado ausente pela sync).
     renov AS (
-      SELECT regexp_replace(cp.value_raw, '[^0-9]', '', 'g') AS ident,
+      SELECT br_phone_key(cp.value_raw) AS rk,
              MAX(sa.fim_vigencia) AS venc
         FROM service_account sa
         JOIN account_member am ON am.account_id = sa.id AND am.tenant_id = $1
@@ -174,7 +175,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
                               AND cp.kind = 'phone'
        WHERE sa.tenant_id = $1
          AND sa.fonte_ausente_em IS NULL
-         AND regexp_replace(cp.value_raw, '[^0-9]', '', 'g') <> ''
+         AND br_phone_key(cp.value_raw) <> ''
        GROUP BY 1
     ),
     projected AS (
@@ -203,7 +204,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       FROM matched m
       CROSS JOIN cfg
       LEFT JOIN last_act la ON la.conversation_id = m.conversation_id
-      LEFT JOIN renov rn ON rn.ident = m.ident AND m.ident <> ''
+      LEFT JOIN renov rn ON rn.rk = m.rkey AND m.rkey <> ''
       -- alias m2 = a MESMA linha de lead, so p/ os fragmentos SQL do lifecycle.js (que
       -- esperam colunas status/desfecho num alias). LATERAL de 1 linha, sem custo.
       LEFT JOIN LATERAL (SELECT m.lead_status AS status, m.lead_desfecho AS desfecho) m2 ON true
