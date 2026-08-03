@@ -472,7 +472,7 @@ async function handleZapiWebhook(req, res) {
     }
     // ADR-006+ — resposta automática FORA DO HORÁRIO (a "Janis"). Best-effort: roda DEPOIS de
     // persistir o inbound; nunca bloqueia/derruba a ingestão. Só 1:1 (inbound já filtrado acima).
-    autoReply.maybeAutoReply(tenant, { channel: 'whatsapp', externalId: msg.externalId, inboundText: msg.body })
+    autoReply.maybeAutoReply(tenant, { channel: 'whatsapp', externalId: msg.externalId, inboundText: msg.body, contactName: msg.sender })
       .catch((e) => log.warn('autoreply.unhandled', { error: e.message }));
   };
   // Funil de triagem (Portões 0/1/2). Fire-and-forget com captura de erro.

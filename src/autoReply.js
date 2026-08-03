@@ -107,7 +107,7 @@ async function _send(tenantId, channel, externalId, text, deps) {
 
 // Núcleo. tenant = { id }. Resolve a conversa por (channel, dígitos do external_id). Só DIRECT.
 // deps injeta now/generate/evolution/meta/creds/registrar p/ o teste. Retorna {ok} ou {skipped}.
-async function maybeAutoReply(tenant, { channel, externalId, inboundText }, deps = {}) {
+async function maybeAutoReply(tenant, { channel, externalId, inboundText, contactName }, deps = {}) {
   if (process.env.AUTOREPLY_PAUSE === '1') return { skipped: 'paused' };
   const tenantId = tenant && tenant.id;
   if (!tenantId || !channel || !externalId) return { skipped: 'args' };
@@ -119,13 +119,13 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText }, deps
           WHERE tenant_id = $1 AND channel = $2
             AND regexp_replace(external_id, '[^0-9]', '', 'g') = regexp_replace($3, '[^0-9]', '', 'g')
           ORDER BY updated_at DESC LIMIT 1`, [tenantId, channel, String(externalId)])).rows[0];
-      const auto = (await c.query('SELECT modo_fora_horario, modo_fds, nome_ia FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
+      const auto = (await c.query('SELECT modo_fora_horario, modo_fds, nome_ia, contexto_ia FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
       const cfg = (await c.query('SELECT school_name, business_hours, available_instruments FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
       const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0];
       const lead = ident ? (await c.query(
-        `SELECT id FROM leads WHERE tenant_id = $1 AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+        `SELECT id, name FROM leads WHERE tenant_id = $1 AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
           ORDER BY created_at ASC LIMIT 1`, [tenantId, ident])).rows[0] : null;
-      return { conv, auto, cfg, tname: tname && tname.name, leadId: lead && lead.id };
+      return { conv, auto, cfg, tname: tname && tname.name, leadId: lead && lead.id, leadName: lead && lead.name };
     });
     if (!info.conv) return { skipped: 'no_conv' };
     if (info.conv.conversation_kind && info.conv.conversation_kind !== 'DIRECT') return { skipped: 'nao_direct' };
@@ -161,12 +161,27 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText }, deps
     catch (e) { logger.warn('autoreply.history_failed', { tenant_id: tenantId, error: e.message }); }
 
     const instrs = (info.cfg && Array.isArray(info.cfg.available_instruments) && info.cfg.available_instruments.length)
-      ? ` A escola oferece: ${info.cfg.available_instruments.join(', ')}.` : '';
+      ? ` A escola oferece aulas de: ${info.cfg.available_instruments.join(', ')}.` : '';
+    // Nome do contato: prioriza o que veio do WhatsApp/Meta (pushName), cai p/ o nome do lead.
+    const contato = (contactName && String(contactName).trim()) || (info.leadName && String(info.leadName).trim()) || null;
+    const primeiroNome = contato ? contato.split(/\s+/)[0] : null;
+    // Base de conhecimento que a escola preencheu (endereço, como funcionam as aulas, eventos…).
+    const contexto = (info.auto && info.auto.contexto_ia && String(info.auto.contexto_ia).trim()) || '';
+
+    const blocoNome = contato
+      ? `Você JÁ SABE, pelo WhatsApp, que está falando com ${contato} — trate pelo primeiro nome (${primeiroNome}) e NÃO pergunte o nome dela. Se a conversa for sobre aula, pergunte de forma natural PARA QUEM seria a aula: se é para ${primeiroNome} ou para outra pessoa (e, se for outra, o nome e a idade). `
+      : `Se ainda não souber o nome e a conversa for sobre aula, pergunte para quem seria a aula (a própria pessoa ou outra) — sem soar burocrática. `;
+    const blocoContexto = contexto
+      ? `INFORMAÇÕES DA ESCOLA que você PODE usar para responder (ex.: endereço, como funcionam as aulas, eventos): """${contexto}""" `
+      : '';
+    const retorno = proxima ? `quando a equipe abrir (${proxima})` : 'no próximo horário de atendimento';
     const systemPrompt =
       `Você é ${nomeIa}, do atendimento de ${escola} — fale como um atendente HUMANO real, caloroso e natural (nada robótico, nada genérico).${instrs} ` +
-      `AGORA é FORA do horário de atendimento. LEIA o histórico da conversa e responda de forma PERSONALIZADA e curta (1 a 3 frases), em português do Brasil: ` +
-      `reconheça o contexto/assunto do que a pessoa vinha falando, mostre que anotou, e diga que a equipe humana retorna ${proxima || 'no próximo horário de atendimento'}. ` +
-      `REGRAS (fora do horário, sem humano por trás): NÃO invente preços/valores, NÃO agende, NÃO confirme datas nem prometa nada específico — isso fica para o atendimento humano. Pode assinar como ${nomeIa}.`;
+      blocoNome + blocoContexto +
+      `AGORA é FORA do horário de atendimento. LEIA o histórico da conversa e responda de forma PERSONALIZADA e curta (1 a 3 frases), em português do Brasil, reconhecendo o assunto. ` +
+      `VOCÊ PODE responder dúvidas gerais como o ENDEREÇO da unidade e COMO FUNCIONAM as aulas (individuais, projetos de banda, eventos) — usando SOMENTE as informações da escola acima; se não tiver a informação, diga com sinceridade que a recepção passa esse detalhe ${retorno}. ` +
+      `VOCÊ NÃO PODE, de jeito nenhum: informar PREÇOS/valores, nem AGENDAR ou confirmar HORÁRIO de aula experimental — isso é exclusivo da recepção; nesses casos, diga que a equipe humana confirma ${retorno}. ` +
+      `NUNCA invente informação que não esteja acima. Pode assinar como ${nomeIa}.`;
 
     const generate = deps.generate || gemini.generateReply;
     let texto;

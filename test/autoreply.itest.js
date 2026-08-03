@@ -20,7 +20,7 @@ before(async () => {
     CREATE TABLE tenants (id uuid PRIMARY KEY, name text);
     CREATE TABLE conversations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, conversation_kind text DEFAULT 'DIRECT', auto_reply_at timestamptz, updated_at timestamptz DEFAULT now());
-    CREATE TABLE automacao_config (tenant_id uuid PRIMARY KEY, modo_fora_horario text, modo_fds text, nome_ia text);
+    CREATE TABLE automacao_config (tenant_id uuid PRIMARY KEY, modo_fora_horario text, modo_fds text, nome_ia text, contexto_ia text);
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, school_name text, business_hours jsonb,
       available_instruments text[] NOT NULL DEFAULT '{}');
     CREATE TABLE staff_outbound_samples (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
@@ -39,9 +39,9 @@ async function conv(kind = 'DIRECT', channel = 'whatsapp', autoAt = null) {
   return (await c.query(`INSERT INTO conversations (tenant_id, channel, external_id, conversation_kind, auto_reply_at) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
     [T1, channel, EXT, kind, autoAt])).rows[0].id;
 }
-async function setModo(fora, fds = fora, nome = 'Janis Joplin') {
-  await c.query(`INSERT INTO automacao_config (tenant_id, modo_fora_horario, modo_fds, nome_ia) VALUES ($1,$2,$3,$4)
-                 ON CONFLICT (tenant_id) DO UPDATE SET modo_fora_horario=$2, modo_fds=$3, nome_ia=$4`, [T1, fora, fds, nome]);
+async function setModo(fora, fds = fora, nome = 'Janis Joplin', contexto = null) {
+  await c.query(`INSERT INTO automacao_config (tenant_id, modo_fora_horario, modo_fds, nome_ia, contexto_ia) VALUES ($1,$2,$3,$4,$5)
+                 ON CONFLICT (tenant_id) DO UPDATE SET modo_fora_horario=$2, modo_fds=$3, nome_ia=$4, contexto_ia=$5`, [T1, fora, fds, nome, contexto]);
 }
 function mkDeps(now) {
   const spy = { sends: 0, saved: null, texto: null };
@@ -57,14 +57,20 @@ function mkDeps(now) {
 }
 
 test('(1) fora do horário + modo=auto -> envia e marca cooldown', async () => {
-  const cv = await conv(); await setModo('auto');
+  const cv = await conv(); await setModo('auto', 'auto', 'Janis Joplin', 'Ficamos na Rua X, 100, Valinhos. Aulas individuais e projetos de banda.');
   const deps = mkDeps(NOITE);
-  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'quanto custa violão?' }, deps);
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'quanto custa violão?', contactName: 'Maria Silva' }, deps);
   assert.equal(out.ok, true);
   assert.equal(deps.spy.sends, 1);
   assert.equal(deps.spy.histLoaded, true, 'leu o histórico da conversa');
   assert.ok(Array.isArray(deps.spy.history), 'histórico passado ao gerar');
   assert.equal(deps.spy.saved.sender, 'Janis Joplin');   // assina com o nome da IA, não recepcionista
+  const sp = deps.spy.systemPrompt;
+  assert.match(sp, /Maria/, 'usa o nome do contato (WhatsApp)');
+  assert.match(sp, /Rua X, 100/, 'inclui a base de conhecimento (endereço/aulas)');
+  assert.match(sp, /ENDERE[ÇC]O|como funcionam as aulas/i, 'permite responder endereço/como funcionam as aulas');
+  assert.match(sp, /PRE[ÇC]OS?\/valores/i, 'bloqueia preço');
+  assert.match(sp, /experimental/i, 'bloqueia agendar aula experimental');
   const ar = (await c.query(`SELECT auto_reply_at FROM conversations WHERE id=$1`, [cv])).rows[0].auto_reply_at;
   assert.ok(ar, 'auto_reply_at setado');
 });
