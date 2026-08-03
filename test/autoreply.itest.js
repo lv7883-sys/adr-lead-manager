@@ -65,6 +65,8 @@ test('(1) fora do horário + modo=auto -> envia e marca cooldown', async () => {
   assert.equal(deps.spy.histLoaded, true, 'leu o histórico da conversa');
   assert.ok(Array.isArray(deps.spy.history), 'histórico passado ao gerar');
   assert.equal(deps.spy.saved.sender, 'Janis Joplin');   // assina com o nome da IA, não recepcionista
+  assert.ok(deps.spy.saved.body.startsWith('*Janis Joplin*\n'), 'nome em negrito no topo (igual às recepcionistas)');
+  assert.ok(deps.spy.texto.startsWith('*Janis Joplin*\n'), 'texto enviado começa com o cabeçalho');
   const sp = deps.spy.systemPrompt;
   assert.match(sp, /Maria/, 'usa o nome do contato (WhatsApp)');
   assert.match(sp, /Rua X, 100/, 'inclui a base de conhecimento (endereço/aulas)');

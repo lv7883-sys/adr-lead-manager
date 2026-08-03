@@ -181,18 +181,19 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
       `AGORA é FORA do horário de atendimento. LEIA o histórico da conversa e responda de forma PERSONALIZADA e curta (1 a 3 frases), em português do Brasil, reconhecendo o assunto. ` +
       `VOCÊ PODE responder dúvidas gerais como o ENDEREÇO da unidade e COMO FUNCIONAM as aulas (individuais, projetos de banda, eventos) — usando SOMENTE as informações da escola acima; se não tiver a informação, diga com sinceridade que a recepção passa esse detalhe ${retorno}. ` +
       `VOCÊ NÃO PODE, de jeito nenhum: informar PREÇOS/valores, nem AGENDAR ou confirmar HORÁRIO de aula experimental — isso é exclusivo da recepção; nesses casos, diga que a equipe humana confirma ${retorno}. ` +
-      `NUNCA invente informação que não esteja acima. Pode assinar como ${nomeIa}.`;
+      `NUNCA invente informação que não esteja acima. NÃO assine nem repita seu nome no final — o nome já aparece no topo da mensagem.`;
 
     const generate = deps.generate || gemini.generateReply;
-    let texto;
+    let corpo;
     try {
-      texto = await generate({ systemPrompt, history, message: inboundText || '', retomada: history.length > 0 });
+      corpo = await generate({ systemPrompt, history, message: inboundText || '', retomada: history.length > 0 });
     } catch (e) {
       logger.warn('autoreply.generate_failed', { tenant_id: tenantId, error: e.message });
-      texto = `Oi! Aqui é a ${nomeIa}, de ${escola}. Recebemos sua mensagem 🙌 No momento estamos fora do horário de atendimento; a equipe retorna ${proxima || 'assim que abrirmos'}. Já anotamos por aqui!`;
+      corpo = `Oi! Recebemos sua mensagem 🙌 No momento estamos fora do horário de atendimento; a equipe humana retorna ${proxima || 'assim que abrirmos'}. Já anotei por aqui!`;
     }
-    if (!texto || !String(texto).trim()) return { skipped: 'vazio' };
-    texto = String(texto).trim();
+    if (!corpo || !String(corpo).trim()) return { skipped: 'vazio' };
+    // Cabeçalho com o nome em NEGRITO (WhatsApp: *nome*), igual às recepcionistas (ex.: *Rafa*).
+    const texto = `*${nomeIa}*\n${String(corpo).trim()}`;
 
     const sent = await _send(tenantId, channel, externalId, texto, deps);
     if (!sent.ok) return { skipped: 'send_' + sent.reason };
