@@ -178,12 +178,28 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
          AND br_phone_key(cp.value_raw) <> ''
        GROUP BY 1
     ),
+    -- Nome do CADASTRO (canônico): telefone → person.display_name pela MESMA chave br_phone_key.
+    -- O aluno não vira lead, então sem isto a lista mostra o número. min() = 1 nome por telefone.
+    pess AS (
+      SELECT br_phone_key(cp.value_raw) AS rk, min(p.display_name) AS display_name
+        FROM contact_point cp
+        JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
+       WHERE cp.tenant_id = $1 AND cp.kind = 'phone'
+         AND coalesce(p.display_name, '') <> ''
+         AND br_phone_key(cp.value_raw) <> ''
+       GROUP BY 1
+    ),
     projected AS (
       SELECT
         m.conversation_id, m.channel, m.external_id, m.ident, m.conversation_kind,
         rn.venc AS venc, (rn.venc - current_date)::int AS venc_dias,
         m.lead_id, m.lead_status, m.lead_desfecho,
-        COALESCE(m.lead_name, m.external_id) AS nome,
+        -- Nome EMPILHADO (usa ao máximo o canônico): cadastro → lead → pushName do WhatsApp → número.
+        COALESCE(pe.display_name, m.lead_name,
+                 (SELECT sm.sender FROM messages sm
+                   WHERE sm.conversation_id = m.conversation_id AND sm.role = 'USER'
+                     AND coalesce(sm.sender, '') <> '' ORDER BY sm.received_at DESC LIMIT 1),
+                 m.external_id) AS nome,
         m.lead_phone, m.lead_psid,
         COALESCE(m.lead_origem, m.channel) AS fonte,
         (m.lead_id IS NOT NULL
@@ -205,6 +221,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       CROSS JOIN cfg
       LEFT JOIN last_act la ON la.conversation_id = m.conversation_id
       LEFT JOIN renov rn ON rn.rk = m.rkey AND m.rkey <> ''
+      LEFT JOIN pess pe ON pe.rk = m.rkey AND m.rkey <> ''
       -- alias m2 = a MESMA linha de lead, so p/ os fragmentos SQL do lifecycle.js (que
       -- esperam colunas status/desfecho num alias). LATERAL de 1 linha, sem custo.
       LEFT JOIN LATERAL (SELECT m.lead_status AS status, m.lead_desfecho AS desfecho) m2 ON true
@@ -325,6 +342,18 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
     [tenantId, cv.ident]
   )).rows[0] || null;
 
+  // Nome EMPILHADO (mesma lógica da lista): cadastro canônico → lead → pushName do WhatsApp → número.
+  const cadastroNome = (await client.query(
+    `SELECT min(p.display_name) AS nome
+       FROM contact_point cp JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
+      WHERE cp.tenant_id = $1 AND cp.kind = 'phone'
+        AND coalesce(p.display_name, '') <> '' AND br_phone_key(cp.value_raw) = br_phone_key($2)`,
+    [tenantId, cv.external_id])).rows[0]?.nome || null;
+  const pushNome = (await client.query(
+    `SELECT sender FROM messages WHERE conversation_id = $1 AND role = 'USER'
+        AND coalesce(sender, '') <> '' ORDER BY received_at DESC LIMIT 1`,
+    [conversationId])).rows[0]?.sender || null;
+
   const timeline = await fetchTimeline(client, { tenantId, ident: cv.ident, leadId: lead ? lead.id : null });
 
   // ADR-042 — marca as bolhas FAVORITADAS (estrela) DO USUÁRIO (favorited_by). Cada recepcionista
@@ -370,7 +399,7 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
       last_read_at: cv.last_read_at,
       atribuicao,
       contato: {
-        nome: (lead && lead.name) || cv.external_id,
+        nome: cadastroNome || (lead && lead.name) || pushNome || cv.external_id,
         phone: lead ? lead.phone : null,
         meta_psid: lead ? lead.meta_psid : null,
       },

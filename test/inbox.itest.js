@@ -28,7 +28,7 @@ before(async () => {
     CREATE TABLE messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), conversation_id uuid, role text,
       body text, media_type text, edited_at timestamptz, deleted_at timestamptz,
-      received_at timestamptz DEFAULT now());
+      sender text, received_at timestamptz DEFAULT now());
     CREATE TABLE staff_outbound_samples (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, external_id text,
       body text, media_type text, edited_at timestamptz, deleted_at timestamptz,
@@ -48,6 +48,8 @@ before(async () => {
     CREATE TABLE contact_point (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid,
       person_id uuid, kind text, value_raw text);
+    CREATE TABLE person (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, display_name text);
     -- Espelho da migr. 085 (a query usa br_phone_key sem schema; aqui vive em public).
     CREATE OR REPLACE FUNCTION br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
       WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
@@ -74,10 +76,18 @@ async function conv(tenant, extId, over = {}) {
 }
 async function msg(convId, over = {}) {
   return (await c.query(
-    `INSERT INTO messages (conversation_id, role, body, media_type, edited_at, deleted_at, received_at)
-     VALUES ($1,$2,$3,$4,$5,$6, now() - make_interval(days => $7)) RETURNING id`,
+    `INSERT INTO messages (conversation_id, role, body, media_type, edited_at, deleted_at, sender, received_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$8, now() - make_interval(days => $7)) RETURNING id`,
     [convId, over.role || 'USER', over.body ?? 'oi', over.media_type || null,
-     over.edited_at || null, over.deleted_at || null, over.diasAtras || 0])).rows[0].id;
+     over.edited_at || null, over.deleted_at || null, over.diasAtras || 0, over.sender || null])).rows[0].id;
+}
+// Cadastro canônico: uma pessoa com nome + telefone (contact_point). Casa por br_phone_key.
+async function pessoaNome(tenant, phoneRaw, nome) {
+  const pid = (await c.query(`INSERT INTO person (tenant_id, display_name) VALUES ($1,$2) RETURNING id`, [tenant, nome])).rows[0].id;
+  const local = String(phoneRaw).replace(/\D/g, '').replace(/^55/, '');
+  await c.query(`INSERT INTO contact_point (tenant_id, person_id, kind, value_raw) VALUES ($1,$2,'phone',$3)`,
+    [tenant, pid, `((${local.slice(0, 2)}))${local.slice(2)}`]);
+  return pid;
 }
 async function outbound(tenant, extDigits, over = {}) {
   return (await c.query(
@@ -282,6 +292,27 @@ test('(8) view=renovacoes: janela + rastro de vencidos + saída automática (ADR
   const todas = (await list(tenant, { view: 'todas', limit: 50 })).items;
   assert.ok(byExt(todas, H(700)).renovacao, 'renovacao presente na visão todas (etiqueta)');
   assert.equal(byExt(todas, H(704)).renovacao, null, 'sem contrato => renovacao null');
+});
+
+test('(9) nome empilhado: cadastro > lead > pushName > número', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000ea'; await cfg(tenant, 7);
+  // a) cadastro tem o nome → vence lead e pushName
+  const cCad = await conv(tenant, H(800)); await msg(cCad, { sender: 'Zé do Zap' });
+  await pessoaNome(tenant, D(800), 'João da Silva');
+  await lead(tenant, { phone: D(800), name: 'Lead Antigo', status: 'QUALIFYING' });
+  // b) sem cadastro, tem lead → nome do lead
+  const cLead = await conv(tenant, H(801)); await msg(cLead, { sender: 'Fulano WA' });
+  await lead(tenant, { phone: D(801), name: 'Maria Lead', status: 'QUALIFYING' });
+  // c) sem cadastro nem lead, tem pushName → nome do WhatsApp
+  const cPush = await conv(tenant, H(802)); await msg(cPush, { sender: 'Pedro WhatsApp' });
+  // d) nada → cai no número (external_id)
+  const cNum = await conv(tenant, H(803)); await msg(cNum, {});
+
+  const { items } = await list(tenant, { limit: 50 });
+  assert.equal(byExt(items, H(800)).contato.nome, 'João da Silva', 'cadastro vence lead e pushName');
+  assert.equal(byExt(items, H(801)).contato.nome, 'Maria Lead', 'lead quando não há cadastro');
+  assert.equal(byExt(items, H(802)).contato.nome, 'Pedro WhatsApp', 'pushName quando não há cadastro/lead');
+  assert.equal(byExt(items, H(803)).contato.nome, H(803), 'número quando não há nada');
 });
 
 test('(7) isolamento multi-tenant', async () => {
