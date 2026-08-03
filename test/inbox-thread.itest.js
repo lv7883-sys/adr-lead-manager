@@ -119,6 +119,15 @@ test('(3) reply_to resolvido a partir da mensagem citada', async () => {
   assert.equal(citou.reply_to.preview, 'primeira');
 });
 
+test('(5) timeline expõe external_message_id por bolha (p/ ocultar comentário)', async () => {
+  const cv = await conv(T1, H(5));
+  await lead(T1, { phone: Dg(5), status: 'QUALIFYING' });
+  await msg(cv, { body: 'comentario', dias: 0, extMsgId: 'CMT_X' });
+  const out = await thread(T1, cv);
+  const b = out.timeline.find((t) => t.body === 'comentario');
+  assert.equal(b.external_message_id, 'CMT_X', 'comment_id exposto na bolha');
+});
+
 test('(4) 404: conversa inexistente ou de outro tenant', async () => {
   const cv = await conv(T2, H(4)); await msg(cv, { body: 'x' });
   assert.equal(await thread(T1, '00000000-0000-0000-0000-0000000000ff'), null, 'inexistente');
