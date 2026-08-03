@@ -241,6 +241,7 @@ test('(5) filtros view / fonte / q', async () => {
   assert.ok(naoLead.every((i) => i.is_lead === false) && byExt(naoLead, H(401)));
 
   assert.ok(byExt((await list(tenant, { q: 'Bruno', limit: 50 })).items, H(400)), 'busca por nome');
+  assert.ok(!byExt((await list(tenant, { q: 'Bruno', limit: 50 })).items, H(401)), 'busca por nome EXCLUI quem não casa (não é %%)');
   assert.ok(byExt((await list(tenant, { q: '19000000400', limit: 50 })).items, H(400)), 'busca por dígitos');
   assert.ok(byExt((await list(tenant, { fonte: 'whatsapp', limit: 50 })).items, H(400)), 'filtro fonte');
 });

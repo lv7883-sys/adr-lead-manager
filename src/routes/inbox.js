@@ -87,9 +87,14 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
 
   if (fonte) { params.push(fonte); extra.push(`fonte = $${params.length}`); }
   if (q) {
+    const dig = String(q).replace(/\D/g, '');
     params.push(`%${q}%`); const pNome = params.length;
-    params.push(`%${String(q).replace(/\D/g, '')}%`); const pDig = params.length;
-    extra.push(`(nome ILIKE $${pNome} OR (ident <> '' AND ident LIKE $${pDig}))`);
+    if (dig) {
+      params.push(`%${dig}%`); const pDig = params.length;   // tem dígito → nome OU telefone
+      extra.push(`(nome ILIKE $${pNome} OR (ident <> '' AND ident LIKE $${pDig}))`);
+    } else {
+      extra.push(`nome ILIKE $${pNome}`);   // sem dígito → só nome (senão '%%' casaria TUDO)
+    }
   }
   if (v === 'leads') extra.push('is_lead = true');
   else if (v === 'nao_lead') extra.push('is_lead = false');
