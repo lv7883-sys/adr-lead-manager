@@ -41,6 +41,14 @@ before(async () => {
     CREATE TABLE message_favorites (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
       message_kind text, message_id uuid, favorited_by text, favorited_at timestamptz DEFAULT now());
+    -- "nome empilhado" (getConversationThread): cadastro canônico via contact_point/person + br_phone_key (migr. 085).
+    CREATE TABLE contact_point (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, person_id uuid, kind text, value_raw text);
+    CREATE TABLE person (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, display_name text);
+    CREATE OR REPLACE FUNCTION br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
+      WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
+           loc AS (SELECT CASE WHEN length(v) IN (12,13) AND left(v,2)='55' THEN substr(v,3) ELSE v END AS v FROM d)
+      SELECT CASE WHEN length(v)=11 AND substr(v,3,1)='9' THEN left(v,2)||substr(v,4) ELSE v END FROM loc
+    $fn$;
   `);
 });
 after(async () => { await c.end(); });

@@ -17,7 +17,30 @@ const { loadRealHistory } = require('./engine');   // mesma timeline usada pela 
 const outbound = require('./outbound');
 const evolutionDefault = require('./evolution');
 const metaDefault = require('./meta');
+const horario = require('./horario');   // FONTE ÚNICA do horário de atendimento (aba "Horário de atendimento")
 const logger = require('./logger');
+
+// tenants.horario_comercial (jsonb ISO 1=seg..7=dom) → formato do businessState ({mon..sun}).
+// Fonte ÚNICA = a aba "Horário de atendimento" (o que o resto do sistema usa). businessState usa
+// 1 faixa/dia: colapsa min→max (faixa única na Valinhos; almoço partido viraria "aberto" no vão).
+const _ISO_ABBR = { 1: 'mon', 2: 'tue', 3: 'wed', 4: 'thu', 5: 'fri', 6: 'sat', 7: 'sun' };
+function _horarioParaBH(horarioComercial, legacy) {
+  let src = horarioComercial;
+  if (!src || (typeof src === 'object' && !Array.isArray(src) && !Object.keys(src).length)) {
+    src = (legacy && legacy.inicio) ? legacy : null;
+  }
+  const norm = horario.normaliza(src);
+  if (!norm) return {};
+  const bh = {};
+  for (let d = 1; d <= 7; d++) {
+    const fx = norm[d];
+    if (fx && fx.length) {
+      const ini = Math.min(...fx.map((f) => f.ini)); const fim = Math.max(...fx.map((f) => f.fim));
+      bh[_ISO_ABBR[d]] = `${horario.minToHm(ini)}-${horario.minToHm(fim)}`;
+    } else bh[_ISO_ABBR[d]] = 'closed';
+  }
+  return bh;
+}
 
 const OFFSET_MS = 3 * 3600 * 1000;              // UTC-3 (São Paulo, sem DST)
 const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];   // getUTCDay() 0..6
@@ -120,21 +143,28 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
             AND regexp_replace(external_id, '[^0-9]', '', 'g') = regexp_replace($3, '[^0-9]', '', 'g')
           ORDER BY updated_at DESC LIMIT 1`, [tenantId, channel, String(externalId)])).rows[0];
       const auto = (await c.query('SELECT modo_fora_horario, modo_fds, nome_ia, contexto_ia FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
-      const cfg = (await c.query('SELECT school_name, business_hours, available_instruments FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
-      const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0];
+      const cfg = (await c.query('SELECT school_name, available_instruments FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
+      // Horário de atendimento = FONTE ÚNICA tenants.horario_comercial (o que a aba grava) + fallback legado.
+      const t = (await c.query(
+        `SELECT name, horario_comercial,
+                to_char(horario_comercial_inicio, 'HH24:MI') AS hc_inicio,
+                to_char(horario_comercial_fim, 'HH24:MI') AS hc_fim,
+                horario_comercial_dias AS hc_dias
+           FROM tenants WHERE id = $1`, [tenantId])).rows[0];
       const lead = ident ? (await c.query(
         `SELECT id, name FROM leads WHERE tenant_id = $1 AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
           ORDER BY created_at ASC LIMIT 1`, [tenantId, ident])).rows[0] : null;
-      return { conv, auto, cfg, tname: tname && tname.name, leadId: lead && lead.id, leadName: lead && lead.name };
+      return { conv, auto, cfg, tname: t && t.name, hc: t, leadId: lead && lead.id, leadName: lead && lead.name };
     });
     if (!info.conv) return { skipped: 'no_conv' };
     if (info.conv.conversation_kind && info.conv.conversation_kind !== 'DIRECT') return { skipped: 'nao_direct' };
     if (!info.auto) return { skipped: 'sem_automacao_config' };
 
-    // Sem horário de atendimento configurado NÃO respondemos (senão pareceria "sempre fechado"
-    // e responderia 24/7). Exige business_hours preenchido no tenant.
-    const bh = (info.cfg && info.cfg.business_hours) || {};
-    if (!bh || typeof bh !== 'object' || Object.keys(bh).length === 0) return { skipped: 'sem_horario' };
+    // Sem horário de atendimento configurado NÃO respondemos (senão pareceria "sempre fechado" e
+    // responderia 24/7). Lê a MESMA aba "Horário de atendimento" (tenants.horario_comercial).
+    const bh = _horarioParaBH(info.hc && info.hc.horario_comercial,
+      info.hc && { inicio: info.hc.hc_inicio, fim: info.hc.hc_fim, dias: info.hc.hc_dias });
+    if (!bh || Object.keys(bh).length === 0) return { skipped: 'sem_horario' };
 
     const now = deps.now || new Date();
     const st = businessState(bh, now);
@@ -179,9 +209,10 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
       `Você é ${nomeIa}, do atendimento de ${escola} — fale como um atendente HUMANO real, caloroso e natural (nada robótico, nada genérico).${instrs} ` +
       blocoNome + blocoContexto +
       `AGORA é FORA do horário de atendimento. LEIA o histórico da conversa e responda de forma PERSONALIZADA e curta (1 a 3 frases), em português do Brasil, reconhecendo o assunto. ` +
-      `VOCÊ PODE responder dúvidas gerais como o ENDEREÇO da unidade e COMO FUNCIONAM as aulas (individuais, projetos de banda, eventos) — usando SOMENTE as informações da escola acima; se não tiver a informação, diga com sinceridade que a recepção passa esse detalhe ${retorno}. ` +
-      `VOCÊ NÃO PODE, de jeito nenhum: informar PREÇOS/valores, nem AGENDAR ou confirmar HORÁRIO de aula experimental — isso é exclusivo da recepção; nesses casos, diga que a equipe humana confirma ${retorno}. ` +
-      `NUNCA invente informação que não esteja acima. NÃO assine nem repita seu nome no final — o nome já aparece no topo da mensagem.`;
+      `REGRA DE OURO (obrigatória): você SÓ pode afirmar fatos que estejam ESCRITOS EXPLICITAMENTE nas "INFORMAÇÕES DA ESCOLA" acima. É TERMINANTEMENTE PROIBIDO inventar, deduzir, supor ou completar qualquer informação. ` +
+      `Você PODE — só se estiver nas informações acima — dar o ENDEREÇO e explicar COMO FUNCIONAM as aulas (individuais, projetos de banda, eventos). ` +
+      `Se a pessoa perguntar OU mencionar QUALQUER coisa que não esteja explícita nas informações acima (ex.: um workshop, um evento específico, nome de professor, promoção, data, valor, horário de aula): NÃO confirme, NÃO detalhe e NÃO invente — diga com sinceridade que a recepção confirma esse detalhe ${retorno}. Mesmo que apareça no histórico da conversa, trate como NÃO confirmado (use o histórico só p/ entender o assunto e o tom, NUNCA como fonte de fatos). ` +
+      `NUNCA informe PREÇOS/valores nem AGENDE/confirme HORÁRIO de aula experimental — exclusivo da recepção. NÃO assine nem repita seu nome no final — o nome já aparece no topo.`;
 
     const generate = deps.generate || gemini.generateReply;
     let corpo;

@@ -9,7 +9,9 @@ let c;
 const T1 = '00000000-0000-0000-0000-0000000000ab';
 const EXT = '5519999990001';
 const U = (y, mo, d, h, mi = 0) => new Date(Date.UTC(y, mo, d, h, mi, 0, 0));
-const BH = { mon: '09:00-18:00', tue: '09:00-18:00', wed: '09:00-18:00', thu: '09:00-18:00', fri: '09:00-18:00', sat: '09:00-18:00', sun: '09:00-18:00' };
+// Horário de atendimento = FONTE ÚNICA tenants.horario_comercial (jsonb ISO 1=seg..7=dom).
+const HC = { 1: [{ inicio: '09:00', fim: '18:00' }], 2: [{ inicio: '09:00', fim: '18:00' }], 3: [{ inicio: '09:00', fim: '18:00' }],
+  4: [{ inicio: '09:00', fim: '18:00' }], 5: [{ inicio: '09:00', fim: '18:00' }], 6: [{ inicio: '09:00', fim: '18:00' }], 7: [{ inicio: '09:00', fim: '18:00' }] };
 const NOITE = U(2026, 7, 5, 23);  // 20:00 local -> fechado em qualquer dia
 const DIA = U(2026, 7, 5, 17);    // 14:00 local -> aberto
 
@@ -17,11 +19,12 @@ before(async () => {
   c = new Client({ connectionString: process.env.DATABASE_URL });
   await c.connect();
   await c.query(`
-    CREATE TABLE tenants (id uuid PRIMARY KEY, name text);
+    CREATE TABLE tenants (id uuid PRIMARY KEY, name text, horario_comercial jsonb,
+      horario_comercial_inicio time, horario_comercial_fim time, horario_comercial_dias int[]);
     CREATE TABLE conversations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, conversation_kind text DEFAULT 'DIRECT', auto_reply_at timestamptz, updated_at timestamptz DEFAULT now());
     CREATE TABLE automacao_config (tenant_id uuid PRIMARY KEY, modo_fora_horario text, modo_fds text, nome_ia text, contexto_ia text);
-    CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, school_name text, business_hours jsonb,
+    CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, school_name text,
       available_instruments text[] NOT NULL DEFAULT '{}');
     CREATE TABLE staff_outbound_samples (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, external_message_id text, source text, sender text, body text, raw jsonb,
@@ -29,8 +32,8 @@ before(async () => {
     CREATE TABLE leads (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, phone text,
       meta_psid text, status text, created_at timestamptz DEFAULT now());
   `);
-  await c.query(`INSERT INTO tenants (id,name) VALUES ($1,'ADR Valinhos')`, [T1]);
-  await c.query(`INSERT INTO tenant_lead_config (tenant_id, school_name, business_hours) VALUES ($1,'ADR Valinhos',$2)`, [T1, JSON.stringify(BH)]);
+  await c.query(`INSERT INTO tenants (id,name,horario_comercial) VALUES ($1,'ADR Valinhos',$2)`, [T1, JSON.stringify(HC)]);
+  await c.query(`INSERT INTO tenant_lead_config (tenant_id, school_name) VALUES ($1,'ADR Valinhos')`, [T1]);
 });
 after(async () => { await c.end(); });
 
@@ -107,13 +110,13 @@ test('(5) grupo -> nunca responde', async () => {
   assert.equal(out.skipped, 'nao_direct'); assert.equal(deps.spy.sends, 0);
 });
 
-test('(7) sem business_hours configurado -> não responde (evita 24/7)', async () => {
+test('(7) sem horário de atendimento configurado -> não responde (evita 24/7)', async () => {
   await conv(); await setModo('auto');
-  await c.query(`UPDATE tenant_lead_config SET business_hours = '{}'::jsonb WHERE tenant_id=$1`, [T1]);
+  await c.query(`UPDATE tenants SET horario_comercial = '{}'::jsonb WHERE id=$1`, [T1]);
   const deps = mkDeps(NOITE);
   const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi' }, deps);
   assert.equal(out.skipped, 'sem_horario'); assert.equal(deps.spy.sends, 0);
-  await c.query(`UPDATE tenant_lead_config SET business_hours = $2 WHERE tenant_id=$1`, [T1, JSON.stringify(BH)]);
+  await c.query(`UPDATE tenants SET horario_comercial = $2 WHERE id=$1`, [T1, JSON.stringify(HC)]);
 });
 
 test('(6) pausa global AUTOREPLY_PAUSE=1 -> não envia', async () => {
