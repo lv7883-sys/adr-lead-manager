@@ -91,3 +91,23 @@ test('canonicaliza: ordena faixas e descarta inválidas', () => {
     { '1': [{ inicio: '09:00', fim: '12:00' }, { inicio: '14:00', fim: '18:00' }] }
   );
 });
+
+test('textoHorario: jsonb por-dia => texto legível pro prompt', () => {
+  const c = { '1': [{ inicio: '08:00', fim: '18:00' }], '5': [{ inicio: '08:00', fim: '18:00' }], '6': [{ inicio: '09:00', fim: '13:00' }] };
+  assert.equal(H.textoHorario(c), 'Seg: 08:00-18:00, Sex: 08:00-18:00, Sáb: 09:00-13:00');
+});
+
+test('textoHorario: 2 faixas no dia (almoço) juntam com " e "', () => {
+  const a = { '1': [{ inicio: '09:00', fim: '12:00' }, { inicio: '14:00', fim: '18:00' }] };
+  assert.equal(H.textoHorario(a), 'Seg: 09:00-12:00 e 14:00-18:00');
+});
+
+test('textoHorario: shape legado (trio) também renderiza', () => {
+  assert.equal(H.textoHorario({ inicio: '08:00', fim: '18:00', dias: [1, 2, 3, 4, 5] }),
+    'Seg: 08:00-18:00, Ter: 08:00-18:00, Qua: 08:00-18:00, Qui: 08:00-18:00, Sex: 08:00-18:00');
+});
+
+test('textoHorario: sem horário => "não informado"', () => {
+  assert.equal(H.textoHorario(null), 'não informado');
+  assert.equal(H.textoHorario({}), 'não informado');
+});

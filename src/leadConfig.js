@@ -7,22 +7,25 @@
 // A autorização é feita pelo middleware da rota; aqui só a lógica de negócio.
 
 const { withTenant } = require('./db');
-const { isUuid, isE164, isStringArray, validateBusinessHours } = require('./validation');
+const { isUuid, isE164, isStringArray } = require('./validation');
 const { resolveSystemPrompt } = require('./templates');
+const { textoHorario } = require('./horario');
+const { horarioFonte } = require('./promptConfig');
 const logger = require('./logger');
 
 // Representação de resposta da config (inclui o prompt efetivo).
+// `row` deve trazer horario_texto (fonte única tenants.horario_comercial) — quem
+// monta o row (patchLeadConfig) o injeta. O horário NÃO vive mais nesta config.
 function present(row) {
   return {
     tenant_id: row.tenant_id,
     school_name: row.school_name,
     system_prompt_override: row.system_prompt_override,
     available_instruments: row.available_instruments,
-    business_hours: row.business_hours,
     notification_whatsapp: row.notification_whatsapp,
     // ADR sugestão-de-etapa: definições por etapa que alimentam o detector (key→descrição).
     stage_definitions: row.stage_definitions || null,
-    // Prompt resolvido: override, ou template padrão renderizado.
+    // Prompt resolvido: override, ou template padrão renderizado (horário da fonte única).
     system_prompt: resolveSystemPrompt(row),
     updated_at: row.updated_at,
   };
@@ -56,10 +59,9 @@ async function patchLeadConfig(req, res) {
   if ('available_instruments' in body && !isStringArray(body.available_instruments)) {
     return res.status(400).json({ error: 'available_instruments deve ser um array de strings' });
   }
-  if ('business_hours' in body) {
-    const err = validateBusinessHours(body.business_hours);
-    if (err) return res.status(400).json({ error: err });
-  }
+  // Horário de atendimento NÃO é mais configurado aqui: fonte única = aba
+  // "Horário de atendimento" (PUT /tenant/:id/horario-comercial → tenants.horario_comercial).
+  // Um business_hours enviado no corpo é ignorado (mantido só p/ retrocompat de chamadas antigas).
   if (
     'notification_whatsapp' in body &&
     body.notification_whatsapp !== null &&
@@ -91,8 +93,6 @@ async function patchLeadConfig(req, res) {
           'available_instruments' in body
             ? body.available_instruments
             : (existing?.available_instruments ?? []),
-        business_hours:
-          'business_hours' in body ? body.business_hours : (existing?.business_hours ?? {}),
         notification_whatsapp:
           'notification_whatsapp' in body
             ? body.notification_whatsapp
@@ -107,13 +107,12 @@ async function patchLeadConfig(req, res) {
       const upserted = await client.query(
         `INSERT INTO tenant_lead_config
            (tenant_id, school_name, system_prompt_override,
-            available_instruments, business_hours, notification_whatsapp)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+            available_instruments, notification_whatsapp)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (tenant_id) DO UPDATE SET
            school_name            = EXCLUDED.school_name,
            system_prompt_override = EXCLUDED.system_prompt_override,
            available_instruments  = EXCLUDED.available_instruments,
-           business_hours         = EXCLUDED.business_hours,
            notification_whatsapp  = EXCLUDED.notification_whatsapp,
            updated_at             = now()
          RETURNING *`,
@@ -122,11 +121,18 @@ async function patchLeadConfig(req, res) {
           merged.school_name,
           merged.system_prompt_override,
           merged.available_instruments,
-          JSON.stringify(merged.business_hours),
           merged.notification_whatsapp,
         ]
       );
-      return { row: upserted.rows[0], created: !existing };
+      // Horário do prompt = FONTE ÚNICA tenants.horario_comercial (aba), nunca a config.
+      const tHor = (await client.query(
+        `SELECT horario_comercial,
+                to_char(horario_comercial_inicio, 'HH24:MI') AS hc_inicio,
+                to_char(horario_comercial_fim, 'HH24:MI') AS hc_fim,
+                horario_comercial_dias AS hc_dias
+           FROM tenants WHERE id = $1`, [tenantId])).rows[0] || {};
+      const row = { ...upserted.rows[0], horario_texto: textoHorario(horarioFonte(tHor)) };
+      return { row, created: !existing };
     });
 
     if (result.notFound) {

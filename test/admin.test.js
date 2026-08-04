@@ -40,10 +40,15 @@ before(async () => {
     `INSERT INTO users (id, email, is_platform_admin) VALUES ($1,'padmin-e7@t', true), ($2,'reg-e7@t', false)`,
     [PLATFORM_USER, REGULAR_USER]
   );
-  // Cria o tenant alvo (com contexto RLS = próprio id).
-  await withTenant(TENANT_ID, (c) =>
-    c.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [TENANT_ID, 'Academia do Rock'])
-  );
+  // Cria o tenant alvo (com contexto RLS = próprio id) + horário de atendimento na
+  // FONTE ÚNICA (aba): tenants.horario_comercial. É daqui que o prompt tira o horário.
+  await withTenant(TENANT_ID, async (c) => {
+    await c.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [TENANT_ID, 'Academia do Rock']);
+    await c.query(
+      'UPDATE tenants SET horario_comercial = $2 WHERE id = $1',
+      [TENANT_ID, JSON.stringify({ '1': [{ inicio: '09:00', fim: '18:00' }], '6': [{ inicio: '09:00', fim: '13:00' }] })]
+    );
+  });
 });
 
 after(async () => {
@@ -57,17 +62,20 @@ test('cria config e resolve system_prompt pelo template padrão', async () => {
   const res = await patchConfig({
     school_name: 'Academia do Rock',
     available_instruments: ['Guitarra', 'Bateria', 'Baixo'],
-    business_hours: { mon: '09:00-18:00', sat: '09:00-13:00' },
     notification_whatsapp: '+5511999998888',
   });
   assert.equal(res.status, 200);
   const data = await res.json();
   assert.equal(data.created, true);
   assert.equal(data.config.system_prompt_override, null);
+  // Horário NÃO faz mais parte da config (fonte única = aba).
+  assert.equal(data.config.business_hours, undefined);
   // Template padrão renderizado com as variáveis.
   assert.match(data.config.system_prompt, /Academia do Rock/);
   assert.match(data.config.system_prompt, /Guitarra, Bateria, Baixo/);
+  // Horário vem da FONTE ÚNICA tenants.horario_comercial (setada no before).
   assert.match(data.config.system_prompt, /Seg: 09:00-18:00/);
+  assert.match(data.config.system_prompt, /Sáb: 09:00-13:00/);
 });
 
 test('atualiza config (PATCH parcial) preservando demais campos', async () => {
@@ -95,9 +103,14 @@ test('rejeita notification_whatsapp fora do formato E.164', async () => {
   assert.match(data.error, /E\.164/);
 });
 
-test('rejeita business_hours com horário inválido', async () => {
+test('business_hours no corpo é ignorado (horário só pela aba, sem erro)', async () => {
+  // Campo legado descontinuado: não deve mais ser validado nem persistido.
   const res = await patchConfig({ business_hours: { mon: '9h-18h' } });
-  assert.equal(res.status, 400);
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.equal(data.config.business_hours, undefined);
+  // O horário do prompt continua vindo da aba (tenants.horario_comercial).
+  assert.match(data.config.system_prompt, /Seg: 09:00-18:00/);
 });
 
 test('exige autenticação (sem token -> 401)', async () => {

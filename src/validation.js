@@ -6,10 +6,6 @@ const UUID_RE =
 // E.164: '+' seguido de 1 a 15 dígitos, o primeiro entre 1-9.
 const E164_RE = /^\+[1-9]\d{1,14}$/;
 
-const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-// "HH:MM-HH:MM" 24h, ou a string "closed".
-const TIME_RANGE_RE = /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
-
 const isUuid = (v) => typeof v === 'string' && UUID_RE.test(v);
 const isE164 = (v) => typeof v === 'string' && E164_RE.test(v);
 
@@ -19,22 +15,6 @@ function toE164(raw) {
   if (raw == null) return null;
   const digits = String(raw).replace(/\D/g, '');
   return digits ? `+${digits}` : null;
-}
-
-// Retorna mensagem de erro (string) ou null se válido.
-function validateBusinessHours(bh) {
-  if (typeof bh !== 'object' || bh === null || Array.isArray(bh)) {
-    return 'business_hours deve ser um objeto { dia: "HH:MM-HH:MM" }';
-  }
-  for (const [day, value] of Object.entries(bh)) {
-    if (!DAYS.includes(day)) {
-      return `dia inválido em business_hours: "${day}" (use mon..sun)`;
-    }
-    if (value !== 'closed' && !TIME_RANGE_RE.test(value)) {
-      return `horário inválido para "${day}": "${value}" (esperado "HH:MM-HH:MM" ou "closed")`;
-    }
-  }
-  return null;
 }
 
 function isStringArray(v) {
@@ -48,5 +28,4 @@ module.exports = {
   isE164,
   toE164,
   isStringArray,
-  validateBusinessHours,
 };

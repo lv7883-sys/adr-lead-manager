@@ -129,6 +129,25 @@ function validaHorarioJson(obj) {
   return { ok: true };
 }
 
+// Rótulos curtos PT p/ o texto do prompt (ISO 1=seg..7=dom).
+const _DIA_ABBR = { 1: 'Seg', 2: 'Ter', 3: 'Qua', 4: 'Qui', 5: 'Sex', 6: 'Sáb', 7: 'Dom' };
+
+// Renderiza o horário de atendimento (FONTE ÚNICA: tenants.horario_comercial jsonb,
+// ou o trio legado como fallback de transição) em texto legível pro prompt da IA:
+//   "Seg: 08:00-18:00, Ter: 08:00-18:00, ..., Sáb: 09:00-13:00".
+// Dias sem faixa são fechados e omitidos. Sem horário configurado → 'não informado'.
+function textoHorario(horario) {
+  const norm = normaliza(horario);
+  if (!norm) return 'não informado';
+  const partes = [];
+  for (let d = 1; d <= 7; d++) {
+    const faixas = norm[d];
+    if (!faixas || !faixas.length) continue;
+    partes.push(`${_DIA_ABBR[d]}: ${faixas.map((f) => `${minToHm(f.ini)}-${minToHm(f.fim)}`).join(' e ')}`);
+  }
+  return partes.length ? partes.join(', ') : 'não informado';
+}
+
 // Reduz o jsonb por-dia para a estrutura canônica enxuta (descarta faixas
 // inválidas, ordena, remove dias vazios). Use antes de gravar.
 function canonicaliza(obj) {
@@ -148,6 +167,7 @@ module.exports = {
   normaliza,
   validaHorarioJson,
   canonicaliza,
+  textoHorario,
   spMinDow,
   minToHm,
 };

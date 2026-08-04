@@ -20,6 +20,7 @@ const onboardingMeta = require('../onboardingMeta');   // conexão Meta por toke
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
 const { resolveSystemPrompt } = require('../templates');
+const { loadPromptConfig } = require('../promptConfig');   // horário: fonte única tenants.horario_comercial
 const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, KANBAN_PERIODS, KANBAN_DEFAULT_PERIOD, PERIODS, classificarEngajamento } = require('../metrics');   // G: dashboard de gestão
 // fatia (b): dias da janela DEFAULT do Kanban — o badge de sugestões conta no MESMO período (badge == cards à vista).
 const KANBAN_BADGE_DAYS = KANBAN_PERIODS[KANBAN_DEFAULT_PERIOD];
@@ -1463,11 +1464,7 @@ router.get('/:tenantId/leads/:id/sugestao-retomada', authenticate, requireTenant
       if (cached) return res.json({ ok: true, cached: true, ...cached });
     }
     const ctx = await withTenant(req.tenantId, async (c) => {
-      const cfg = (await c.query(
-        `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
-           FROM tenant_lead_config WHERE tenant_id = $1`, [req.tenantId]
-      )).rows[0];
-      const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.name;
+      const config = await loadPromptConfig(c, req.tenantId);
       const lead = (await c.query('SELECT name, phone, meta_psid FROM leads WHERE id = $1', [id])).rows[0];
       if (!lead) return null;
       const ident = String(lead.phone || lead.meta_psid || '').replace(/\D/g, '');
@@ -1504,10 +1501,10 @@ router.get('/:tenantId/leads/:id/sugestao-retomada', authenticate, requireTenant
           [req.tenantId, ident])).rows[0];
         eng = classificarEngajamento(tin && tin.ts, tout && tout.ts, Date.now() / 1000);
       }
-      return { config: cfg, tname, leadName: lead.name, convo, eng };
+      return { config, leadName: lead.name, convo, eng };
     });
     if (!ctx) return res.status(404).json({ error: 'lead not found' });
-    const schoolContext = resolveSystemPrompt(ctx.config || { school_name: ctx.tname || 'Escola', system_prompt_override: null });
+    const schoolContext = resolveSystemPrompt(ctx.config);
     // Classe pela mediana (independe do flag silenciou, que tem prioridade no rótulo).
     const med = ctx.eng && ctx.eng.tempo_medio_resposta_cliente_seg;
     const speed = med == null ? null : (med <= 3600 ? 'alto' : (med <= 86400 ? 'normal' : 'baixo'));
@@ -1878,15 +1875,7 @@ router.post(
     if (!text) return res.status(400).json({ error: 'empty text' });
     try {
       const ctx = await withTenant(req.tenantId, async (c) => {
-        const cfg = (
-          await c.query(
-            `SELECT school_name, system_prompt_override, available_instruments,
-                    business_hours, notification_whatsapp
-               FROM tenant_lead_config WHERE tenant_id = $1`,
-            [req.tenantId]
-          )
-        ).rows[0];
-        const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.name;
+        const config = await loadPromptConfig(c, req.tenantId);
         const lead = (await c.query('SELECT phone, meta_psid FROM leads WHERE id = $1', [id])).rows[0];
         // Resolve a conversa (match por dígitos, igual generateReply) para carregar o
         // histórico COMPLETO da fonte certa fora deste withTenant (loadRealHistory abre a sua).
@@ -1902,12 +1891,10 @@ router.post(
             )
           ).rows[0]?.id || null;
         }
-        return { config: cfg, tname, convId, ident };
+        return { config, convId, ident };
       });
 
-      const systemPrompt = resolveSystemPrompt(
-        ctx.config || { school_name: ctx.tname || 'Escola', system_prompt_override: null }
-      );
+      const systemPrompt = resolveSystemPrompt(ctx.config);
       // Histórico COMPLETO (mesma fonte da sugestão: messages USER + staff_outbound_samples +
       // drafts aprovados, sem LIMIT, cronológico). É o que faz o "Melhorar" ENXERGAR os
       // nossos envios e parar de re-oferecer o que já foi mandado.
@@ -2101,15 +2088,7 @@ router.post(
     const history = Array.isArray(req.body?.history) ? req.body.history.slice(-12) : [];
     try {
       const ctx = await withTenant(req.tenantId, async (c) => {
-        const cfg = (
-          await c.query(
-            `SELECT school_name, system_prompt_override, available_instruments,
-                    business_hours, notification_whatsapp
-               FROM tenant_lead_config WHERE tenant_id = $1`,
-            [req.tenantId]
-          )
-        ).rows[0];
-        const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.name;
+        const config = await loadPromptConfig(c, req.tenantId);
         const lead = (await c.query('SELECT name, phone, meta_psid FROM leads WHERE id = $1', [id])).rows[0];
         let convo = [];
         if (lead) {
@@ -2133,11 +2112,9 @@ router.post(
             ).rows.reverse();
           }
         }
-        return { config: cfg, tname, leadName: lead?.name, convo };
+        return { config, leadName: lead?.name, convo };
       });
-      const schoolContext = resolveSystemPrompt(
-        ctx.config || { school_name: ctx.tname || 'Escola', system_prompt_override: null }
-      );
+      const schoolContext = resolveSystemPrompt(ctx.config);
       const leadConversation = ctx.convo.length
         ? ctx.convo.map((m) => `${m.kind}: ${m.body}`).join('\n')
         : null;

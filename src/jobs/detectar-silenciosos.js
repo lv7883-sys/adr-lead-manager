@@ -13,6 +13,7 @@ const { pool, withTenant } = require('../db');
 const gemini = require('../gemini');
 const redisClient = require('../redisClient');
 const { resolveSystemPrompt } = require('../templates');
+const { loadPromptConfig } = require('../promptConfig');   // horário: fonte única tenants.horario_comercial
 const logger = require('../logger');
 
 const RETOMADA_CACHE_TTL = 24 * 3600;
@@ -91,15 +92,8 @@ async function processarTenant(tenantId) {
   if (!leads.length) return resumo;
 
   // Contexto da escola (uma vez por tenant).
-  const cfg = await withTenant(tenantId, async (c) => {
-    const config = (await c.query(
-      `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
-         FROM tenant_lead_config WHERE tenant_id = $1`, [tenantId]
-    )).rows[0];
-    const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
-    return { config, tname };
-  });
-  const schoolContext = resolveSystemPrompt(cfg.config || { school_name: cfg.tname || 'Escola', system_prompt_override: null });
+  const config = await withTenant(tenantId, (c) => loadPromptConfig(c, tenantId));
+  const schoolContext = resolveSystemPrompt(config);
 
   for (const lead of leads) {
     const faixa = faixaDe(Number(lead.silencio_seg));

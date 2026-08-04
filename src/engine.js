@@ -5,6 +5,7 @@ const logger = require('./logger');
 const { toE164 } = require('./validation');
 const telBR = require('./telefoneBR');
 const { resolveSystemPrompt } = require('./templates');
+const { loadPromptConfig } = require('./promptConfig');   // horário: fonte única tenants.horario_comercial
 const gemini = require('./gemini');
 const { getRescuePolicy } = require('./roleLeadPolicy');   // ADR-036 E1.4: rescue question por papel (config por tenant)
 const notifyModule = require('./notify');
@@ -1604,15 +1605,9 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       [tenantId, channel, phone || psid]
     );
 
-    const cfg = (
-      await c.query(
-        `SELECT school_name, system_prompt_override, available_instruments,
-                business_hours, notification_whatsapp
-           FROM tenant_lead_config WHERE tenant_id = $1`,
-        [tenantId]
-      )
-    ).rows[0];
-    const name = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
+    // Config do prompt (nome/instrumentos/override) + horário de atendimento a
+    // partir da FONTE ÚNICA tenants.horario_comercial (nunca business_hours).
+    const config = await loadPromptConfig(c, tenantId);
 
     const qual = (
       await c.query(
@@ -1629,13 +1624,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       conversationId: conv.rows[0].id,
       convInserted: conv.rows[0].inserted === true,
       storedQual: qual,
-      config: cfg || {
-        school_name: name || 'Escola',
-        system_prompt_override: null,
-        available_instruments: [],
-        business_hours: {},
-        notification_whatsapp: null,
-      },
+      config,
     };
   });
 
@@ -1870,17 +1859,10 @@ async function generateDraftForLead(tenantId, leadId, deps = {}) {
         [tenantId, ident]
       )
     ).rows[0];
-    const cfg = (
-      await c.query(
-        `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
-           FROM tenant_lead_config WHERE tenant_id = $1`,
-        [tenantId]
-      )
-    ).rows[0];
-    const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
+    const config = await loadPromptConfig(c, tenantId);
     return {
       ident, conversationId: conv?.id || null, lastBody: last?.body || '',
-      config: cfg || { school_name: tname || 'Escola', system_prompt_override: null, available_instruments: [], business_hours: {}, notification_whatsapp: null },
+      config,
     };
   });
   if (!info || !info.conversationId) { log.warn('draft.no_conversation'); return { ok: false, reason: 'no_conversation' }; }

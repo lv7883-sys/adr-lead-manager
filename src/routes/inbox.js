@@ -30,6 +30,7 @@ const metaDefault = require('../meta');
 const gemini = require('../gemini');
 const { loadRealHistory } = require('../engine');
 const { resolveSystemPrompt } = require('../templates');
+const { loadPromptConfig } = require('../promptConfig');   // horário: fonte única tenants.horario_comercial
 const mediaLib = require('../media');
 const multer = require('multer');
 const logger = require('../logger');
@@ -903,13 +904,10 @@ async function suggestReply(tenantId, conversationId, deps = {}) {
         ORDER BY created_at ASC LIMIT 1`, [tenantId, cv.ident])).rows[0];
     const last = (await c.query(
       `SELECT body FROM messages WHERE conversation_id = $1 AND role = 'USER' ORDER BY received_at DESC LIMIT 1`, [cv.id])).rows[0];
-    const cfg = (await c.query(
-      `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
-         FROM tenant_lead_config WHERE tenant_id = $1`, [tenantId])).rows[0];
-    const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
+    const config = await loadPromptConfig(c, tenantId);
     return {
       convId: cv.id, ident: cv.ident, leadId: (leadRow && leadRow.id) || null, lastBody: (last && last.body) || '',
-      config: cfg || { school_name: tname || 'Escola', system_prompt_override: null, available_instruments: [], business_hours: {}, notification_whatsapp: null },
+      config,
     };
   });
   if (!info) return { notFound: true };
