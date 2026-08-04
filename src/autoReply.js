@@ -130,11 +130,20 @@ async function _send(tenantId, channel, externalId, text, deps) {
 
 // Núcleo. tenant = { id }. Resolve a conversa por (channel, dígitos do external_id). Só DIRECT.
 // deps injeta now/generate/evolution/meta/creds/registrar p/ o teste. Retorna {ok} ou {skipped}.
-async function maybeAutoReply(tenant, { channel, externalId, inboundText, contactName }, deps = {}) {
+async function maybeAutoReply(tenant, { channel, externalId, inboundText, contactName, inboundAt }, deps = {}) {
   if (process.env.AUTOREPLY_PAUSE === '1') return { skipped: 'paused' };
   const tenantId = tenant && tenant.id;
   if (!tenantId || !channel || !externalId) return { skipped: 'args' };
   const ident = String(externalId).replace(/\D/g, '');
+
+  // NÃO responde mensagem ANTIGA (webhook atrasado / histórico importado na sincronização):
+  // evita a Janis responder conversa velha. Configurável (min; default 180 = 3h; 0 desliga).
+  const MAX_AGE_MS = (parseInt(process.env.AUTOREPLY_MAX_AGE_MIN || '180', 10) || 0) * 60000;
+  if (MAX_AGE_MS > 0 && inboundAt) {
+    const at = inboundAt instanceof Date ? inboundAt : new Date(inboundAt);
+    const ref = deps.now || new Date();
+    if (!isNaN(at.getTime()) && (ref.getTime() - at.getTime()) > MAX_AGE_MS) return { skipped: 'msg_antiga' };
+  }
   try {
     const info = await withTenant(tenantId, async (c) => {
       const conv = (await c.query(

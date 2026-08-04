@@ -165,3 +165,11 @@ test('(11) chave LEADS desligada + conversa É lead -> não responde (e OUTRAS s
   await c.query(`UPDATE automacao_config SET ia_fora_leads=true WHERE tenant_id=$1`, [T1]);
   await c.query(`DELETE FROM leads WHERE tenant_id=$1`, [T1]);
 });
+
+test('(12) mensagem ANTIGA (webhook atrasado / histórico) -> não responde', async () => {
+  await conv(); await setModo('auto');
+  const deps = mkDeps(NOITE);
+  const antiga = U(2026, 7, 5, 18);   // 5h antes de NOITE (> 3h default)
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi', inboundAt: antiga }, deps);
+  assert.equal(out.skipped, 'msg_antiga'); assert.equal(deps.spy.sends, 0);
+});

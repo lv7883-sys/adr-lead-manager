@@ -55,6 +55,7 @@ function normalizeMessage(body) {
     return {
       externalId: jid.split('@')[0] || jid,
       externalMessageId: data.key.id ? String(data.key.id) : null,
+      messageTimestamp: data.messageTimestamp ?? null,   // epoch (s) — p/ blindar a Janis contra msg antiga
       fromMe: Boolean(data.key.fromMe),
       sender: data.pushName || null,
       // device de origem (android/ios/web = recepção digitando; outros = API/automático)
@@ -472,7 +473,8 @@ async function handleZapiWebhook(req, res) {
     }
     // ADR-006+ — resposta automática FORA DO HORÁRIO (a "Janis"). Best-effort: roda DEPOIS de
     // persistir o inbound; nunca bloqueia/derruba a ingestão. Só 1:1 (inbound já filtrado acima).
-    autoReply.maybeAutoReply(tenant, { channel: 'whatsapp', externalId: msg.externalId, inboundText: msg.body, contactName: msg.sender })
+    autoReply.maybeAutoReply(tenant, { channel: 'whatsapp', externalId: msg.externalId, inboundText: msg.body, contactName: msg.sender,
+      inboundAt: msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : null })
       .catch((e) => log.warn('autoreply.unhandled', { error: e.message }));
   };
   // Funil de triagem (Portões 0/1/2). Fire-and-forget com captura de erro.

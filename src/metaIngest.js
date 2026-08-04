@@ -199,7 +199,8 @@ async function ingestMessage(pageId, m, channel, rawBody) {
   log.info('meta.message.ingesting', { tenant_id: tenantId, mid });
   await engine.processInbound({ id: tenantId }, msg, rawBody);
   // ADR-006+ — resposta automática fora do horário (Messenger/Instagram). Best-effort.
-  autoReply.maybeAutoReply({ id: tenantId }, { channel, externalId: psid, inboundText: text, contactName: name })
+  autoReply.maybeAutoReply({ id: tenantId }, { channel, externalId: psid, inboundText: text, contactName: name,
+    inboundAt: m.timestamp ? new Date(Number(m.timestamp)) : null })
     .catch((e) => log.warn('autoreply.unhandled', { error: e.message }));
 }
 
