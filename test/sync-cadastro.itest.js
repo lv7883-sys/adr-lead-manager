@@ -29,6 +29,11 @@ const pessoa = (t, type, extId) => withTenant(t, async (c) => (await c.query(
 const bonds = (t, idC) => withTenant(t, async (c) => (await c.query(
   `SELECT am.bond FROM lead_manager.external_ref er JOIN lead_manager.account_member am ON am.account_id=er.entity_id
     WHERE er.external_type='contrato' AND er.external_id=$1 ORDER BY am.bond`, [idC])).rows.map((r) => r.bond));
+const telefones = (t, type, extId) => withTenant(t, async (c) => (await c.query(
+  `SELECT cp.value_raw FROM lead_manager.external_ref er JOIN lead_manager.person p ON p.id=er.entity_id
+     JOIN lead_manager.contact_point cp ON cp.person_id=p.id AND cp.kind='phone'
+    WHERE er.entity_kind='person' AND er.external_type=$1 AND er.external_id=$2
+    ORDER BY cp.value_raw`, [type, extId])).rows.map((r) => r.value_raw));
 const divergAtiva = (t, pid, field) => withTenant(t, async (c) => (await c.query(
   `SELECT 1 FROM lead_manager.field_divergence WHERE entity_kind='person' AND entity_id=$1 AND field=$2
       AND dismissed_value IS DISTINCT FROM source_value`, [pid, field])).rowCount > 0);
@@ -103,4 +108,17 @@ test('(g) CROSS-TENANT = 0: o que A sincronizou é invisível a B', async () => 
   assert.notEqual(await contrato(A, 'C2'), null);           // A intacto
   const pB = await pessoa(B, 'beneficiario', 'A1');
   assert.equal(pB.display_name, 'Aluno A1');                // B criou o seu próprio A1
+});
+
+test('(h) TELEFONE do aluno → contact_point (idempotente por dígitos; máscara não duplica)', async () => {
+  const st1 = await sync(A, [ct('C9', 'A9', { aluno: { idExterno: 'A9', nome: 'Aluno A9', telefone: '((19))99187-9100', payerRelation: 'self_paid' } })]);
+  assert.equal(st1.contatos_novos, 1, 'cria o contato na 1ª vez');
+  assert.deepEqual(await telefones(A, 'beneficiario', 'A9'), ['((19))99187-9100']);
+  // re-sync: MESMOS dígitos com máscara diferente → NÃO duplica
+  const st2 = await sync(A, [ct('C9', 'A9', { aluno: { idExterno: 'A9', nome: 'Aluno A9', telefone: '19991879100', payerRelation: 'self_paid' } })]);
+  assert.equal(st2.contatos_novos, 0, 'idempotente: mesmos dígitos não recriam');
+  assert.equal((await telefones(A, 'beneficiario', 'A9')).length, 1, 'segue com 1 telefone só');
+  // sem telefone no snapshot → não cria nada, não quebra
+  const st3 = await sync(A, [ct('C9', 'A9')]);
+  assert.equal(st3.contatos_novos, 0);
 });

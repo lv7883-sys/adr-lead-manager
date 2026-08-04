@@ -105,10 +105,29 @@ async function _link(c, tid, accountId, personId, bond) {
   return r.rowCount > 0;
 }
 
+// Telefone do cadastro → contact_point (kind=phone). Idempotente: só cria se ainda
+// não houver, comparando pelos DÍGITOS normalizados (ignora máscara). Nunca sobrescreve
+// nem apaga — a fonte de verdade continua sendo o cadastro, mas outros telefones
+// (whatsapp/conversa) provados ficam intactos.
+async function _contato(c, tid, personId, telefone) {
+  const raw = String(telefone || '').trim();
+  if (!raw || !/\d/.test(raw) || !personId) return false;
+  const r = await c.query(
+    `INSERT INTO lead_manager.contact_point (tenant_id, person_id, kind, value_raw, source, confidence, tipo)
+     SELECT $1,$2,'phone',$3,'extranet','alegado','cadastro'
+      WHERE NOT EXISTS (
+        SELECT 1 FROM lead_manager.contact_point
+         WHERE tenant_id=$1 AND person_id=$2 AND kind='phone'
+           AND regexp_replace(value_raw,'[^0-9]','','g') = regexp_replace($3,'[^0-9]','','g'))
+     RETURNING id`,
+    [tid, personId, raw]);
+  return r.rowCount > 0;
+}
+
 // Diff completo de um snapshot. Devolve stats. NÃO faz fetch (o adapter já produziu).
 async function syncCadastro(c, { tenantId, snapshot }) {
   const st = { contratos_novos: 0, atualizados: 0, inalterados: 0, pessoas_novas: 0, vinculos_novos: 0,
-    person_escreveu: 0, person_divergencia: 0, soft_deleted: 0, reaparecidos: 0 };
+    person_escreveu: 0, person_divergencia: 0, soft_deleted: 0, reaparecidos: 0, contatos_novos: 0 };
   const presentes = new Set();
 
   for (const ct of snapshot.contratos) {
@@ -126,6 +145,8 @@ async function syncCadastro(c, { tenantId, snapshot }) {
     if (acc.novo) st.contratos_novos++; else if (acc.changed) st.atualizados++; else st.inalterados++;
     if (acc.reappeared) st.reaparecidos++;
     if (await _link(c, tenantId, acc.id, pa.id, 'beneficiario')) st.vinculos_novos++;
+    // telefone de contato do aluno (WhatsApp) → contact_point, p/ o NPS alcançar
+    if (ct.aluno.telefone && await _contato(c, tenantId, pa.id, ct.aluno.telefone)) st.contatos_novos++;
     // --- TITULAR ---
     if (ct.responsavel && ct.responsavel.idExterno) {
       const pr = await _person(c, tenantId, 'responsavel_financeiro', ct.responsavel.idExterno);

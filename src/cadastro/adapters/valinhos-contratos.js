@@ -9,7 +9,7 @@
 // captureHistory do sincronizador de recursos. Throttle ≥25s embutido no client (throttleGap).
 //
 // PRODUCE → { contratos: [{ idC, idA, curso, status, ini, fim, planoLabel, periodicidade,
-//   aluno: { idExterno, nome, dataNascimento?, payerRelation? }, responsavel: { idExterno }|null }] }
+//   aluno: { idExterno, nome, telefone?, dataNascimento?, payerRelation? }, responsavel: { idExterno }|null }] }
 //
 const { withTenant } = require('../../db');
 const { withExtranetLock } = require('../../resources/extranet-lock');
@@ -107,20 +107,24 @@ async function produce(binding, { tenantId } = {}) {
     const aluno = { idExterno: c.idA, nome: c.nome || null };
     let responsavel = null;
     const payer = payerByAluno[c.idA];
+    // Ficha do aluno (1x/aluno, cache). Buscada p/ TODOS: o telefone de contato
+    // (fonea_celular) é o WhatsApp do aluno/responsável e precisa ir pro canônico —
+    // sem ele o NPS não alcança ninguém. Dependentes ainda dão id_responsavel + nasc.
+    let fic = fichaCache.get(c.idA);
+    if (!fic) {
+      const fh = await get('/mod_alunos/update_alunos.php?id=' + c.idA); stats.fichas++;
+      fic = { idResp: field(fh, 'id_responsavel'), tp: tpsel(fh),
+              nasc: toISO(field(fh, 'data_nascimento')) || null,
+              telefone: field(fh, 'fonea_celular') || field(fh, 'fonea_celular1') || field(fh, 'fone_celular2') || null };
+      fichaCache.set(c.idA, fic);
+    }
+    aluno.telefone = fic.telefone;
     if (payer === 'financially_dependent') {
-      // ficha do dependente (1x/aluno): id_responsavel + nasc/payer p/ o sync de PESSOA
-      let fic = fichaCache.get(c.idA);
-      if (!fic) {
-        const fh = await get('/mod_alunos/update_alunos.php?id=' + c.idA); stats.fichas++;
-        fic = { idResp: field(fh, 'id_responsavel'), tp: tpsel(fh),
-                nasc: toISO(field(fh, 'data_nascimento')) || null };
-        fichaCache.set(c.idA, fic);
-      }
       aluno.dataNascimento = fic.nasc;
       aluno.payerRelation = payerFromTp(fic.tp) || payer;
       if (fic.idResp && fic.idResp !== '0') responsavel = { idExterno: fic.idResp };
     } else if (payer) {
-      aluno.payerRelation = payer;   // self_paid (do cadastro); sem ficha extra
+      aluno.payerRelation = payer;   // self_paid (do cadastro)
     }
     contratos.push({ idC: c.idC, idA: c.idA, curso: c.curso || null, status, ini: c.ini, fim: c.fim,
       planoLabel, periodicidade, aluno, responsavel });
