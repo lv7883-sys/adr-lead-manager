@@ -23,7 +23,8 @@ before(async () => {
       horario_comercial_inicio time, horario_comercial_fim time, horario_comercial_dias int[]);
     CREATE TABLE conversations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, conversation_kind text DEFAULT 'DIRECT', auto_reply_at timestamptz, updated_at timestamptz DEFAULT now());
-    CREATE TABLE automacao_config (tenant_id uuid PRIMARY KEY, modo_fora_horario text, modo_fds text, nome_ia text, contexto_ia text);
+    CREATE TABLE automacao_config (tenant_id uuid PRIMARY KEY, modo_fora_horario text, modo_fds text, nome_ia text, contexto_ia text,
+      ia_fora_leads boolean DEFAULT true, ia_fora_nao_leads boolean DEFAULT true);
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, school_name text,
       available_instruments text[] NOT NULL DEFAULT '{}');
     CREATE TABLE staff_outbound_samples (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
@@ -145,4 +146,22 @@ test('(9) anti-duplicado: 2 mensagens quase simultâneas -> só 1 resposta (rese
   assert.equal(out1.ok, true);
   const out2 = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi de novo' }, mkDeps(NOITE));
   assert.equal(out2.skipped, 'cooldown');   // 2ª não reserva -> não responde
+});
+
+test('(10) chave OUTRAS desligada + conversa NÃO-lead -> não responde', async () => {
+  await conv(); await setModo('auto');
+  await c.query(`UPDATE automacao_config SET ia_fora_nao_leads=false WHERE tenant_id=$1`, [T1]);
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi' }, mkDeps(NOITE));
+  assert.equal(out.skipped, 'nao_leads_off');
+  await c.query(`UPDATE automacao_config SET ia_fora_nao_leads=true WHERE tenant_id=$1`, [T1]);
+});
+
+test('(11) chave LEADS desligada + conversa É lead -> não responde (e OUTRAS segue valendo)', async () => {
+  await conv(); await setModo('auto');
+  await c.query(`INSERT INTO leads (tenant_id, phone, status) VALUES ($1,$2,'QUALIFYING')`, [T1, EXT]);
+  await c.query(`UPDATE automacao_config SET ia_fora_leads=false WHERE tenant_id=$1`, [T1]);
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'quero aula' }, mkDeps(NOITE));
+  assert.equal(out.skipped, 'leads_off');
+  await c.query(`UPDATE automacao_config SET ia_fora_leads=true WHERE tenant_id=$1`, [T1]);
+  await c.query(`DELETE FROM leads WHERE tenant_id=$1`, [T1]);
 });

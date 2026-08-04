@@ -142,7 +142,7 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
           WHERE tenant_id = $1 AND channel = $2
             AND regexp_replace(external_id, '[^0-9]', '', 'g') = regexp_replace($3, '[^0-9]', '', 'g')
           ORDER BY updated_at DESC LIMIT 1`, [tenantId, channel, String(externalId)])).rows[0];
-      const auto = (await c.query('SELECT modo_fora_horario, modo_fds, nome_ia, contexto_ia FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
+      const auto = (await c.query('SELECT modo_fora_horario, modo_fds, nome_ia, contexto_ia, ia_fora_leads, ia_fora_nao_leads FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
       const cfg = (await c.query('SELECT school_name, available_instruments FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
       // Horário de atendimento = FONTE ÚNICA tenants.horario_comercial (o que a aba grava) + fallback legado.
       const t = (await c.query(
@@ -152,7 +152,7 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
                 horario_comercial_dias AS hc_dias
            FROM tenants WHERE id = $1`, [tenantId])).rows[0];
       const lead = ident ? (await c.query(
-        `SELECT id, name FROM leads WHERE tenant_id = $1 AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+        `SELECT id, name, status FROM leads WHERE tenant_id = $1 AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
           ORDER BY created_at ASC LIMIT 1`, [tenantId, ident])).rows[0] : null;
       // RECEPÇÃO ATIVA: um HUMANO respondeu pelo painel (source='api', sender != IA) nos últimos
       // min? Então a equipe está presente (chegou cedo / saiu tarde) → a IA não deve atravessar.
@@ -163,7 +163,7 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
           WHERE tenant_id = $1 AND source = 'api' AND coalesce(sender, '') <> $2
             AND received_at > now() - make_interval(mins => $3) LIMIT 1`,
         [tenantId, nomeIaQ, recepWin])).rows[0];
-      return { conv, auto, cfg, tname: t && t.name, hc: t, leadId: lead && lead.id, leadName: lead && lead.name, recepAtiva: !!recep };
+      return { conv, auto, cfg, tname: t && t.name, hc: t, leadId: lead && lead.id, leadName: lead && lead.name, leadStatus: lead && lead.status, recepAtiva: !!recep };
     });
     if (!info.conv) return { skipped: 'no_conv' };
     if (info.conv.conversation_kind && info.conv.conversation_kind !== 'DIRECT') return { skipped: 'nao_direct' };
@@ -190,6 +190,12 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     const fimDeSemana = ([0, 6].includes(_local(now).dow));
     const modo = fimDeSemana ? info.auto.modo_fds : info.auto.modo_fora_horario;
     if (modo !== 'auto') return { skipped: 'modo=' + modo };
+
+    // 2 CHAVES independentes: responder LEADS e responder OUTRAS conversas fora do horário. is_lead =
+    // tem lead ativo (não NOT_LEAD/REVIEW_QUEUE). Coluna null (rows antigas) => tratada como ligada.
+    const isLead = !!info.leadStatus && info.leadStatus !== 'NOT_LEAD' && info.leadStatus !== 'REVIEW_QUEUE';
+    const alvoLigado = isLead ? (info.auto.ia_fora_leads !== false) : (info.auto.ia_fora_nao_leads !== false);
+    if (!alvoLigado) return { skipped: isLead ? 'leads_off' : 'nao_leads_off' };
 
     // Recepção ativa agora (humano respondeu pelo painel recentemente) → não atravessa a recepção.
     if (info.recepAtiva) return { skipped: 'recepcao_ativa' };
