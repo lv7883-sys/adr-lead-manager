@@ -154,7 +154,16 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
       const lead = ident ? (await c.query(
         `SELECT id, name FROM leads WHERE tenant_id = $1 AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
           ORDER BY created_at ASC LIMIT 1`, [tenantId, ident])).rows[0] : null;
-      return { conv, auto, cfg, tname: t && t.name, hc: t, leadId: lead && lead.id, leadName: lead && lead.name };
+      // RECEPÇÃO ATIVA: um HUMANO respondeu pelo painel (source='api', sender != IA) nos últimos
+      // min? Então a equipe está presente (chegou cedo / saiu tarde) → a IA não deve atravessar.
+      const nomeIaQ = (auto && auto.nome_ia && String(auto.nome_ia).trim()) || 'Atendimento';
+      const recepWin = parseInt(process.env.AUTOREPLY_RECEP_WINDOW_MIN || '30', 10) || 30;
+      const recep = (await c.query(
+        `SELECT 1 FROM staff_outbound_samples
+          WHERE tenant_id = $1 AND source = 'api' AND coalesce(sender, '') <> $2
+            AND received_at > now() - make_interval(mins => $3) LIMIT 1`,
+        [tenantId, nomeIaQ, recepWin])).rows[0];
+      return { conv, auto, cfg, tname: t && t.name, hc: t, leadId: lead && lead.id, leadName: lead && lead.name, recepAtiva: !!recep };
     });
     if (!info.conv) return { skipped: 'no_conv' };
     if (info.conv.conversation_kind && info.conv.conversation_kind !== 'DIRECT') return { skipped: 'nao_direct' };
@@ -170,14 +179,28 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     const st = businessState(bh, now);
     if (st.open) return { skipped: 'aberto' };
 
+    // BORDAS: a recepção costuma chegar um pouco antes e sair um pouco depois. Perto das bordas do
+    // horário a IA NÃO responde (evita atravessar a recepção). Buffer configurável (min; default 30).
+    const BUF_MS = (parseInt(process.env.AUTOREPLY_BUFFER_MIN || '30', 10) || 0) * 60000;
+    if (BUF_MS > 0) {
+      if (st.nextOpen && st.nextOpen.getTime() - now.getTime() <= BUF_MS) return { skipped: 'quase_abrindo' };
+      if (st.closedSince && now.getTime() - st.closedSince.getTime() <= BUF_MS) return { skipped: 'recem_fechou' };
+    }
+
     const fimDeSemana = ([0, 6].includes(_local(now).dow));
     const modo = fimDeSemana ? info.auto.modo_fds : info.auto.modo_fora_horario;
     if (modo !== 'auto') return { skipped: 'modo=' + modo };
 
-    // Anti-spam: já respondeu automaticamente nesta janela fechada? (auto_reply_at >= closedSince)
-    if (info.conv.auto_reply_at && st.closedSince && new Date(info.conv.auto_reply_at) >= st.closedSince) {
-      return { skipped: 'cooldown' };
-    }
+    // Recepção ativa agora (humano respondeu pelo painel recentemente) → não atravessa a recepção.
+    if (info.recepAtiva) return { skipped: 'recepcao_ativa' };
+
+    // ANTI-DUPLICADO ATÔMICO: reserva o cooldown ANTES de gerar/enviar. Se outra mensagem quase
+    // simultânea já reservou nesta janela fechada, pula (evita 2 respostas — o bug da Michele).
+    const cs = st.closedSince || new Date(now.getTime() - 12 * 3600000);
+    const reserva = await withTenant(tenantId, (c) => c.query(
+      'UPDATE conversations SET auto_reply_at = $4 WHERE id = $1 AND tenant_id = $2 AND (auto_reply_at IS NULL OR auto_reply_at < $3)',
+      [info.conv.id, tenantId, cs, now]));
+    if (!reserva.rowCount) return { skipped: 'cooldown' };
 
     const nomeIa = (info.auto.nome_ia && info.auto.nome_ia.trim()) || 'Atendimento';
     const escola = (info.cfg && info.cfg.school_name) || info.tname || 'a escola';
@@ -204,7 +227,9 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     const blocoContexto = contexto
       ? `INFORMAÇÕES DA ESCOLA que você PODE usar para responder (ex.: endereço, como funcionam as aulas, eventos): """${contexto}""" `
       : '';
+    const proximaFrase = proxima || 'no próximo horário de atendimento';
     const retorno = proxima ? `quando a equipe abrir (${proxima})` : 'no próximo horário de atendimento';
+    const regraHorario = `REGRA DE HORÁRIO (obrigatória): ao dizer quando a equipe retorna/abre, escreva EXATAMENTE «${proximaFrase}» — NÃO troque o dia da semana nem a hora, NÃO invente outro dia (ex.: não diga "segunda-feira" se a frase for "hoje às 9h"). `;
     const systemPrompt =
       `Você é ${nomeIa}, do atendimento de ${escola} — fale como um atendente HUMANO real, caloroso e natural (nada robótico, nada genérico).${instrs} ` +
       blocoNome + blocoContexto +
@@ -212,7 +237,9 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
       `REGRA DE OURO (obrigatória): você SÓ pode afirmar fatos que estejam ESCRITOS EXPLICITAMENTE nas "INFORMAÇÕES DA ESCOLA" acima. É TERMINANTEMENTE PROIBIDO inventar, deduzir, supor ou completar qualquer informação. ` +
       `Você PODE — só se estiver nas informações acima — dar o ENDEREÇO e explicar COMO FUNCIONAM as aulas (individuais, projetos de banda, eventos). ` +
       `Se a pessoa perguntar OU mencionar QUALQUER coisa que não esteja explícita nas informações acima (ex.: um workshop, um evento específico, nome de professor, promoção, data, valor, horário de aula): NÃO confirme, NÃO detalhe e NÃO invente — diga com sinceridade que a recepção confirma esse detalhe ${retorno}. Mesmo que apareça no histórico da conversa, trate como NÃO confirmado (use o histórico só p/ entender o assunto e o tom, NUNCA como fonte de fatos). ` +
-      `NUNCA informe PREÇOS/valores nem AGENDE/confirme HORÁRIO de aula experimental — exclusivo da recepção. NÃO assine nem repita seu nome no final — o nome já aparece no topo.`;
+      `NUNCA informe PREÇOS/valores nem AGENDE/confirme HORÁRIO de aula experimental — exclusivo da recepção. ` +
+      regraHorario +
+      `NÃO assine nem repita seu nome no final — o nome já aparece no topo.`;
 
     const generate = deps.generate || gemini.generateReply;
     let corpo;
@@ -227,9 +254,12 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     const texto = `*${nomeIa}*\n${String(corpo).trim()}`;
 
     const sent = await _send(tenantId, channel, externalId, texto, deps);
-    if (!sent.ok) return { skipped: 'send_' + sent.reason };
-
-    await withTenant(tenantId, (c) => c.query('UPDATE conversations SET auto_reply_at = now() WHERE id = $1 AND tenant_id = $2', [info.conv.id, tenantId]));
+    if (!sent.ok) {
+      // Envio falhou: devolve o cooldown (restaura o valor anterior) p/ permitir retry na próxima msg.
+      await withTenant(tenantId, (c) => c.query('UPDATE conversations SET auto_reply_at = $2 WHERE id = $1', [info.conv.id, info.conv.auto_reply_at || null])).catch(() => {});
+      return { skipped: 'send_' + sent.reason };
+    }
+    // cooldown já reservado ANTES de gerar (anti-duplicado) — não seta de novo aqui.
     const registrar = deps.registrarSaida || outbound.registrarSaida;
     await registrar(tenantId, { phone: externalId, externalMessageId: sent.messageId, sender: nomeIa, body: texto });
     logger.info('autoreply.sent', { tenant_id: tenantId, channel, nome_ia: nomeIa });

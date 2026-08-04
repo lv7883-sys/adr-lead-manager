@@ -28,7 +28,7 @@ before(async () => {
       available_instruments text[] NOT NULL DEFAULT '{}');
     CREATE TABLE staff_outbound_samples (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, external_message_id text, source text, sender text, body text, raw jsonb,
-      media_url text, media_type text, media_filename text, reply_to_message_id uuid);
+      media_url text, media_type text, media_filename text, reply_to_message_id uuid, received_at timestamptz DEFAULT now());
     CREATE TABLE leads (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, phone text,
       meta_psid text, status text, created_at timestamptz DEFAULT now());
   `);
@@ -126,4 +126,23 @@ test('(6) pausa global AUTOREPLY_PAUSE=1 -> não envia', async () => {
   const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi' }, deps);
   delete process.env.AUTOREPLY_PAUSE;
   assert.equal(out.skipped, 'paused'); assert.equal(deps.spy.sends, 0);
+});
+
+test('(8) buffer de bordas: perto de abrir/fechar não responde (recepção chega cedo/sai tarde)', async () => {
+  await conv(); await setModo('auto');
+  const abrindo = U(2026, 7, 5, 11, 45);   // 08:45 local -> 15min antes de abrir (09h)
+  let out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi' }, mkDeps(abrindo));
+  assert.equal(out.skipped, 'quase_abrindo');
+  await conv(); await setModo('auto');
+  const fechando = U(2026, 7, 5, 21, 20);  // 18:20 local -> 20min depois de fechar (18h)
+  out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi' }, mkDeps(fechando));
+  assert.equal(out.skipped, 'recem_fechou');
+});
+
+test('(9) anti-duplicado: 2 mensagens quase simultâneas -> só 1 resposta (reserva atômica)', async () => {
+  await conv(); await setModo('auto');
+  const out1 = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi' }, mkDeps(NOITE));
+  assert.equal(out1.ok, true);
+  const out2 = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi de novo' }, mkDeps(NOITE));
+  assert.equal(out2.skipped, 'cooldown');   // 2ª não reserva -> não responde
 });
