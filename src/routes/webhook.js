@@ -375,7 +375,12 @@ function _diagReadReceipt(body, log) {
     const ack = _mapAck(d.status || (d.update && d.update.status) || d.messageStatus);
     if (ack !== 'read') continue;
     const key = d.key || (d.message && d.message.key) || {};
-    reads.push({ jid: key.remoteJid || key.remoteJidAlt || null, fromMe: !!key.fromMe, id: key.id || null });
+    reads.push({
+      jid: key.remoteJid || key.remoteJidAlt || d.remoteJid || d.remoteJidAlt || null,
+      fromMe: (key.fromMe != null ? key.fromMe : d.fromMe) === true,
+      id: key.id || d.keyId || d.id || null,
+      raw: JSON.stringify(d).slice(0, 300),   // TEMP — ver a estrutura real do payload de read
+    });
   }
   if (reads.length) log.info('diag.read_receipt', { reads });
 }
