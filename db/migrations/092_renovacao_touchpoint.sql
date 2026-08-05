@@ -1,5 +1,5 @@
 -- ============================================================
--- 091 — RENOVAÇÃO: toques antecipados D-10 / D-2 (Fase 1 — "modo avisa").
+-- 092 — RENOVAÇÃO: toques antecipados D-10 / D-2 (Fase 1 — "modo avisa").
 --
 -- Substitui a régua antiga "D-45" (cedo demais e solta): a âncora passa a ser o FIM DO CONTRATO
 -- (service_account.fim_vigencia). Um job diário (renovacao-sweep) varre os contratos vigentes e,
@@ -19,7 +19,7 @@
 -- (fim_vigencia) muda → novos touchpoints do próximo ciclo, sem repetir os do ciclo antigo.
 --
 -- APLICAR:
---   docker exec -i <pg> psql -U postgres -d adr_scheduler -v ON_ERROR_STOP=1 -f 091_renovacao_touchpoint.sql
+--   docker exec -i <pg> psql -U postgres -d adr_scheduler -v ON_ERROR_STOP=1 -f 092_renovacao_touchpoint.sql
 -- ============================================================
 
 -- ---------------------------------------------------------------------------
