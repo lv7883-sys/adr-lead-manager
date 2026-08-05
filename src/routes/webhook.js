@@ -337,52 +337,56 @@ async function marcarApagada(tenantId, ids, log) {
   if (log) log.info('delete.applied', { ids: ids.length, aplicados: n });
 }
 
-// ── DIAGNÓSTICO TEMPORÁRIO (badge "não-lidas" inflado) — REMOVER após verificar Q1 ──
-// Pergunta: a Evolution encaminha ao webhook do LM um evento quando a leitura acontece
-// FORA do LM (WhatsApp Web / celular)? Se sim, dá pra derivar "não-lida" do estado real
-// do WhatsApp (ADR-042). Hoje eventos chats.*/contacts.* caem silenciosamente em
-// webhook.no_message. Aqui logamos o evento + o unreadCount cru por conversa e RETORNAMOS
-// (não são mensagens novas). Zero efeito colateral — só observabilidade.
-// Teste: com isto no ar, abra uma conversa no WhatsApp Web e observe:
-//   docker logs <lm> 2>&1 | grep diag.chats_event
-// Se aparecer um evento referenciando aquela conversa com unread=0 → opção 1 (PUSH) viável.
-function _diagChatsEvent(body, log) {
-  const ev = String((body && body.event) || '').toLowerCase();
-  if (!ev.startsWith('chats.') && !ev.startsWith('contacts.')) return false;
+// ── ADR-042 Fase 2 — LEITURA no WhatsApp Web volta pro inbox ────────────────────────
+// Quando a recepção lê uma conversa em QUALQUER aparelho (celular / WhatsApp Web), o WhatsApp
+// emite um recibo de leitura do INBOUND: messages.update com status READ e key.fromMe=FALSE
+// (fromMe=true é o CLIENTE lendo a NOSSA msg = ack de entrega, tratado por atualizarAckStatus).
+// O recibo traz o `keyId` = id do WhatsApp da mensagem, que casa com messages.external_message_id
+// → daí achamos a conversa e avançamos conversations.last_read_at. Casamos por ID (não por jid):
+// imune à ambiguidade lid/telefone (o recibo vem com remoteJid @lid). Verificado em produção
+// (Q1) em 2026-08-05. Isola no inbox: só mexe no cursor de leitura, nada de funil/lead.
+//
+// Extrai os ids das mensagens INBOUND lidas (fromMe=false, status read). Set = dedup.
+function _idsRecibosLeituraInbound(body) {
   const data = body && body.data != null ? body.data : body;
   const arr = Array.isArray(data) ? data : [data];
-  const chats = arr.filter(Boolean).map((d) => ({
-    jid: d.remoteJid || d.id || (d.key && d.key.remoteJid) || null,
-    // o nome do campo varia por versão da Evolution: unreadCount | unreadMessages | unread
-    unread: d.unreadCount ?? d.unreadMessages ?? d.unread ?? null,
-  }));
-  log.info('diag.chats_event', { event: ev, chats });
-  return true;
-}
-
-// ── DIAGNÓSTICO TEMPORÁRIO (Q1, read-receipt) — REMOVER após verificar ──────────────
-// O outro candidato a "sinal de leitura": um messages.update com status READ. Se a leitura
-// no WhatsApp Web propaga o recibo do INBOUND (key.fromMe=false), é o gancho ideal p/ zerar
-// a não-lida daquela conversa. Loga TODO read-receipt distinguindo o inbound (fromMe=false =
-// alguém leu a msg do CLIENTE → o que queremos) do outbound (fromMe=true = cliente leu a NOSSA,
-// já tratado pelo ack). No-op se o update não for de leitura. Só observabilidade.
-function _diagReadReceipt(body, log) {
-  const data = body && body.data != null ? body.data : body;
-  const arr = Array.isArray(data) ? data : [data];
-  const reads = [];
+  const ids = new Set();
   for (const d of arr) {
     if (!d || typeof d !== 'object') continue;
-    const ack = _mapAck(d.status || (d.update && d.update.status) || d.messageStatus);
-    if (ack !== 'read') continue;
+    if (_mapAck(d.status || (d.update && d.update.status) || d.messageStatus) !== 'read') continue;
     const key = d.key || (d.message && d.message.key) || {};
-    reads.push({
-      jid: key.remoteJid || key.remoteJidAlt || d.remoteJid || d.remoteJidAlt || null,
-      fromMe: (key.fromMe != null ? key.fromMe : d.fromMe) === true,
-      id: key.id || d.keyId || d.id || null,
-      raw: JSON.stringify(d).slice(0, 300),   // TEMP — ver a estrutura real do payload de read
-    });
+    const fromMe = (key.fromMe != null ? key.fromMe : d.fromMe) === true;
+    if (fromMe) continue;   // ack do NOSSO outbound (cliente leu) — não é leitura de inbound
+    const id = (key.id) || d.keyId || d.id;
+    if (id) ids.add(String(id));
   }
-  if (reads.length) log.info('diag.read_receipt', { reads });
+  return [...ids];
+}
+
+// Avança conversations.last_read_at até a mensagem lida (casa por external_message_id = keyId).
+// GREATEST = MONOTÔNICO: nunca recua e preserva não-lidas de inbound posterior ainda não lido.
+// role='USER' = só inbound. Idempotente (reprocessar o mesmo recibo = no-op). Ignora id que não
+// casa (0 linhas; nunca cria). Retorna nº de conversas atualizadas.
+async function marcarLidoPorRecibo(tenantId, body, log) {
+  const ids = _idsRecibosLeituraInbound(body);
+  if (!ids.length) return;
+  const n = await withTenant(tenantId, async (c) => {
+    let tot = 0;
+    for (const id of ids) {
+      const r = await c.query(
+        `UPDATE conversations cv
+            SET last_read_at = GREATEST(COALESCE(cv.last_read_at, 'epoch'::timestamptz), m.received_at)
+           FROM messages m
+          WHERE m.external_message_id = $2
+            AND m.conversation_id = cv.id
+            AND cv.tenant_id = $1
+            AND m.role = 'USER'`,
+        [tenantId, id]);
+      tot += r.rowCount;
+    }
+    return tot;
+  });
+  if (log && n) log.info('inbox.read_synced', { recibos: ids.length, conversas: n });
 }
 
 async function handleZapiWebhook(req, res) {
@@ -392,10 +396,6 @@ async function handleZapiWebhook(req, res) {
 
   // ACK imediato (processamento é assíncrono).
   res.status(200).json({ status: 'ok' });
-
-  // DIAGNÓSTICO TEMPORÁRIO — ver _diagChatsEvent. Loga e retorna p/ eventos chats.*/contacts.*
-  // (que hoje já eram descartados). REMOVER após responder o Q1 do ADR-042.
-  if (_diagChatsEvent(req.body, log)) return;
 
   // Fatia 3 — EXCLUSÃO (apagar p/ todos): evento dedicado messages.delete OU protocolMessage
   // REVOKE embutido em update/upsert. NÃO é mensagem nova — marca deleted_at e retorna, ANTES
@@ -410,8 +410,9 @@ async function handleZapiWebhook(req, res) {
   //  - Fatia 1: status (entregue/lido) → ack na saída (no-op se não houver data.status);
   //  - Fatia 2: edição → troca o body da mensagem + marca "editada" (no-op se não houver).
   if (String(req.body?.event || '').toLowerCase() === 'messages.update') {
-    _diagReadReceipt(req.body, log);   // DIAGNÓSTICO TEMPORÁRIO (Q1) — remover depois
     atualizarAckStatus(tenant.id, req.body, log).catch((e) => log.warn('ack.unhandled', { error: e.message }));
+    // ADR-042 Fase 2 — recibo de leitura do inbound (recepção leu no WhatsApp Web) → avança o cursor.
+    marcarLidoPorRecibo(tenant.id, req.body, log).catch((e) => log.warn('read_sync.unhandled', { error: e.message }));
     const edit = _detectEdit(req.body);
     if (edit) aplicarEdicao(tenant.id, edit, log).catch((e) => log.warn('edit.unhandled', { error: e.message }));
     return;
@@ -541,3 +542,4 @@ module.exports = router;
 module.exports.normalizeMessage = normalizeMessage;
 module.exports.detectarMidia = detectarMidia;
 module.exports.detectarReacao = detectarReacao;
+module.exports._idsRecibosLeituraInbound = _idsRecibosLeituraInbound;   // ADR-042 Fase 2
