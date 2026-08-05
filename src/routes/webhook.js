@@ -360,6 +360,26 @@ function _diagChatsEvent(body, log) {
   return true;
 }
 
+// ── DIAGNÓSTICO TEMPORÁRIO (Q1, read-receipt) — REMOVER após verificar ──────────────
+// O outro candidato a "sinal de leitura": um messages.update com status READ. Se a leitura
+// no WhatsApp Web propaga o recibo do INBOUND (key.fromMe=false), é o gancho ideal p/ zerar
+// a não-lida daquela conversa. Loga TODO read-receipt distinguindo o inbound (fromMe=false =
+// alguém leu a msg do CLIENTE → o que queremos) do outbound (fromMe=true = cliente leu a NOSSA,
+// já tratado pelo ack). No-op se o update não for de leitura. Só observabilidade.
+function _diagReadReceipt(body, log) {
+  const data = body && body.data != null ? body.data : body;
+  const arr = Array.isArray(data) ? data : [data];
+  const reads = [];
+  for (const d of arr) {
+    if (!d || typeof d !== 'object') continue;
+    const ack = _mapAck(d.status || (d.update && d.update.status) || d.messageStatus);
+    if (ack !== 'read') continue;
+    const key = d.key || (d.message && d.message.key) || {};
+    reads.push({ jid: key.remoteJid || key.remoteJidAlt || null, fromMe: !!key.fromMe, id: key.id || null });
+  }
+  if (reads.length) log.info('diag.read_receipt', { reads });
+}
+
 async function handleZapiWebhook(req, res) {
   const tenant = req.tenant;
   const log = req.log;
@@ -385,6 +405,7 @@ async function handleZapiWebhook(req, res) {
   //  - Fatia 1: status (entregue/lido) → ack na saída (no-op se não houver data.status);
   //  - Fatia 2: edição → troca o body da mensagem + marca "editada" (no-op se não houver).
   if (String(req.body?.event || '').toLowerCase() === 'messages.update') {
+    _diagReadReceipt(req.body, log);   // DIAGNÓSTICO TEMPORÁRIO (Q1) — remover depois
     atualizarAckStatus(tenant.id, req.body, log).catch((e) => log.warn('ack.unhandled', { error: e.message }));
     const edit = _detectEdit(req.body);
     if (edit) aplicarEdicao(tenant.id, edit, log).catch((e) => log.warn('edit.unhandled', { error: e.message }));
