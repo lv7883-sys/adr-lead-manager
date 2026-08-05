@@ -206,4 +206,17 @@ async function sendReaction({ instance, apikey }, key, reaction) {
   }
 }
 
-module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, _toggle9BR };
+// ADR-042 (badge "não-lidas") — lista as conversas da instância (POST /chat/findChats).
+// READ-ONLY. Na Evolution v2 cada item traz o unread por conversa — cujo nome de campo VARIA
+// por versão (unreadCount | unreadMessages) — e esse número já reflete leituras de TODOS os
+// aparelhos (celular + WhatsApp Web), servindo de fonte de verdade p/ o inbox. `body` opcional
+// = filtro/paginação conforme a versão. Normaliza o retorno p/ sempre devolver um array.
+async function findChats({ instance, apikey }, body = {}) {
+  const d = await req('POST', `/chat/findChats/${encodeURIComponent(instance)}`, apikey, body);
+  if (Array.isArray(d)) return d;
+  if (d && Array.isArray(d.chats)) return d.chats;
+  if (d && Array.isArray(d.data)) return d.data;
+  return [];
+}
+
+module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, _toggle9BR };
