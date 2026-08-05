@@ -15,7 +15,7 @@ before(async () => {
   await c.connect();
   await c.query(`
     CREATE TABLE conversations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text NOT NULL,
-      external_id text, updated_at timestamptz DEFAULT now(), UNIQUE (tenant_id, channel, external_id));
+      external_id text, last_read_at timestamptz, updated_at timestamptz DEFAULT now(), UNIQUE (tenant_id, channel, external_id));
     CREATE TABLE messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
       direction text NOT NULL, role text, external_message_id text, sender text, body text, raw jsonb,
       received_at timestamptz NOT NULL DEFAULT now());
@@ -72,4 +72,35 @@ test('(4) pula mensagem sem id ou sem conteúdo', async () => {
 test('(5) leva vazia / args faltando -> no-op', async () => {
   assert.equal((await imp.importarConversa(T1, { externalId: EXT, msgs: [] })).inseridos, 0);
   assert.equal((await imp.importarConversa(T1, { externalId: null, msgs: [{ externalMessageId: 'X', body: 'a' }] })).inseridos, 0);
+});
+
+test('(6) import marca lido: last_read_at = inbound mais novo (outbound não conta) -> nao_lidas=0', async () => {
+  const EXT6 = '5519999990006';
+  await imp.importarConversa(T1, { channel: 'whatsapp', externalId: EXT6, msgs: [
+    { externalMessageId: 'A1', fromMe: false, body: 'oi', sender: 'Ana', atMs: 1700000000000 },
+    { externalMessageId: 'A2', fromMe: false, body: 'tem vaga?', sender: 'Ana', atMs: 1700000200000 },
+    { externalMessageId: 'A3', fromMe: true, body: 'temos!', sender: 'RECEP', atMs: 1700000300000 }, // outbound + mais novo: NÃO move o cursor
+  ] });
+  const cv = (await c.query(`SELECT last_read_at FROM conversations WHERE tenant_id=$1 AND external_id=$2`, [T1, EXT6])).rows[0];
+  assert.equal(new Date(cv.last_read_at).getTime(), 1700000200000); // = inbound mais novo (A2), não o outbound (A3)
+  // nao_lidas (regra da migr. 080) de uma conversa recém-importada = 0
+  const nao = (await c.query(
+    `SELECT count(*)::int n FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+      WHERE cv.tenant_id=$1 AND cv.external_id=$2 AND m.role='USER'
+        AND (cv.last_read_at IS NULL OR m.received_at > cv.last_read_at)`, [T1, EXT6])).rows[0].n;
+  assert.equal(nao, 0);
+});
+
+test('(7) monotônico: reimportar histórico ANTIGO não recua cursor já avançado', async () => {
+  const EXT7 = '5519999990007';
+  // 1ª leva: inbound novo -> cursor vai p/ 1700000500000
+  await imp.importarConversa(T1, { channel: 'whatsapp', externalId: EXT7, msgs: [
+    { externalMessageId: 'B2', fromMe: false, body: 'recente', sender: 'Ana', atMs: 1700000500000 },
+  ] });
+  // 2ª leva: inbound MAIS ANTIGO (página anterior do histórico) -> GREATEST mantém 1700000500000
+  await imp.importarConversa(T1, { channel: 'whatsapp', externalId: EXT7, msgs: [
+    { externalMessageId: 'B1', fromMe: false, body: 'antigo', sender: 'Ana', atMs: 1700000100000 },
+  ] });
+  const cv = (await c.query(`SELECT last_read_at FROM conversations WHERE tenant_id=$1 AND external_id=$2`, [T1, EXT7])).rows[0];
+  assert.equal(new Date(cv.last_read_at).getTime(), 1700000500000);
 });

@@ -41,9 +41,11 @@ async function importarConversa(tenantId, { channel = 'whatsapp', externalId, ms
          ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = conversations.updated_at
          RETURNING id`, [tenantId, channel, String(externalId)])).rows[0];
       let inseridos = 0; let pulados = 0;
+      let maxInboundAt = null; // ts do inbound mais novo desta leva (p/ o cursor de "lido")
       for (const m of msgs) {
         if (!m || !m.externalMessageId || (!m.body && !m.sender)) { pulados++; continue; }
         const at = m.atMs ? new Date(Number(m.atMs)) : new Date();
+        if (!m.fromMe && (!maxInboundAt || at > maxInboundAt)) maxInboundAt = at;
         let r;
         if (m.fromMe) {
           r = await c.query(
@@ -59,6 +61,17 @@ async function importarConversa(tenantId, { channel = 'whatsapp', externalId, ms
             [tenantId, conv.id, String(m.externalMessageId), m.sender || null, m.body || '', JSON.stringify({ source: 'historico' }), at]);
         }
         if (r.rowCount) inseridos++; else pulados++;
+      }
+      // Histórico importado NÃO é "não-lido": avança o cursor de leitura (conversations.last_read_at)
+      // até o inbound mais novo desta leva. Sem isso, last_read_at fica NULL e TODO o backfill conta
+      // como não-lido (inflava o badge/total — ex.: Valinhos). MONOTÔNICO (GREATEST, nunca regride):
+      // preserva não-lidas legítimas de mensagens que chegarem DEPOIS (received_at > cursor) via webhook.
+      if (maxInboundAt) {
+        await c.query(
+          `UPDATE conversations
+              SET last_read_at = GREATEST(COALESCE(last_read_at, 'epoch'::timestamptz), $2::timestamptz)
+            WHERE id = $1`,
+          [conv.id, maxInboundAt]);
       }
       return { conv: conv.id, inseridos, pulados };
     });
