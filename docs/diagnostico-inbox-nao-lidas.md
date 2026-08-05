@@ -4,6 +4,8 @@
 
 > Nota: o lado do **dashboard** já foi corrigido (passou a exibir o valor do LM). A fonte do número é o **Lead Manager** — é aqui que corrigimos.
 
+> **Status — RESOLVIDO em produção (2026-08-05).** Fase 1 (histórico) + Fase 2 (evento de leitura do WhatsApp Web) + reset do acervo (migr. 091). Badge Valinhos: **806 → 954 → 0**. Detalhes na seção **[Resolução](#resolução-entregue-e-verificada-em-produção--2026-08-05)**. As seções de diagnóstico abaixo ficam como registro do raciocínio.
+
 ---
 
 ## Como o LM define "não-lida" (é derivado, não é flag)
@@ -29,39 +31,46 @@ As recepcionistas leem no WhatsApp Web; esse "lido" não sincroniza pro LM. O we
 
 **③ Divergência de grupos (menor).** O total exclui grupos; o badge por-conversa inclui. Total e soma dos badges não reconciliam.
 
----
-
-## O que a Evolution expõe sobre "leitura" (investigação)
-
-- `messages.update` com `status` READ/PLAYED/4/5 → hoje mapeado só para o ack do **nosso outbound** (`_mapAck`, `atualizarAckStatus`). Não diz respeito a inbound lido pela recepção.
-- **Sinal candidato para leitura do dono:** `chats.update` (Evolution `CHATS_UPDATE`) carregando `unreadCount`. No multi-device, quando o dono lê um chat no WhatsApp Web, o `unreadCount` daquele chat zera e um `chats.update` é emitido. **A confirmar na instância Evolution do tenant** (depende de o evento estar habilitado no webhook — config externa, não está neste repo).
-- Endpoint Evolution `POST /chat/markMessageAsRead/:instance` existe, mas **não está fiado** no `evolution.js`.
+> **Verificado em produção (05/ago):** aqui a causa **① não existiu** — o importador de histórico nunca rodou nesta instância (`raw.source='historico'` = 0 mensagens, e a migr. 090 deu `UPDATE 0`). O 806/954 era **100% causa ②**. A Fase 1 seguiu válida (blinda import futuro), mas não movia o número do Valinhos.
 
 ---
 
-## Plano
+## O que a Evolution expõe sobre "leitura" — VERIFICADO em produção (05/ago)
 
-### Fase 1 — desinflar já (feito neste branch, sem depender da Evolution)
+- **`findChats` (PULL) — sem fonte.** `POST /chat/findChats/{instance}` responde e traz o campo `unreadCount`, mas o valor vem **`null`** em todas as conversas (inclusive numa não-respondida). A Evolution não rastreia unread nesta instância → espelhar `unreadCount` não funciona. (Também só devolveu 54 chats vs 507 conversas no LM.)
+- **`chats.update` (PUSH via unreadCount) — inviável** pelo mesmo motivo (mesma instância, `unreadCount` null).
+- **Read-receipt do inbound (o que FUNCIONOU):** ler uma conversa no WhatsApp Web propaga um `messages.update` com `status:READ` e **`key.fromMe=false`** (recibo de leitura do INBOUND; `fromMe=true` é o cliente lendo a NOSSA msg = ack de entrega, já tratado). O payload traz os campos no **topo** do `data` (`keyId`, `remoteJid`, `fromMe`, `status`), NÃO em `.key`; o `remoteJid` vem como `@lid`.
+- **Casamento certo = por ID.** O `keyId` do recibo é o id do WhatsApp da mensagem = `messages.external_message_id`. Casar `keyId → external_message_id → conversation_id` é imune à ambiguidade `@lid`/telefone.
 
-1. **Importador marca lido** ([`src/importHistorico.js`](../src/importHistorico.js)): ao importar, avança `last_read_at` até o inbound mais novo da leva (GREATEST, monotônico). Histórico importado deixa de contar como não-lido; não-lidas legítimas posteriores (received_at > cursor) seguem contando.
-2. **Backfill do acervo já importado** (migr. [`090_backfill_last_read_historico.sql`](../db/migrations/090_backfill_last_read_historico.sql)): avança `last_read_at` até a mensagem `raw.source='historico'` mais nova de cada conversa. Conservador (só histórico) e monotônico — não esconde não-lidas reais.
-3. Testes: [`test/import-historico.itest.js`](../test/import-historico.itest.js) casos (6) e (7).
+> **Nota `@lid`:** as conversas do LM são chaveadas por telefone em formato inconsistente (`+5519…` E.164 e `5519…`). Um susto inicial de "proliferação `@lid`" foi **falso alarme** — o `+` enganou um regex `^55`. Não há duplicação por lid; é só hygiene menor de formato (o strip de dígitos absorve no casamento).
 
-**Deploy da Fase 1:** deploy do código + rodar a migração manual (padrão do repo, sem runner):
-```
-docker exec -i <pg> psql -U postgres -d adr_scheduler -v ON_ERROR_STOP=1 -f db/migrations/090_backfill_last_read_historico.sql
-```
+---
 
-### Fase 2 — propagar leitura do WhatsApp Web (pendente; precisa de você)
+## Resolução (entregue e verificada em produção — 2026-08-05)
 
-1. **Habilitar `chats.update` (unreadCount)** no webhook da instância Evolution do tenant.
-2. **Handler** em [`src/routes/webhook.js`](../src/routes/webhook.js): quando `chats.update` trouxer `unreadCount === 0` (ou diminuir), avançar `conversations.last_read_at = now()` da conversa correspondente (casar por `remoteJid`/external_id).
-3. **(Opcional) mão dupla:** quando a recepção lê no LM, chamar `markMessageAsRead` na Evolution para zerar também no WhatsApp Web.
+### Fase 1 — histórico não conta como não-lido
+- [`src/importHistorico.js`](../src/importHistorico.js): o import avança `last_read_at` até o inbound mais novo da leva (GREATEST, monotônico).
+- migr. [`090`](../db/migrations/090_backfill_last_read_historico.sql): backfill conservador do acervo histórico (só `raw.source='historico'`).
+- Testes: [`test/import-historico.itest.js`](../test/import-historico.itest.js) casos (6)/(7) — 7/7 verde (runner [`test/run-import-historico-itest.sh`](../test/run-import-historico-itest.sh)).
+- Em prod deu `UPDATE 0` (não havia histórico aqui) — correto e inofensivo; blinda import futuro.
 
-> Fase 2 foi deixada fora do código por depender de config externa (evento na Evolica) — scaffoldar agora seria código morto até o evento existir.
+### Fase 2 — leitura no WhatsApp Web volta pro inbox (o fix do sintoma)
+Handler `marcarLidoPorRecibo` em [`src/routes/webhook.js`](../src/routes/webhook.js): no `messages.update`, para cada recibo `status=READ` com `key.fromMe=false`, casa `keyId → messages.external_message_id → conversa` e avança `conversations.last_read_at` (GREATEST — monotônico, preserva não-lida de inbound posterior ainda não lido). Só mexe no cursor de leitura (isolado do funil/lead). Loga `inbox.read_synced`. Parser coberto por testes de unidade com payloads REAIS em [`test/webhook.test.js`](../test/webhook.test.js). **Q1 (o evento de leitura chega ao LM?) foi verificado em produção — chega e casa.**
+
+### Reset do backlog — migr. 091
+O handler só age dali pra frente; mensagens lidas ANTES do deploy não emitem recibo novo. migr. [`091`](../db/migrations/091_reset_backlog_nao_lidas.sql) marca cada conversa como lida até o inbound mais recente (`last_read_at = max(received_at)`, GREATEST/idempotente). Defensável: o badge é "não-VISTO", e a recepção já viu tudo no WhatsApp Web. Em prod: `UPDATE 175`.
+
+### Resultado
+Badge Valinhos: **806 → 954** (durante a investigação, subindo) **→ 0** após o reset. Agora é um número **vivo** (sobe com inbound novo, cai quando a recepção lê em qualquer aparelho), não mais inflação monotônica. Handler confirmado ativo (`inbox.read_synced` disparando).
+
+### Mantido de propósito (não é código morto)
+`findChats` foi fiado em [`src/evolution.js`](../src/evolution.js) durante a investigação (tentativa de PULL) e **mantido** — é o wrapper que o backlog **E11-01** (importar histórico do WhatsApp) vai precisar. `markMessageAsRead` (mão dupla LM→WhatsApp, marcar lido também no celular quando a recepção lê no LM) segue como melhoria opcional futura.
+
+### Causa ③ (grupos) — segue aberta (menor)
+Total exclui `@g.us`; badge por-conversa inclui. Divergência pequena, fora do escopo desta correção.
 
 ---
 
 ## Coordenação
 
-Feito num branch isolado (`fix/inbox-nao-lidas-historico`, worktree próprio) a partir do `main`, **sem push e sem tocar o checkout principal**. Há uma sessão paralela no mesmo tema ("Lead Manager unread count sync") — este doc serve de base comum. Só uma sessão deve editar `inbox.js`/`webhook.js`/`importHistorico.js` para evitar conflito.
+Diagnóstico e Fase 1 nasceram no branch `fix/inbox-nao-lidas-historico`; a Fase 2 + reset foram consolidados direto no `main` (commits `0341a81`, `b1c6631`). A sessão paralela ("renovação D-10/D-2") segue no seu próprio branch, sem sobreposição de arquivos.
