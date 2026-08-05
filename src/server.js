@@ -144,6 +144,19 @@ if (require.main === module) {
     { timezone: 'America/Sao_Paulo' }
   );
 
+  // Renovação Fase 1: sweep diário de contratos vencendo — 08:00 America/Sao_Paulo (após a
+  // sincronização de contratos das 04h do host). Gera rascunhos da Janis (D-10/D-2) na fila.
+  const { runRenovacaoSweep } = require('./jobs/renovacao-sweep');
+  cron.schedule(
+    '0 8 * * *',
+    () => {
+      runRenovacaoSweep()
+        .then((s) => logger.info('cron.renovacao_sweep.done', { tenants: s.tenants, marcos: s.marcos, enfileirados: s.enfileirados }))
+        .catch((e) => logger.error('cron.renovacao_sweep.error', { error: e.message }));
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+
   // Resiliência a 503 — reprocessa o buffer "aguardando classificação" a cada 2 min.
   // Gatilho por TEMPO (o por EVENTO está no ingest). Reclassifica pela conversa inteira
   // e, esgotada a janela de 15min, manda pra Revisar com alerta ativo.
