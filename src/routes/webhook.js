@@ -337,6 +337,29 @@ async function marcarApagada(tenantId, ids, log) {
   if (log) log.info('delete.applied', { ids: ids.length, aplicados: n });
 }
 
+// ── DIAGNÓSTICO TEMPORÁRIO (badge "não-lidas" inflado) — REMOVER após verificar Q1 ──
+// Pergunta: a Evolution encaminha ao webhook do LM um evento quando a leitura acontece
+// FORA do LM (WhatsApp Web / celular)? Se sim, dá pra derivar "não-lida" do estado real
+// do WhatsApp (ADR-042). Hoje eventos chats.*/contacts.* caem silenciosamente em
+// webhook.no_message. Aqui logamos o evento + o unreadCount cru por conversa e RETORNAMOS
+// (não são mensagens novas). Zero efeito colateral — só observabilidade.
+// Teste: com isto no ar, abra uma conversa no WhatsApp Web e observe:
+//   docker logs <lm> 2>&1 | grep diag.chats_event
+// Se aparecer um evento referenciando aquela conversa com unread=0 → opção 1 (PUSH) viável.
+function _diagChatsEvent(body, log) {
+  const ev = String((body && body.event) || '').toLowerCase();
+  if (!ev.startsWith('chats.') && !ev.startsWith('contacts.')) return false;
+  const data = body && body.data != null ? body.data : body;
+  const arr = Array.isArray(data) ? data : [data];
+  const chats = arr.filter(Boolean).map((d) => ({
+    jid: d.remoteJid || d.id || (d.key && d.key.remoteJid) || null,
+    // o nome do campo varia por versão da Evolution: unreadCount | unreadMessages | unread
+    unread: d.unreadCount ?? d.unreadMessages ?? d.unread ?? null,
+  }));
+  log.info('diag.chats_event', { event: ev, chats });
+  return true;
+}
+
 async function handleZapiWebhook(req, res) {
   const tenant = req.tenant;
   const log = req.log;
@@ -344,6 +367,10 @@ async function handleZapiWebhook(req, res) {
 
   // ACK imediato (processamento é assíncrono).
   res.status(200).json({ status: 'ok' });
+
+  // DIAGNÓSTICO TEMPORÁRIO — ver _diagChatsEvent. Loga e retorna p/ eventos chats.*/contacts.*
+  // (que hoje já eram descartados). REMOVER após responder o Q1 do ADR-042.
+  if (_diagChatsEvent(req.body, log)) return;
 
   // Fatia 3 — EXCLUSÃO (apagar p/ todos): evento dedicado messages.delete OU protocolMessage
   // REVOKE embutido em update/upsert. NÃO é mensagem nova — marca deleted_at e retorna, ANTES
