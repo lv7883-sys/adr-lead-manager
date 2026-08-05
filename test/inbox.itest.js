@@ -50,6 +50,10 @@ before(async () => {
       person_id uuid, kind text, value_raw text);
     CREATE TABLE person (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, display_name text);
+    -- Fila de toques da Janis (migr. 092) — a projeção do inbox marca renovacao.toque a partir daqui.
+    CREATE TABLE renovacao_touchpoint (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid,
+      phone text, marco text, status text DEFAULT 'pendente');
     -- Espelho da migr. 085 (a query usa br_phone_key sem schema; aqui vive em public).
     CREATE OR REPLACE FUNCTION br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
       WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
@@ -121,6 +125,14 @@ async function contrato(tenant, phoneRaw, diasAteVencer, over = {}) {
   await c.query(`INSERT INTO contact_point (tenant_id, person_id, kind, value_raw)
                  VALUES ($1,$2,'phone',$3)`, [tenant, pid, valueRaw]);
   return said;
+}
+
+// Toque da Janis (migr. 092) ligado a um telefone. value_raw no formato da Extranet (força br_phone_key).
+async function touchpoint(tenant, phoneRaw, marco = 'D-10', over = {}) {
+  const localDig = String(phoneRaw).replace(/\D/g, '').replace(/^55/, '');
+  const valueRaw = over.valueRaw || `((${localDig.slice(0, 2)}))${localDig.slice(2)}`;
+  await c.query(`INSERT INTO renovacao_touchpoint (tenant_id, phone, marco, status) VALUES ($1,$2,$3,$4)`,
+    [tenant, valueRaw, marco, over.status || 'pendente']);
 }
 
 const list = (tenant, opts = {}) => inbox.listConversations(c, tenant, opts);
@@ -293,6 +305,28 @@ test('(8) view=renovacoes: janela + rastro de vencidos + saída automática (ADR
   const todas = (await list(tenant, { view: 'todas', limit: 50 })).items;
   assert.ok(byExt(todas, H(700)).renovacao, 'renovacao presente na visão todas (etiqueta)');
   assert.equal(byExt(todas, H(704)).renovacao, null, 'sem contrato => renovacao null');
+});
+
+test('(8b) renovacao.toque: marca a conversa com toque pendente da Janis (D-2 > D-10; sumido quando não-pendente)', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000eb'; await cfg(tenant, 7);
+  // a) contrato + toque D-10 pendente → renovacao.toque = 'D-10'
+  const cA = await conv(tenant, H(720)); await msg(cA); await contrato(tenant, D(720), 10);
+  await touchpoint(tenant, D(720), 'D-10');
+  // b) mesma pessoa com D-10 e D-2 pendentes → prefere D-2
+  const cB = await conv(tenant, H(721)); await msg(cB); await contrato(tenant, D(721), 2);
+  await touchpoint(tenant, D(721), 'D-10'); await touchpoint(tenant, D(721), 'D-2');
+  // c) toque já enviado (não-pendente) → sem toque
+  const cC = await conv(tenant, H(722)); await msg(cC); await contrato(tenant, D(722), 8);
+  await touchpoint(tenant, D(722), 'D-10', { status: 'enviado' });
+  // d) contrato sem toque → toque null
+  const cD = await conv(tenant, H(723)); await msg(cD); await contrato(tenant, D(723), 40);
+
+  const { items } = await list(tenant, { view: 'todas', limit: 50 });
+  const ext = (n) => byExt(items, H(n));
+  assert.equal(ext(720).renovacao.toque, 'D-10', 'toque pendente marca a conversa');
+  assert.equal(ext(721).renovacao.toque, 'D-2', 'com D-10 e D-2, prefere o D-2');
+  assert.equal(ext(722).renovacao.toque, null, 'toque enviado não marca');
+  assert.equal(ext(723).renovacao.toque, null, 'contrato sem toque → toque null');
 });
 
 test('(9) nome empilhado: cadastro > lead > pushName > número', async () => {

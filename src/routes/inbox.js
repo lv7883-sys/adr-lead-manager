@@ -183,6 +183,16 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
          AND br_phone_key(cp.value_raw) <> ''
        GROUP BY 1
     ),
+    -- Toque de renovação PENDENTE da Janis (migr. 092): marca a conversa cujo responsável tem um
+    -- rascunho D-10/D-2 na fila. É ADITIVO (não muda o filtro da aba) — o dashboard usa p/ badgear
+    -- "toque pronto" e subir ao topo. Prefere D-2 (mais urgente) quando há os dois.
+    toque AS (
+      SELECT br_phone_key(phone) AS rk,
+             (array_agg(marco ORDER BY (marco = 'D-2') DESC))[1] AS marco
+        FROM renovacao_touchpoint
+       WHERE tenant_id = $1 AND status = 'pendente' AND br_phone_key(phone) <> ''
+       GROUP BY 1
+    ),
     -- Nome do CADASTRO (canônico): telefone → person.display_name pela MESMA chave br_phone_key.
     -- O aluno não vira lead, então sem isto a lista mostra o número. min() = 1 nome por telefone.
     pess AS (
@@ -198,6 +208,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       SELECT
         m.conversation_id, m.channel, m.external_id, m.ident, m.conversation_kind,
         rn.venc AS venc, (rn.venc - current_date)::int AS venc_dias,
+        tq.marco AS toque_marco,
         m.lead_id, m.lead_status, m.lead_desfecho,
         -- Nome EMPILHADO (usa ao máximo o canônico): cadastro → lead → pushName do WhatsApp → número.
         COALESCE(pe.display_name, m.lead_name,
@@ -226,6 +237,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       CROSS JOIN cfg
       LEFT JOIN last_act la ON la.conversation_id = m.conversation_id
       LEFT JOIN renov rn ON rn.rk = m.rkey AND m.rkey <> ''
+      LEFT JOIN toque tq ON tq.rk = m.rkey AND m.rkey <> ''
       LEFT JOIN pess pe ON pe.rk = m.rkey AND m.rkey <> ''
       -- alias m2 = a MESMA linha de lead, so p/ os fragmentos SQL do lifecycle.js (que
       -- esperam colunas status/desfecho num alias). LATERAL de 1 linha, sem custo.
@@ -268,9 +280,11 @@ function mapConversationRow(r) {
     // ADR-049: presente quando a pessoa tem contrato com vencimento (renovação). venc = data ISO
     // (YYYY-MM-DD); dias = dias até vencer (negativo = vencido). O estágio (D-45/30/15/7/vencido)
     // é rotulado no dashboard, reusando a lógica da régua.
-    renovacao: r.venc ? {
-      venc: r.venc instanceof Date ? r.venc.toISOString().slice(0, 10) : String(r.venc).slice(0, 10),
+    renovacao: (r.venc || r.toque_marco) ? {
+      venc: r.venc ? (r.venc instanceof Date ? r.venc.toISOString().slice(0, 10) : String(r.venc).slice(0, 10)) : null,
       dias: r.venc_dias == null ? null : Number(r.venc_dias),
+      // 'D-10' | 'D-2' | null — há um rascunho da Janis pronto na fila (migr. 092) p/ esta pessoa.
+      toque: r.toque_marco || null,
     } : null,
   };
 }
