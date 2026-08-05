@@ -10,6 +10,7 @@ PORT="${ITEST_PG_PORT:-55463}"
 CTR="lm-renovacao-itest-pg"
 TENANT_A="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 TENANT_B="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+VALINHOS="ed731a58-62e5-45ad-acba-a5502ff39e92"
 
 cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -36,7 +37,7 @@ docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest >/dev/null
 CREATE SCHEMA lead_manager;
 ALTER ROLE lead_manager_user SET search_path = lead_manager, public;
 CREATE TABLE lead_manager.tenants (id uuid PRIMARY KEY, name text);
-INSERT INTO lead_manager.tenants (id, name) VALUES ('${TENANT_A}','A'), ('${TENANT_B}','B');
+INSERT INTO lead_manager.tenants (id, name) VALUES ('${TENANT_A}','A'), ('${TENANT_B}','B'), ('${VALINHOS}','Valinhos');
 GRANT USAGE ON SCHEMA lead_manager TO lead_manager_user;
 GRANT SELECT ON lead_manager.tenants TO lead_manager_user;
 SQL
