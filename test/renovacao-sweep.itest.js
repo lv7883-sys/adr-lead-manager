@@ -166,3 +166,29 @@ test('R8 renovacaoPrevisao agrupa por faixa dentro do horizonte', async () => {
   const prev2 = await sweep.renovacaoPrevisao(B, { horizonteDias: 45 });
   assert.equal(prev2.contratos.every((c) => c.dias <= 45), true);
 });
+
+// ---------- Fase 2: envio automático (send mockado; sem Evolution real) ----------
+test('R9 auto-envio ON: dispara pendentes (mock), marca enviado(auto), respeita o cap diário', async () => {
+  await setCfg(B, { habilitada: true, auto: true });          // liga a varredura E o automático em B
+  await sweep.processarTenant(B, { gemini: fakeGemini() });   // enfileira os D-10/D-2 de B (>=2)
+  const sent = [];
+  const r = await sweep.autoEnviarTenant(B, {
+    send: async (tid, tp) => { sent.push(tp.id); return { ok: true }; },
+    throttleMs: 0, capDia: 2,
+  });
+  assert.equal(r.enviados, 2, 'envia no máximo o cap (2)');
+  assert.equal(sent.length, 2);
+  const enviadosAuto = await withTenant(B, async (c) => (await c.query(
+    `SELECT count(*)::int AS n FROM lead_manager.renovacao_touchpoint
+      WHERE tenant_id=$1 AND status='enviado' AND auto=true`, [B])).rows[0].n);
+  assert.equal(enviadosAuto, 2, 'marcou 2 como enviado(auto)');
+});
+
+test('R10 auto-envio OFF: não dispara nada', async () => {
+  await setCfg(A, { auto: false });
+  const r = await sweep.autoEnviarTenant(A, {
+    send: async () => { throw new Error('não deveria enviar com o toggle desligado'); },
+    throttleMs: 0,
+  });
+  assert.equal(r.skipped, 'auto_off');
+});

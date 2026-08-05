@@ -20,6 +20,9 @@ const geminiDefault = require('../gemini');
 const logger = require('../logger');
 
 const MARCO_DE = { 10: 'D-10', 2: 'D-2' };
+// Fase 2 — trava anti-ban do envio AUTOMÁTICO (conservador por padrão; ajustável por env).
+const AUTO_CAP_DIA = Number(process.env.RENOVACAO_AUTO_CAP_DIA || 40);        // teto de auto-envios/dia/tenant
+const AUTO_THROTTLE_MS = Number(process.env.RENOVACAO_AUTO_THROTTLE_MS || 4000); // respiro entre envios
 
 // Config de renovação + contexto da Janis do tenant. Sem linha em automacao_config → defaults
 // (habilitada=true, auto=false). school_name (tenant_lead_config) é fallback de contexto.
@@ -196,8 +199,90 @@ async function runRenovacaoSweep(deps = {}) {
   return summary;
 }
 
-module.exports = { runRenovacaoSweep, processarTenant, renovacaoPrevisao, loadRenovacaoConfig };
+// ============================================================================
+// FASE 2 — ENVIO AUTOMÁTICO (gated pelo toggle renovacao_auto_envio, DESLIGADO por padrão).
+// Roda num horário comercial (cron 10h) e dispara os toques pendentes de quem LIGOU o automático,
+// reusando o MESMO caminho de envio do inbox (ensureConversation + sendMessage → cria a conversa se
+// precisar e persiste na timeline). Trava anti-ban: teto diário + throttle. NÃO usa o Scheduler (D2):
+// o volume da renovação é baixo — o Scheduler é p/ campanha em massa de verdade.
+// ============================================================================
+
+// Envia UM toque (cria/encontra a conversa e manda). Injetável no teste via deps.send.
+// require LAZY do inbox: só carrega o módulo (pesado) quando de fato há auto-envio.
+async function _autoSendOne(tenantId, tp) {
+  const { ensureConversation, sendMessage } = require('../routes/inbox');
+  const conv = await withTenant(tenantId, (c) => ensureConversation(c, tenantId, tp.phone));
+  if (!conv) return { ok: false, reason: 'telefone_invalido' };
+  return sendMessage(tenantId, conv.conversation_id, { text: tp.rascunho, sender: 'renovacao-auto' });
+}
+
+async function autoEnviarTenant(tenantId, deps = {}) {
+  const send = deps.send || _autoSendOne;
+  const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const cap = deps.capDia != null ? deps.capDia : AUTO_CAP_DIA;
+  const throttle = deps.throttleMs != null ? deps.throttleMs : AUTO_THROTTLE_MS;
+
+  const cfg = await withTenant(tenantId, (c) => loadRenovacaoConfig(c, tenantId));
+  if (!cfg.habilitada || !cfg.autoEnvio) return { tenant_id: tenantId, skipped: !cfg.autoEnvio ? 'auto_off' : 'desabilitada' };
+
+  const jaHoje = await withTenant(tenantId, async (c) => (await c.query(
+    `SELECT count(*)::int AS n FROM lead_manager.renovacao_touchpoint
+      WHERE tenant_id=$1 AND auto=true AND enviado_em::date = current_date`, [tenantId])).rows[0].n);
+  const restante = Math.max(0, cap - jaHoje);
+  if (restante <= 0) return { tenant_id: tenantId, enviados: 0, cap_atingido: true };
+
+  const pend = await withTenant(tenantId, async (c) => (await c.query(
+    `SELECT id, phone, rascunho FROM lead_manager.renovacao_touchpoint
+      WHERE tenant_id=$1 AND status='pendente' AND coalesce(phone,'')<>''
+      ORDER BY (marco='D-2') DESC, fim_vigencia ASC
+      LIMIT $2`, [tenantId, restante])).rows);
+
+  const resumo = { tenant_id: tenantId, elegiveis: pend.length, enviados: 0, falhas: 0 };
+  for (let i = 0; i < pend.length; i++) {
+    const tp = pend[i];
+    try {
+      const r = await send(tenantId, tp);
+      if (r && r.ok) {
+        await withTenant(tenantId, (c) => c.query(
+          `UPDATE lead_manager.renovacao_touchpoint
+              SET status='enviado', auto=true, enviado_em=now(), updated_at=now()
+            WHERE id=$1 AND status='pendente'`, [tp.id]));
+        resumo.enviados += 1;
+      } else {
+        resumo.falhas += 1;
+        logger.warn('renovacao.auto.falha', { tenant_id: tenantId, touchpoint: tp.id, reason: r && r.reason });
+      }
+    } catch (err) {
+      resumo.falhas += 1;
+      logger.error('renovacao.auto.erro', { tenant_id: tenantId, touchpoint: tp.id, error: err.message });
+    }
+    if (throttle && i < pend.length - 1) await sleep(throttle);
+  }
+  return resumo;
+}
+
+// Ciclo de auto-envio em todos os tenants ativos. deps injetáveis p/ teste (pool, send, sleep, capDia, throttleMs).
+async function runRenovacaoAutoEnvio(deps = {}) {
+  const q = deps.pool || pool;
+  const tenants = (await q.query('SELECT tenant_id FROM tenants_active()')).rows;
+  const summary = { tenants: tenants.length, enviados: 0, falhas: 0, perTenant: [] };
+  for (const t of tenants) {
+    try {
+      const r = await autoEnviarTenant(t.tenant_id, deps);
+      summary.enviados += r.enviados || 0;
+      summary.falhas += r.falhas || 0;
+      summary.perTenant.push(r);
+    } catch (err) {
+      logger.error('renovacao.auto.tenant_error', { tenant_id: t.tenant_id, error: err.message });
+    }
+  }
+  logger.info('renovacao.auto.done', { tenants: summary.tenants, enviados: summary.enviados, falhas: summary.falhas });
+  return summary;
+}
+
+module.exports = { runRenovacaoSweep, processarTenant, renovacaoPrevisao, loadRenovacaoConfig, runRenovacaoAutoEnvio, autoEnviarTenant };
 
 if (require.main === module) {
-  runRenovacaoSweep().then(() => process.exit(0)).catch((e) => { logger.error('renovacao.fatal', { error: e.message }); process.exit(1); });
+  const fn = process.argv.includes('--auto') ? runRenovacaoAutoEnvio : runRenovacaoSweep;
+  fn().then(() => process.exit(0)).catch((e) => { logger.error('renovacao.fatal', { error: e.message }); process.exit(1); });
 }
