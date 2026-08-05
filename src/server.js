@@ -146,13 +146,26 @@ if (require.main === module) {
 
   // Renovação Fase 1: sweep diário de contratos vencendo — 08:00 America/Sao_Paulo (após a
   // sincronização de contratos das 04h do host). Gera rascunhos da Janis (D-10/D-2) na fila.
-  const { runRenovacaoSweep } = require('./jobs/renovacao-sweep');
+  const { runRenovacaoSweep, runRenovacaoAutoEnvio } = require('./jobs/renovacao-sweep');
   cron.schedule(
     '0 8 * * *',
     () => {
       runRenovacaoSweep()
         .then((s) => logger.info('cron.renovacao_sweep.done', { tenants: s.tenants, marcos: s.marcos, enfileirados: s.enfileirados }))
         .catch((e) => logger.error('cron.renovacao_sweep.error', { error: e.message }));
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+
+  // Renovação Fase 2: envio AUTOMÁTICO dos toques pendentes — 10:00 America/Sao_Paulo (horário
+  // comercial). Só age nos tenants que LIGARAM o toggle renovacao_auto_envio; DESLIGADO por padrão.
+  // Trava anti-ban (teto diário + throttle) dentro do job.
+  cron.schedule(
+    '0 10 * * *',
+    () => {
+      runRenovacaoAutoEnvio()
+        .then((s) => logger.info('cron.renovacao_auto.done', { tenants: s.tenants, enviados: s.enviados, falhas: s.falhas }))
+        .catch((e) => logger.error('cron.renovacao_auto.error', { error: e.message }));
     },
     { timezone: 'America/Sao_Paulo' }
   );
