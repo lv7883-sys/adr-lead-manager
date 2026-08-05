@@ -427,6 +427,26 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
   };
 }
 
+// Outbound-first: ENCONTRA (por br_phone_key) ou CRIA a conversa de WhatsApp de um telefone, para
+// enviar um toque PROATIVO a quem nunca escreveu (renovação D-10/D-2, e futuramente reativação/NPS).
+// Reusa a thread existente mesmo que o formato do external_id difira (evita duplicar conversa); só
+// cria quando não há. external_id no formato do webhook (dígitos com DDI 55). Retorna { conversation_id, created }.
+async function ensureConversation(client, tenantId, phoneRaw) {
+  const dig = String(phoneRaw || '').replace(/\D/g, '');
+  if (dig.length < 8) return null;
+  const existing = (await client.query(
+    `SELECT id FROM conversations
+      WHERE tenant_id = $1 AND channel = 'whatsapp' AND br_phone_key(external_id) = br_phone_key($2)
+      ORDER BY updated_at DESC LIMIT 1`, [tenantId, dig])).rows[0];
+  if (existing) return { conversation_id: existing.id, created: false };
+  const externalId = dig.startsWith('55') ? dig : ((dig.length === 10 || dig.length === 11) ? `55${dig}` : dig);
+  const ins = (await client.query(
+    `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, 'whatsapp', $2)
+     ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
+     RETURNING id`, [tenantId, externalId])).rows[0];
+  return { conversation_id: ins.id, created: true };
+}
+
 // Envia mensagem humana (E12-06) numa conversa, via Z-API/Evolution, e persiste a saída.
 // Reusa o MESMO caminho da rota /leads/:id/mensagem (evolution.sendText + outbound.registrarSaida),
 // mas ancorado em conversation_id (telefone = conversations.external_id) — serve não-lead também.
@@ -563,6 +583,28 @@ router.post('/:tenantId/inbox/conversations/:conversationId/mensagem', authentic
     res.json({ ok: true, message_id: out.message_id, quoted: out.quoted });
   } catch (err) {
     logger.error('tenant.inbox.mensagem.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
+
+// POST /tenant/:tenantId/inbox/iniciar — envio PROATIVO (outbound-first): encontra/cria a conversa do
+// telefone e envia. Base p/ disparar o toque de renovação (D-10/D-2) a quem NÃO tem thread. { phone, text }.
+router.post('/:tenantId/inbox/iniciar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const phone = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  if (String(phone).replace(/\D/g, '').length < 8) return res.status(400).json({ error: 'invalid_phone' });
+  if (!text) return res.status(400).json({ error: 'empty_text' });
+  try {
+    const conv = await withTenant(req.tenantId, (c) => ensureConversation(c, req.tenantId, phone));
+    if (!conv) return res.status(400).json({ error: 'invalid_phone' });
+    const out = await sendMessage(req.tenantId, conv.conversation_id, { text, sender: req.tenantRole });
+    if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
+    if (out.unsupported) return res.status(422).json({ error: 'canal_nao_suportado', channel: out.unsupported });
+    if (out.reason === 'tenant_sem_evolution') return res.status(400).json({ error: 'tenant_sem_evolution' });
+    if (out.reason && out.reason.startsWith('instancia=')) return res.status(409).json({ error: out.reason });
+    res.json({ ok: true, conversation_id: conv.conversation_id, created: conv.created, message_id: out.message_id });
+  } catch (err) {
+    logger.error('tenant.inbox.iniciar.error', { tenant_id: req.tenantId, error: err.message });
     res.status(502).json({ error: 'send_failed', detail: err.message });
   }
 });
@@ -1040,6 +1082,7 @@ module.exports.mapConversationRow = mapConversationRow;
 module.exports.listConversations = listConversations;
 module.exports.getConversationThread = getConversationThread;
 module.exports.sendMessage = sendMessage;
+module.exports.ensureConversation = ensureConversation;
 module.exports.ocultarComentario = ocultarComentario;
 module.exports.deleteInboxMessage = deleteInboxMessage;
 module.exports.editInboxMessage = editInboxMessage;
