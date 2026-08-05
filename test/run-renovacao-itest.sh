@@ -55,8 +55,8 @@ CREATE TABLE lead_manager.tenant_lead_config (tenant_id uuid PRIMARY KEY, school
 GRANT SELECT, INSERT, UPDATE, DELETE ON lead_manager.automacao_config, lead_manager.tenant_lead_config TO lead_manager_user;
 SQL
 
-echo "[itest] migration 091 (renovacao_touchpoint + toggles) …"
-docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest < "$ROOT/db/migrations/091_renovacao_touchpoint.sql" >/dev/null
+echo "[itest] migration 092 (renovacao_touchpoint + toggles) …"
+docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest < "$ROOT/db/migrations/092_renovacao_touchpoint.sql" >/dev/null
 
 echo "[itest] rodando node --test…"
 cd "$ROOT"
