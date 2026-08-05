@@ -479,6 +479,51 @@ async function sugestaoRetomada({ history = [], leadName, schoolContext, engajam
   });
 }
 
+// Renovação (Fase 1) — a Janis SUGERE o toque antecipado de renovação (D-10 / D-2), ancorado no
+// FIM DO CONTRATO (nunca em "última aula": fim_vigencia é o fim administrativo do contrato e pode
+// não coincidir com a última aula real). Retorna {estrategia, rascunho} no molde do sugestaoRetomada.
+// NÃO inventa preço/horário/valores — isso é papel da recepção.
+function _dataPt(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : String(iso || '');
+}
+async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, dataFimISO, schoolContext, nomeIa } = {}) {
+  const dataFim = _dataPt(dataFimISO);
+  const paraAluno = !responsavelNome || responsavelNome === alunoNome;
+  const quem = paraAluno
+    ? `o próprio aluno (${alunoNome || 'aluno'})`
+    : `${responsavelNome} (responsável pelo aluno ${alunoNome || 'aluno'})`;
+  const timing = marco === 'D-2'
+    ? 'Faltam POUCOS dias para o contrato encerrar (reforço final): tom gentil de urgência, ' +
+      'convidando a confirmar a renovação a tempo para não haver interrupção nas aulas.'
+    : 'O contrato encerra em cerca de 10 dias (aviso antecipado): tom acolhedor e sem pressão, ' +
+      'convidando a renovar com antecedência para garantir a continuidade e o mesmo horário.';
+  const sys =
+    'Você é a assistente de uma escola de música e vai escrever uma mensagem PROATIVA de WhatsApp ' +
+    'convidando à RENOVAÇÃO do contrato de um aluno. A mensagem é enviada para ' + quem + '. ' +
+    timing +
+    `\n\nO contrato de ${servico || 'aulas'} encerra em ${dataFim}. Ancore a mensagem NESSA data de ` +
+    'encerramento do contrato — NÃO diga "sua última aula é em X dias" (pode estar errado). ' +
+    'NÃO invente preço, valores, horários novos, descontos ou condições que não estejam nas ' +
+    'informações da escola. Seja curta, calorosa e natural, sem emojis.' +
+    (nomeIa ? `\n\nAssine como "${nomeIa}" (nome da assistente da escola).` : '') +
+    (schoolContext ? `\n\nINFORMAÇÕES DA ESCOLA (referência):\n${schoolContext}` : '') +
+    '\n\nResponda SOMENTE com JSON: {"estrategia":"<por que e como abordar, 1-2 frases para a ' +
+    'recepcionista>","rascunho":"<mensagem pronta para enviar, tom da escola, sem emojis>"}';
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({
+      model: modelName,
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.4 },
+    });
+    const res = await model.generateContent(sys);
+    const p = JSON.parse(res.response.text());
+    return {
+      estrategia: typeof p.estrategia === 'string' ? p.estrategia.trim() : '',
+      rascunho: typeof p.rascunho === 'string' ? p.rascunho.trim() : '',
+    };
+  });
+}
+
 // E1-02 — classifica a intenção do lead em uma das 4 categorias.
 const INTENTS = ['SCHEDULE_INTEREST', 'PRICE_INQUIRY', 'GENERAL_INFO', 'OUT_OF_SCOPE'];
 const INTENT_PROMPT = `Classifique a intenção principal da mensagem do lead de uma escola de música em UMA categoria:
@@ -673,6 +718,7 @@ module.exports = {
   improveReply,
   assistantReply,
   sugestaoRetomada,
+  sugestaoRenovacao,
   classifyIntent,
   extractQualification,
   classifySongGenres,        // Rock Hour (ADR-039)
