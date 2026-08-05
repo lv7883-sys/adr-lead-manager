@@ -24,7 +24,8 @@ before(async () => {
   await c.query(`
     CREATE TABLE conversations (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
-      external_id text, conversation_kind text DEFAULT 'DIRECT', updated_at timestamptz DEFAULT now(), last_read_at timestamptz);
+      external_id text, conversation_kind text DEFAULT 'DIRECT', updated_at timestamptz DEFAULT now(), last_read_at timestamptz,
+      UNIQUE (tenant_id, channel, external_id));   -- prod tem (engine.js/ensureConversation dependem)
     CREATE TABLE messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), conversation_id uuid, role text,
       body text, media_type text, edited_at timestamptz, deleted_at timestamptz,
@@ -327,6 +328,24 @@ test('(8b) renovacao.toque: marca a conversa com toque pendente da Janis (D-2 > 
   assert.equal(ext(721).renovacao.toque, 'D-2', 'com D-10 e D-2, prefere o D-2');
   assert.equal(ext(722).renovacao.toque, null, 'toque enviado não marca');
   assert.equal(ext(723).renovacao.toque, null, 'contrato sem toque → toque null');
+});
+
+test('(8c) ensureConversation (outbound-first): cria e REUSA por br_phone_key', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000ec'; await cfg(tenant, 7);
+  // 1) telefone sem thread → cria
+  const a = await inbox.ensureConversation(c, tenant, '5519991112233');
+  assert.equal(a.created, true, 'cria quando não há');
+  assert.ok(a.conversation_id);
+  // 2) mesmo número, formato diferente (sem 55, com pontuação) → REUSA a mesma conversa
+  const b = await inbox.ensureConversation(c, tenant, '(19) 99111-2233');
+  assert.equal(b.created, false, 'reusa por br_phone_key');
+  assert.equal(b.conversation_id, a.conversation_id);
+  // 3) conversa que veio de inbound (external_id +55…) → reusa, não duplica
+  const cid = await conv(tenant, H(913));
+  const d = await inbox.ensureConversation(c, tenant, D(913));
+  assert.equal(d.created, false); assert.equal(d.conversation_id, cid);
+  // 4) telefone inválido → null
+  assert.equal(await inbox.ensureConversation(c, tenant, '123'), null);
 });
 
 test('(9) nome empilhado: cadastro > lead > pushName > número', async () => {
