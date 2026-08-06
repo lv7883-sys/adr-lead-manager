@@ -270,17 +270,17 @@ test('(6) keyset pagination sem sobreposição', async () => {
   assert.ok(p2.items.every((i) => !ids1.has(i.conversation_id)), 'página 2 não repete a 1');
 });
 
-test('(8) view=renovacoes: janela + rastro de vencidos + saída automática (ADR-049)', async () => {
+test('(8) view=renovacoes: janela APERTADA [hoje-60d, hoje+15d] + saída automática (ADR-049 rev.)', async () => {
   const tenant = '00000000-0000-0000-0000-0000000000e9'; await cfg(tenant, 7);
-  // a) vence em 15d -> ENTRA
+  // a) vence em 15d -> ENTRA (borda de cima)
   const cDentro = await conv(tenant, H(700)); await msg(cDentro); await contrato(tenant, D(700), 15);
-  // b) vence em 200d (longe) -> FORA (> hoje+90d)
-  const cLonge = await conv(tenant, H(701)); await msg(cLonge); await contrato(tenant, D(701), 200);
-  // c) venceu há 10d (rastro recuperável) -> ENTRA
-  const cVenc = await conv(tenant, H(702)); await msg(cVenc); await contrato(tenant, D(702), -10);
-  // d) venceu há 60d -> FORA (< hoje-30d)
-  const cVelho = await conv(tenant, H(703)); await msg(cVelho); await contrato(tenant, D(703), -60);
-  // e) sem contrato -> FORA
+  // b) vence em 40d -> FORA (cedo demais: fora da janela apertada) — MUDANÇA vs. ADR-049 original
+  const cCedo = await conv(tenant, H(701)); await msg(cCedo); await contrato(tenant, D(701), 40);
+  // c) venceu há 20d (recuperável) -> ENTRA
+  const cVenc = await conv(tenant, H(702)); await msg(cVenc); await contrato(tenant, D(702), -20);
+  // d) venceu há 80d -> FORA (< hoje-60d)
+  const cVelho = await conv(tenant, H(703)); await msg(cVelho); await contrato(tenant, D(703), -80);
+  // e) sem contrato e sem contexto -> FORA
   const cSem = await conv(tenant, H(704)); await msg(cSem);
   // f) RENOVOU: contrato vencia em 5d, mas há um novo +300d -> MAX(fim_vigencia) vai pra frente -> SAI
   const cRenov = await conv(tenant, H(705)); await msg(cRenov);
@@ -294,18 +294,38 @@ test('(8) view=renovacoes: janela + rastro de vencidos + saída automática (ADR
 
   assert.ok(ext(700), 'vence em 15d entra');
   assert.equal(ext(700).renovacao.dias, 15, 'dias até vencer = 15');
-  assert.ok(!ext(701), 'vence em 200d fica fora (>90d)');
-  assert.ok(ext(702), 'vencido há 10d entra (rastro)');
-  assert.equal(ext(702).renovacao.dias, -10, 'dias negativo p/ vencido');
-  assert.ok(!ext(703), 'vencido há 60d fica fora (<-30d)');
-  assert.ok(!ext(704), 'sem contrato fica fora');
+  assert.ok(!ext(701), 'vence em 40d fica fora (cedo demais)');
+  assert.ok(ext(702), 'vencido há 20d entra');
+  assert.equal(ext(702).renovacao.dias, -20, 'dias negativo p/ vencido');
+  assert.ok(!ext(703), 'vencido há 80d fica fora (<-60d)');
+  assert.ok(!ext(704), 'sem contrato e sem contexto fica fora');
   assert.ok(!ext(705), 'renovou (novo contrato +300d) sai sozinho — saída automática');
   assert.ok(!ext(706), 'contrato ausente da fonte é ignorado');
 
-  // ordenado por atividade, e a etiqueta (renovacao) aparece TAMBÉM na visão geral p/ rotular
+  // a etiqueta (renovacao) segue aparecendo na visão TODAS p/ rotular (janela do renov não muda)
   const todas = (await list(tenant, { view: 'todas', limit: 50 })).items;
   assert.ok(byExt(todas, H(700)).renovacao, 'renovacao presente na visão todas (etiqueta)');
   assert.equal(byExt(todas, H(704)).renovacao, null, 'sem contrato => renovacao null');
+});
+
+test('(8d) view=renovacoes: CONTEXTO puxa a conversa independente do vencimento (toque OU "renovar")', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000ed'; await cfg(tenant, 7);
+  // p1) vence em 40d (fora da janela) MAS tem toque enviado -> ENTRA (contexto)
+  const c1 = await conv(tenant, H(730)); await msg(c1); await contrato(tenant, D(730), 40);
+  await touchpoint(tenant, D(730), 'D-10', { status: 'enviado' });
+  // p2) vence em 40d MAS a pessoa FALOU em renovar -> ENTRA (contexto)
+  const c2 = await conv(tenant, H(731)); await msg(c2, { body: 'oi, quero renovar o contrato' }); await contrato(tenant, D(731), 40);
+  // p3) vence em 40d e NADA (sem toque, sem palavra) -> FORA
+  const c3 = await conv(tenant, H(732)); await msg(c3, { body: 'bom dia' }); await contrato(tenant, D(732), 40);
+  // p4) SEM contrato, mas com toque pendente -> ENTRA (contexto, sem vencimento)
+  const c4 = await conv(tenant, H(733)); await msg(c4); await touchpoint(tenant, D(733), 'D-2', { status: 'pendente' });
+
+  const { items } = await list(tenant, { view: 'renovacoes', limit: 50 });
+  const ext = (n) => byExt(items, H(n));
+  assert.ok(ext(730), 'D-40 com toque enviado entra (contexto)');
+  assert.ok(ext(731), 'D-40 com "renovar" na conversa entra (contexto)');
+  assert.ok(!ext(732), 'D-40 sem contexto fica fora');
+  assert.ok(ext(733), 'sem contrato mas com toque pendente entra (contexto)');
 });
 
 test('(8b) renovacao.toque: marca a conversa com toque pendente da Janis (D-2 > D-10; sumido quando não-pendente)', async () => {
