@@ -98,11 +98,13 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   }
   if (v === 'leads') extra.push('is_lead = true');
   else if (v === 'nao_lead') extra.push('is_lead = false');
-  // Renovações: contrato com vencimento na janela (≤ hoje+90d) + rastro de vencidos (≥ hoje-30d).
-  // Janela ampla e configurável no futuro (ADR-049 §3.2); por ora fixa. Saída automática = quando
-  // renova, MAX(fim_vigencia) vai pra frente e o contrato deixa a janela sozinho.
+  // Renovações (ADR-049 rev.): o que está DE FATO em jogo de renovação, não "vence algum dia".
+  //   (a) PERTO do fim ou VENCIDO — janela apertada [hoje-60d, hoje+15d] (sai o "cedo demais" D-16..90);
+  //   (b) OU em CONTEXTO de renovação (renov_ctx): tem toque nosso (pendente/enviado) ou a pessoa
+  //       falou em renovar — INDEPENDENTE do vencimento. Saída automática segue valendo: ao renovar,
+  //       MAX(fim_vigencia) vai pra frente e, sem toque/contexto, o contrato deixa a janela sozinho.
   else if (v === 'renovacoes') {
-    extra.push("venc IS NOT NULL AND venc <= current_date + interval '90 days' AND venc >= current_date - interval '30 days'");
+    extra.push("((venc IS NOT NULL AND venc <= current_date + interval '15 days' AND venc >= current_date - interval '60 days') OR renov_ctx)");
   }
 
   // Keyset entra como MAIS UM predicado do WHERE (não como cláusula solta — senão vira
@@ -193,6 +195,13 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
        WHERE tenant_id = $1 AND status = 'pendente' AND br_phone_key(phone) <> ''
        GROUP BY 1
     ),
+    -- CONTEXTO de renovação (ADR-049 rev.): telefone que TEM/TEVE toque de renovação nosso
+    -- (pendente OU já enviado). Independe do vencimento — é sinal de que a renovação está EM JOGO.
+    renovtp AS (
+      SELECT DISTINCT br_phone_key(phone) AS rk
+        FROM renovacao_touchpoint
+       WHERE tenant_id = $1 AND status IN ('pendente','enviado') AND br_phone_key(phone) <> ''
+    ),
     -- Nome do CADASTRO (canônico): telefone → person.display_name pela MESMA chave br_phone_key.
     -- O aluno não vira lead, então sem isto a lista mostra o número. min() = 1 nome por telefone.
     pess AS (
@@ -209,6 +218,13 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
         m.conversation_id, m.channel, m.external_id, m.ident, m.conversation_kind,
         rn.venc AS venc, (rn.venc - current_date)::int AS venc_dias,
         tq.marco AS toque_marco,
+        -- EM CONTEXTO de renovação: tem toque nosso (pendente/enviado) OU a pessoa FALOU em renovar
+        -- (mensagem recebida com "renova…" nos últimos 120d). Usado pelo filtro da aba, não muda o resto.
+        (rc.rk IS NOT NULL
+          OR EXISTS (SELECT 1 FROM messages mk
+                      WHERE mk.conversation_id = m.conversation_id AND mk.role = 'USER'
+                        AND mk.body ILIKE '%renova%'
+                        AND mk.received_at > now() - interval '120 days')) AS renov_ctx,
         m.lead_id, m.lead_status, m.lead_desfecho,
         -- Nome EMPILHADO (usa ao máximo o canônico): cadastro → lead → pushName do WhatsApp → número.
         COALESCE(pe.display_name, m.lead_name,
@@ -238,6 +254,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       LEFT JOIN last_act la ON la.conversation_id = m.conversation_id
       LEFT JOIN renov rn ON rn.rk = m.rkey AND m.rkey <> ''
       LEFT JOIN toque tq ON tq.rk = m.rkey AND m.rkey <> ''
+      LEFT JOIN renovtp rc ON rc.rk = m.rkey AND m.rkey <> ''
       LEFT JOIN pess pe ON pe.rk = m.rkey AND m.rkey <> ''
       -- alias m2 = a MESMA linha de lead, so p/ os fragmentos SQL do lifecycle.js (que
       -- esperam colunas status/desfecho num alias). LATERAL de 1 linha, sem custo.
