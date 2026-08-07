@@ -36,7 +36,8 @@ before(async () => {
       received_at timestamptz DEFAULT now(), raw jsonb);
     CREATE TABLE leads (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, phone text,
-      meta_psid text, status text, desfecho text, origem text, created_at timestamptz DEFAULT now());
+      meta_psid text, status text, desfecho text, origem text, aborda_renovacao boolean,
+      created_at timestamptz DEFAULT now());
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, dormancy_days int DEFAULT 7);
     -- Canônico (ADR-049): contrato ↔ pessoa ↔ telefone. Schema mínimo — só as colunas que a
     -- view=renovacoes lê (sem FKs, como os demais itests).
@@ -103,10 +104,11 @@ async function outbound(tenant, extDigits, over = {}) {
 }
 async function lead(tenant, over = {}) {
   return (await c.query(
-    `INSERT INTO leads (tenant_id, name, phone, meta_psid, status, desfecho, origem)
-     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    `INSERT INTO leads (tenant_id, name, phone, meta_psid, status, desfecho, origem, aborda_renovacao)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
     [tenant, over.name || null, over.phone || null, over.meta_psid || null,
-     over.status || 'QUALIFYING', over.desfecho || null, over.origem || null])).rows[0].id;
+     over.status || 'QUALIFYING', over.desfecho || null, over.origem || null,
+     over.aborda_renovacao === true ? true : null])).rows[0].id;
 }
 
 // Semeia um contrato (service_account) ligado a um telefone via person→contact_point→account_member.
@@ -308,23 +310,25 @@ test('(8) view=renovacoes: janela APERTADA [hoje-60d, hoje+15d] + saída automá
   assert.equal(byExt(todas, H(704)).renovacao, null, 'sem contrato => renovacao null');
 });
 
-test('(8d) view=renovacoes: CONTEXTO puxa a conversa independente do vencimento (toque OU "renovar")', async () => {
+test('(8d) view=renovacoes: CONTEXTO puxa a conversa independente do vencimento (toque OU tema-IA)', async () => {
   const tenant = '00000000-0000-0000-0000-0000000000ed'; await cfg(tenant, 7);
   // p1) vence em 40d (fora da janela) MAS tem toque enviado -> ENTRA (contexto)
   const c1 = await conv(tenant, H(730)); await msg(c1); await contrato(tenant, D(730), 40);
   await touchpoint(tenant, D(730), 'D-10', { status: 'enviado' });
-  // p2) vence em 40d MAS a pessoa FALOU em renovar -> ENTRA (contexto)
-  const c2 = await conv(tenant, H(731)); await msg(c2, { body: 'oi, quero renovar o contrato' }); await contrato(tenant, D(731), 40);
-  // p3) vence em 40d e NADA (sem toque, sem palavra) -> FORA
-  const c3 = await conv(tenant, H(732)); await msg(c3, { body: 'bom dia' }); await contrato(tenant, D(732), 40);
+  // p2) vence em 40d MAS a IA marcou o TEMA renovação (leads.aborda_renovacao) -> ENTRA (contexto)
+  const c2 = await conv(tenant, H(731)); await msg(c2); await contrato(tenant, D(731), 40);
+  await lead(tenant, { phone: D(731), status: 'NOT_LEAD', aborda_renovacao: true });
+  // p3) vence em 40d e NADA (sem toque, IA não marcou) -> FORA
+  const c3 = await conv(tenant, H(732)); await msg(c3); await contrato(tenant, D(732), 40);
+  await lead(tenant, { phone: D(732), status: 'NOT_LEAD' });   // aborda_renovacao = null
   // p4) SEM contrato, mas com toque pendente -> ENTRA (contexto, sem vencimento)
   const c4 = await conv(tenant, H(733)); await msg(c4); await touchpoint(tenant, D(733), 'D-2', { status: 'pendente' });
 
   const { items } = await list(tenant, { view: 'renovacoes', limit: 50 });
   const ext = (n) => byExt(items, H(n));
   assert.ok(ext(730), 'D-40 com toque enviado entra (contexto)');
-  assert.ok(ext(731), 'D-40 com "renovar" na conversa entra (contexto)');
-  assert.ok(!ext(732), 'D-40 sem contexto fica fora');
+  assert.ok(ext(731), 'D-40 com tema-IA (aborda_renovacao) entra (contexto)');
+  assert.ok(!ext(732), 'D-40 sem contexto (IA não marcou) fica fora');
   assert.ok(ext(733), 'sem contrato mas com toque pendente entra (contexto)');
 });
 

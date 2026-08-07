@@ -189,14 +189,18 @@ SEGURANÇA: na dúvida entre RESOLVIDO e esperar resposta, escolha AGUARDANDO_RE
 NUNCA marque RESOLVIDO sem certeza (não podemos esconder um cliente que ainda espera).
 
 Responda SOMENTE com JSON:
-{"is_lead":<true|false>,"confidence":<0.0-1.0>,"reasoning":"<1-2 frases em pt-BR citando o contexto da conversa>","intent":"NOVA_OPORTUNIDADE"|"ROTINA_CLIENTE"|"INTERNO"|"CANDIDATO"|"INDEFINIDO","conversation_state":"AGUARDANDO_RECEPCAO"|"AGUARDANDO_CLIENTE"|"RESOLVIDO"|"INDEFINIDO","state_reasoning":"<1 frase: com quem está a bola e por quê>"}
+{"is_lead":<true|false>,"confidence":<0.0-1.0>,"reasoning":"<1-2 frases em pt-BR citando o contexto da conversa>","intent":"NOVA_OPORTUNIDADE"|"ROTINA_CLIENTE"|"INTERNO"|"CANDIDATO"|"INDEFINIDO","conversation_state":"AGUARDANDO_RECEPCAO"|"AGUARDANDO_CLIENTE"|"RESOLVIDO"|"INDEFINIDO","state_reasoning":"<1 frase: com quem está a bola e por quê>","aborda_renovacao":<true|false>}
 
 REGRAS:
 - "confidence" = PROBABILIDADE de a conversa CORRENTE ser uma oportunidade de novo negócio (0.0 = certeza que NÃO; 1.0 = certeza que SIM). Use a escala toda; na dúvida real, ~0.5.
 - "is_lead" = true quando confidence >= 0.5.
 - "intent": NOVA_OPORTUNIDADE (novo negócio), ROTINA_CLIENTE (cliente em assunto de rotina), INTERNO (equipe/operacional), CANDIDATO (candidato a vaga de trabalho — quer trabalhar/dar aula, não estudar nem contratar), INDEFINIDO (não dá pra decidir).
 - "reasoning": curto, citando o que na conversa justifica a decisão.
-- "conversation_state": o estado ATUAL pela regra acima. "state_reasoning": 1 frase curta.`;
+- "conversation_state": o estado ATUAL pela regra acima. "state_reasoning": 1 frase curta.
+- "aborda_renovacao": true se a conversa (mesmo que de rotina, e INDEPENDENTE de is_lead) trata de
+  RENOVAR ou CONTINUAR o contrato/matrícula/plano vigente — inclui hesitação sobre continuar. Ex.:
+  "vou renovar", "quero seguir mais um semestre", "não sei se continuo", "quero manter as aulas",
+  "posso parar?", "até quando vai meu plano". Caso contrário, false.`;
 }
 
 // ADR sugestão-de-etapa — bloco de prompt das DEFINIÇÕES de etapa do tenant.
@@ -267,6 +271,7 @@ async function classifyConversa({ conversation, examples, stageDefinitions, lead
       intent: CONVERSA_INTENTS.includes(parsed.intent) ? parsed.intent : 'INDEFINIDO',
       conversation_state: state,
       state_reasoning: typeof parsed.state_reasoning === 'string' ? parsed.state_reasoning : null,
+      aborda_renovacao: parsed.aborda_renovacao === true,   // tema renovação (independe de is_lead)
       suggested_stage: suggestedStage,
       stage_reasoning: suggestedStage && typeof parsed.stage_reasoning === 'string'
         ? parsed.stage_reasoning : null,

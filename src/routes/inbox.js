@@ -134,10 +134,10 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     matched AS (
       SELECT c.*, l.id AS lead_id, l.name AS lead_name, l.phone AS lead_phone,
              l.meta_psid AS lead_psid, l.status AS lead_status, l.desfecho AS lead_desfecho,
-             l.origem AS lead_origem
+             l.origem AS lead_origem, l.aborda_renovacao AS lead_aborda_renovacao
         FROM conv c
         LEFT JOIN LATERAL (
-          SELECT l.id, l.name, l.phone, l.meta_psid, l.status, l.desfecho, l.origem
+          SELECT l.id, l.name, l.phone, l.meta_psid, l.status, l.desfecho, l.origem, l.aborda_renovacao
             FROM leads l
            WHERE c.ident <> '' AND ${IDENT_LEAD} = c.ident
            ORDER BY l.created_at ASC
@@ -218,13 +218,9 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
         m.conversation_id, m.channel, m.external_id, m.ident, m.conversation_kind,
         rn.venc AS venc, (rn.venc - current_date)::int AS venc_dias,
         tq.marco AS toque_marco,
-        -- EM CONTEXTO de renovação: tem toque nosso (pendente/enviado) OU a pessoa FALOU em renovar
-        -- (mensagem recebida com "renova…" nos últimos 120d). Usado pelo filtro da aba, não muda o resto.
-        (rc.rk IS NOT NULL
-          OR EXISTS (SELECT 1 FROM messages mk
-                      WHERE mk.conversation_id = m.conversation_id AND mk.role = 'USER'
-                        AND mk.body ILIKE '%renova%'
-                        AND mk.received_at > now() - interval '120 days')) AS renov_ctx,
+        -- EM CONTEXTO de renovação: tem toque nosso (pendente/enviado) OU a IA marcou o TEMA renovação
+        -- na conversa (leads.aborda_renovacao, migr. 093 — interpretação no gate 0, não palavra-chave).
+        (rc.rk IS NOT NULL OR m.lead_aborda_renovacao IS TRUE) AS renov_ctx,
         m.lead_id, m.lead_status, m.lead_desfecho,
         -- Nome EMPILHADO (usa ao máximo o canônico): cadastro → lead → pushName do WhatsApp → número.
         COALESCE(pe.display_name, m.lead_name,

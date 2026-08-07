@@ -61,7 +61,7 @@ const short = (s, n) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
     let r;
     try { r = await classifyRetry(conversa, examples); }
     catch (e) { plan.push({ lead, state: null, note: 'erro: ' + short(e.message, 40) }); continue; }
-    plan.push({ lead, state: r.conversation_state, state_reasoning: r.state_reasoning, intent: r.intent });
+    plan.push({ lead, state: r.conversation_state, state_reasoning: r.state_reasoning, intent: r.intent, aborda_renovacao: r.aborda_renovacao === true });
     await new Promise((s) => setTimeout(s, 700)); // pacing anti-429
   }
 
@@ -82,8 +82,8 @@ const short = (s, n) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
   await withTenant(TENANT, async (c) => {
     for (const p of writes) {
       await c.query(
-        `UPDATE leads SET conversation_state=$2, state_reasoning=$3, state_computed_at=now() WHERE id=$1`,
-        [p.lead.id, p.state, p.state_reasoning || null]
+        `UPDATE leads SET conversation_state=$2, state_reasoning=$3, aborda_renovacao=$4, state_computed_at=now() WHERE id=$1`,
+        [p.lead.id, p.state, p.state_reasoning || null, p.aborda_renovacao === true]
       );
     }
   });
