@@ -365,6 +365,39 @@ async function loadRealHistory(tenantId, { conversationId, ident, leadId }) {
   return rows.map((r) => ({ role: r.role, content: r.content, at: r.received_at }));
 }
 
+// ADR-049 (dedup de conversa) — FIND-OR-CREATE de conversa normalizando telefone BR. Espelha
+// src/routes/inbox.js:ensureConversation: casa por br_phone_key (migr 085), então "+55DDD9NNNN"
+// (E.164 antigo do funil, telBR.toE164BR) e "55DDD9NNNN" (webhook/outbound-first) do MESMO contato
+// REUSAM a mesma thread em vez de duplicar. Só normaliza WhatsApp 1:1; grupos (@g.us) e canais Meta
+// (external_id = psid, não-telefônico) casam EXATO pelo ON CONFLICT, como antes. Ao criar, grava o
+// canônico em DÍGITOS sem "+" (igual normalizeMessage/ensureConversation). Retorna { id, inserted }.
+async function upsertConversation(c, tenantId, channel, externalId) {
+  const raw = String(externalId == null ? '' : externalId);
+  const dig = raw.replace(/\D/g, '');
+  const telefonico = channel === 'whatsapp' && !/@g\.us$/i.test(raw) && dig.length >= 10;
+  if (telefonico) {
+    const existing = (await c.query(
+      `SELECT id FROM conversations
+        WHERE tenant_id = $1 AND channel = 'whatsapp' AND br_phone_key(external_id) = br_phone_key($2)
+        ORDER BY updated_at DESC LIMIT 1`, [tenantId, dig])).rows[0];
+    if (existing) {
+      await c.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [existing.id]);
+      return { id: existing.id, inserted: false };
+    }
+    const canonical = dig.startsWith('55') ? dig : ((dig.length === 10 || dig.length === 11) ? `55${dig}` : dig);
+    const ins = (await c.query(
+      `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, 'whatsapp', $2)
+       ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
+       RETURNING id, (xmax = 0) AS inserted`, [tenantId, canonical])).rows[0];
+    return { id: ins.id, inserted: ins.inserted === true };
+  }
+  const ins = (await c.query(
+    `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
+     ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
+     RETURNING id, (xmax = 0) AS inserted`, [tenantId, channel, raw])).rows[0];
+  return { id: ins.id, inserted: ins.inserted === true };
+}
+
 // F — captura do inbound mesmo quando NÃO vira lead (NOT_LEAD ou erro de triagem), pra
 // o histórico do thread ficar completo. Grava só a conversa + a mensagem do lead (sem
 // criar lead nem rascunho). Idempotente por external_message_id. Best-effort: nunca lança.
@@ -372,14 +405,7 @@ async function captureInboundOnly(tenantId, channel, externalId, msg, rawBody) {
   if (!externalId || !msg.body) return;
   try {
     await withTenant(tenantId, async (c) => {
-      const conv = (
-        await c.query(
-          `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
-           ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
-           RETURNING id`,
-          [tenantId, channel, externalId]
-        )
-      ).rows[0];
+      const conv = await upsertConversation(c, tenantId, channel, externalId);
       await c.query(
         `INSERT INTO messages
            (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw,
@@ -463,14 +489,7 @@ async function captureDiscarded(tenantId, channel, externalId, msg, rawBody, rea
   if (!externalId || !msg.body) return;
   try {
     await withTenant(tenantId, async (c) => {
-      const conv = (
-        await c.query(
-          `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
-           ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
-           RETURNING id`,
-          [tenantId, channel, externalId]
-        )
-      ).rows[0];
+      const conv = await upsertConversation(c, tenantId, channel, externalId);
       await c.query(
         `INSERT INTO messages
            (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw, discarded, discard_reason)
@@ -525,14 +544,7 @@ async function captureForReview(tenantId, channel, externalId, msg, rawBody, cls
            cls.confidence, cls.reasoning, JSON.stringify(cls.profile_signals || [])]
         );
       }
-      const conv = (
-        await c.query(
-          `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
-           ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
-           RETURNING id`,
-          [tenantId, channel, externalId]
-        )
-      ).rows[0];
+      const conv = await upsertConversation(c, tenantId, channel, externalId);
       await c.query(
         `INSERT INTO messages
            (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw,
@@ -696,14 +708,7 @@ async function captureForPendingClassification(tenantId, channel, externalId, ms
           [tenantId, msg.sender || phone, phone, errMessage || null]
         );
       }
-      const conv = (
-        await c.query(
-          `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
-           ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
-           RETURNING id`,
-          [tenantId, channel, externalId]
-        )
-      ).rows[0];
+      const conv = await upsertConversation(c, tenantId, channel, externalId);
       await c.query(
         `INSERT INTO messages
            (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw,
@@ -925,14 +930,7 @@ async function captureRoutedEstablished(tenantId, channel, externalId, msg, rawB
            route.confidence, route.reasoning, signals, route.conversation_state || null, route.state_reasoning || null, route.aborda_renovacao === true]
         );
       }
-      const conv = (
-        await c.query(
-          `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, $2, $3)
-           ON CONFLICT (tenant_id, channel, external_id) DO UPDATE SET updated_at = now()
-           RETURNING id`,
-          [tenantId, channel, externalId]
-        )
-      ).rows[0];
+      const conv = await upsertConversation(c, tenantId, channel, externalId);
       await c.query(
         `INSERT INTO messages
            (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw,
@@ -1599,14 +1597,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       );
     }
 
-    const conv = await c.query(
-      `INSERT INTO conversations (tenant_id, channel, external_id)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (tenant_id, channel, external_id)
-       DO UPDATE SET updated_at = now()
-       RETURNING id, (xmax = 0) AS inserted`,
-      [tenantId, channel, phone || psid]
-    );
+    const conv = await upsertConversation(c, tenantId, channel, phone || psid);
 
     const cfg = (
       await c.query(
@@ -1630,8 +1621,8 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       leadId: lead.rows[0].id,
       leadStatus: lead.rows[0].status,
       leadInserted: lead.rows[0].inserted === true,
-      conversationId: conv.rows[0].id,
-      convInserted: conv.rows[0].inserted === true,
+      conversationId: conv.id,
+      convInserted: conv.inserted === true,
       storedQual: qual,
       config: cfg || {
         school_name: name || 'Escola',
@@ -1920,6 +1911,7 @@ module.exports = {
   processInbound, generateDraftForLead, mergeQualification, loadRealHistory, reprocessPendingLead,
   captureGroupInbound,   // ADR-042 E14/B1 — ingestão de mensagem de grupo
   captureComment,        // ADR-042/Meta — ingestão de comentário de post (IG/FB)
+  upsertConversation,    // ADR-049 — find-or-create de conversa por br_phone_key (dedup); exposto p/ itest
   CONFIDENCE_THRESHOLD,
   // Helpers puros expostos p/ teste (resiliência 503).
   _isTransientAIError, _pendingWindowExpired, _decideConversaRoute, PENDING_CLASSIFICATION_WINDOW_MS,
