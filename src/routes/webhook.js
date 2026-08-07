@@ -10,6 +10,7 @@ const evolution = require('../evolution');
 const gemini = require('../gemini');
 const media = require('../media');
 const autoReply = require('../autoReply');   // ADR-006+ resposta automática fora do horário
+const waSync = require('../waSync');          // reconexão → backfill do histórico offline
 const { decrypt } = require('../crypto');
 
 const router = express.Router();
@@ -396,6 +397,14 @@ async function handleZapiWebhook(req, res) {
 
   // ACK imediato (processamento é assíncrono).
   res.status(200).json({ status: 'ok' });
+
+  // RECONEXÃO — a Evolution voltou a ficar 'open'. Caminho INSTANTÂNEO do backfill (o cron por
+  // tempo é o baseline). Só age quando o evento chega; debounce interno evita re-disparo em
+  // heartbeats de 'open'. NÃO é mensagem — trata e retorna. Best-effort: nunca derruba o webhook.
+  if (String(req.body?.event || '').toLowerCase() === 'connection.update') {
+    waSync.handleConnectionUpdate(tenant.id, req.body).catch((e) => log.warn('wa_sync.webhook_unhandled', { error: e.message }));
+    return;
+  }
 
   // Fatia 3 — EXCLUSÃO (apagar p/ todos): evento dedicado messages.delete OU protocolMessage
   // REVOKE embutido em update/upsert. NÃO é mensagem nova — marca deleted_at e retorna, ANTES

@@ -1103,6 +1103,25 @@ router.post('/:tenantId/inbox/conversations/:conversationId/desmarcar-lead', aut
   }
 });
 
+// Backfill do histórico do WhatsApp SOB DEMANDA — força o pull do que a Evolution não reencaminhou
+// (mensagens trocadas em outro aparelho durante uma queda). Mesmo motor da reconexão automática,
+// acionável na hora pela recepção/admin. `deep=true` amplia a janela. Idempotente (dedup) e seguro
+// (só histórico: não roda funil/IA). Confirma a instância 'open' antes (senão 409).
+router.post('/:tenantId/inbox/sincronizar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  try {
+    const waSync = require('../waSync');
+    const deep = req.body?.deep !== false;   // default: profundo (varredura ampla)
+    const out = await waSync.backfillTenant(req.tenantId, { deep });
+    if (out.skipped === 'sem_evolution') return res.status(400).json({ error: 'tenant_sem_evolution' });
+    if (out.skipped === 'nao_open') return res.status(409).json({ error: 'instancia=' + (out.state || 'desconhecido') });
+    if (out.skipped === 'status_falhou') return res.status(502).json({ error: 'status_falhou', detail: out.detail });
+    res.json({ ok: true, conversas: out.conversas, inseridos: out.inseridos, erros: out.erros });
+  } catch (err) {
+    logger.error('tenant.inbox.sincronizar.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'sync_failed', detail: err.message });
+  }
+});
+
 module.exports = router;
 // Superfície testável (itest exercita a lógica SQL contra Postgres real).
 module.exports.buildConversationsSql = buildConversationsSql;

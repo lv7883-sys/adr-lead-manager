@@ -219,4 +219,43 @@ async function findChats({ instance, apikey }, body = {}) {
   return [];
 }
 
-module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, _toggle9BR };
+// Reconexão (backfill do histórico) — lê UMA PÁGINA das mensagens de uma conversa do STORE da
+// própria Evolution (POST /chat/findMessages). READ-ONLY. Diferente do webhook (push, ao vivo),
+// aqui PUXAMOS: quando a instância volta de uma queda, o Baileys recebe via history-sync as
+// mensagens trocadas offline (inclusive as respostas da recepção feitas em OUTRO aparelho /
+// WhatsApp Web, fromMe=true) — que a Evolution NÃO reencaminha como messages.upsert. Elas ficam
+// no store da Evolution e só chegam ao Regente por este pull. `remoteJid` = jid do contato
+// (…@s.whatsapp.net). O caller PAGINA (page 1..N) para trazer o HISTÓRICO INTEIRO, não só o fim.
+//
+// O formato do body e do retorno VARIA por versão da Evolution v2 — mandamos a forma canônica
+// ({ where: { key: { remoteJid } }, page, offset }) e normalizamos o retorno para SEMPRE devolver
+// { records, page, pages, total, pageSize }: `records` = array de registros crus (cada um com
+// .key/.message/.messageTimestamp); `pages`/`total` = metadados de paginação quando a versão os
+// expõe (null quando não), p/ o caller saber quando parar.
+async function findMessages({ instance, apikey }, remoteJid, opts = {}) {
+  const page = opts.page || 1;
+  const pageSize = opts.pageSize || 100;
+  const body = { where: { key: { remoteJid: String(remoteJid) } }, page, offset: pageSize };
+  const d = await req('POST', `/chat/findMessages/${encodeURIComponent(instance)}`, apikey, body);
+  let records = [];
+  let pages = null; let total = null; let currentPage = page;
+  if (Array.isArray(d)) {
+    records = d;
+  } else if (d && d.messages && Array.isArray(d.messages.records)) {   // v2 paginado
+    records = d.messages.records;
+    pages = d.messages.pages != null ? Number(d.messages.pages) : null;
+    total = d.messages.total != null ? Number(d.messages.total) : null;
+    currentPage = d.messages.currentPage != null ? Number(d.messages.currentPage) : page;
+  } else if (d && Array.isArray(d.records)) {
+    records = d.records;
+    pages = d.pages != null ? Number(d.pages) : null;
+    total = d.total != null ? Number(d.total) : null;
+  } else if (d && Array.isArray(d.messages)) {
+    records = d.messages;
+  } else if (d && Array.isArray(d.data)) {
+    records = d.data;
+  }
+  return { records, page: currentPage, pages, total, pageSize };
+}
+
+module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, findMessages, _toggle9BR };

@@ -13,13 +13,32 @@
 const { withTenant } = require('./db');
 const logger = require('./logger');
 
+// Placeholder legível p/ mídia SEM texto (findMessages não baixa o binário no backfill — a
+// CURA de mídia do webhook é p/ o fluxo ao vivo). Sem isso, uma foto/áudio trocado durante a
+// queda viria com body vazio e seria DESCARTADO por importarConversa (some da timeline). O
+// placeholder garante que a bolha aparece ("[imagem]", "[áudio]"…), preservando a fidelidade.
+function _placeholderMidia(m) {
+  if (!m || typeof m !== 'object') return null;
+  if (m.imageMessage) return m.imageMessage.caption ? `[imagem] ${m.imageMessage.caption}` : '[imagem]';
+  if (m.videoMessage) return m.videoMessage.caption ? `[vídeo] ${m.videoMessage.caption}` : '[vídeo]';
+  if (m.audioMessage) return '[áudio]';
+  if (m.stickerMessage) return '[figurinha]';
+  if (m.documentMessage || m.documentWithCaptionMessage) {
+    const d = m.documentMessage || (m.documentWithCaptionMessage.message && m.documentWithCaptionMessage.message.documentMessage);
+    return `[documento: ${(d && d.fileName) || 'arquivo'}]`;
+  }
+  if (m.reactionMessage && m.reactionMessage.text) return `[reação] ${m.reactionMessage.text}`;
+  return null;
+}
+
 // Registro cru do Evolution (findMessages) -> { externalMessageId, fromMe, body, sender, atMs }.
 // Retorna null p/ registro sem id de mensagem. atMs = epoch ms (Evolution manda em segundos).
 function mapEvolutionMsg(rec) {
   if (!rec || !rec.key) return null;
   const m = rec.message || {};
-  const body = (m.conversation != null ? m.conversation
+  let body = (m.conversation != null ? m.conversation
     : (m.extendedTextMessage && m.extendedTextMessage.text != null ? m.extendedTextMessage.text : null));
+  if (body == null || body === '') body = _placeholderMidia(m) || '';
   return {
     externalMessageId: rec.key.id ? String(rec.key.id) : null,
     fromMe: !!rec.key.fromMe,

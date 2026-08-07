@@ -180,6 +180,18 @@ if (require.main === module) {
       .catch((e) => logger.error('cron.reprocessar_pendentes.error', { error: e.message }));
   });
 
+  // Reconexão do WhatsApp — a cada 3 min detecta a volta da instância para 'open' e PUXA o
+  // histórico que a Evolution não reencaminha (respostas da recepção feitas em outro aparelho
+  // enquanto a sessão estava offline), mesclando idempotentemente em Leads + Caixa de Entrada.
+  // Também roda um safety-net raso quando o último sync está velho. Gatilho por EVENTO (webhook
+  // connection.update) complementa este por TEMPO.
+  const { syncReconnections } = require('./waSync');
+  cron.schedule('*/3 * * * *', () => {
+    syncReconnections()
+      .then((s) => { if (s.reconexoes || s.safety) logger.info('cron.wa_sync.done', s); })
+      .catch((e) => logger.error('cron.wa_sync.error', { error: e.message }));
+  });
+
   // Encerramento gracioso para deploys/rolling restarts.
   const shutdown = (signal) => {
     logger.info('server.shutdown', { signal });
