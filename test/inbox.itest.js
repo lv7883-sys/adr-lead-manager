@@ -59,6 +59,10 @@ before(async () => {
     -- Contatos internos (equipe/dono, ADR-018) — excluídos da aba Renovações.
     CREATE TABLE internal_contacts (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, phone text, name text, type text);
+    -- Renovação resolvida pela recepção (migr. 095) — retira da aba (amarrada ao venc do ciclo).
+    CREATE TABLE renovacao_dismiss (
+      tenant_id uuid, br_key text, venc date, situacao text, por text, em timestamptz DEFAULT now(),
+      PRIMARY KEY (tenant_id, br_key));
     -- Espelho da migr. 085 (a query usa br_phone_key sem schema; aqui vive em public).
     CREATE OR REPLACE FUNCTION br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
       WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
@@ -145,6 +149,13 @@ async function touchpoint(tenant, phoneRaw, marco = 'D-10', over = {}) {
 async function interno(tenant, phoneRaw) {
   await c.query(`INSERT INTO internal_contacts (tenant_id, phone, name, type) VALUES ($1,$2,'Interno','gestor')`,
     [tenant, phoneRaw]);
+}
+// Recepção resolveu a renovação (dismiss) — venc = current_date + vencDias (amarra ao ciclo).
+async function dismiss(tenant, phoneRaw, vencDias) {
+  await c.query(
+    `INSERT INTO renovacao_dismiss (tenant_id, br_key, venc, situacao)
+     VALUES ($1, br_phone_key($2), (current_date + make_interval(days => $3))::date, 'nao_renovou')`,
+    [tenant, phoneRaw, vencDias]);
 }
 
 const list = (tenant, opts = {}) => inbox.listConversations(c, tenant, opts);
@@ -393,6 +404,20 @@ test('(8e) view=renovacoes: contato INTERNO nunca aparece (mesmo com contrato na
   const { items } = await list(tenant, { view: 'renovacoes', limit: 50 });
   assert.ok(!byExt(items, H(740)), 'interno fica fora da aba mesmo com contrato+toque');
   assert.ok(byExt(items, H(741)), 'não-interno com contrato na janela entra (controle)');
+});
+
+test('(8f) view=renovacoes: recepção RESOLVE → sai da aba; dismiss de outro ciclo (venc) não retira', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000ef'; await cfg(tenant, 7);
+  // contrato vencido 20d (na janela) → entra
+  const cv = await conv(tenant, H(750)); await msg(cv); await contrato(tenant, D(750), -20);
+  assert.ok(byExt((await list(tenant, { view: 'renovacoes', limit: 50 })).items, H(750)), 'entra antes de resolver');
+  // recepção resolve com o MESMO venc do ciclo → SAI
+  await dismiss(tenant, D(750), -20);
+  assert.ok(!byExt((await list(tenant, { view: 'renovacoes', limit: 50 })).items, H(750)), 'resolvido sai da aba');
+  // outro contato: dismiss com venc que NÃO casa (ex.: ciclo antigo) → segue na aba
+  const cv2 = await conv(tenant, H(751)); await msg(cv2); await contrato(tenant, D(751), -20);
+  await dismiss(tenant, D(751), 5);
+  assert.ok(byExt((await list(tenant, { view: 'renovacoes', limit: 50 })).items, H(751)), 'dismiss de outro venc não retira (ciclo novo reaparece)');
 });
 
 test('(9) nome empilhado: cadastro > lead > pushName > número', async () => {
