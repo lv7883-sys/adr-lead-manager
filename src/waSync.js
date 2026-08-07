@@ -35,14 +35,39 @@ const MAX_PAGES = Number(process.env.WA_SYNC_MAX_PAGES || 500);
 // Safety-net: se a instância está 'open' mas o último sync foi há mais que isso, roda shallow.
 const SAFETY_NET_HOURS = Number(process.env.WA_SYNC_SAFETY_HOURS || 6);
 
-// external_id (telefone cru / jid) -> remoteJid do WhatsApp. Grupos (@g.us) ficam de fora deste
-// backfill (foco no 1:1 do lead) -> null. Sem dígitos -> null.
-function _remoteJid(externalId) {
-  const s = String(externalId || '');
+// Telefone (dígitos) de um chat da Evolution. Duas formas de jid coexistem no store:
+//   • <telefone>@s.whatsapp.net  → o próprio jid É o telefone.
+//   • <lid>@lid                  → identificador de privacidade novo do WhatsApp; o telefone real
+//     vem no key.remoteJidAlt de qualquer mensagem do chat. Sem alt → não dá p/ rotear (null).
+// Grupos (@g.us) e sem telefone → null (ficam de fora do backfill 1:1).
+function _telefoneDoChat(jid, records) {
+  const s = String(jid || '');
   if (/@g\.us$/i.test(s)) return null;
-  const digits = s.replace(/\D+/g, '');
-  if (!digits) return null;
-  return `${digits}@s.whatsapp.net`;
+  if (/@s\.whatsapp\.net$/i.test(s)) { const d = s.replace(/\D+/g, ''); return d || null; }
+  if (/@lid$/i.test(s)) {
+    for (const r of (records || [])) {
+      const alt = r && r.key && r.key.remoteJidAlt;
+      if (alt && /@s\.whatsapp\.net$/i.test(String(alt))) { const d = String(alt).replace(/\D+/g, ''); if (d) return d; }
+    }
+    return null;
+  }
+  const d = s.replace(/\D+/g, '');
+  return d || null;
+}
+
+// Resolve o external_id CANÔNICO da conversa p/ o telefone (dígitos), espelhando engine.upsertConversation:
+// casa uma conversa existente por br_phone_key (evita duplicata +55 vs 55, migr 094) e reusa o external_id
+// dela; se não existe, devolve a forma canônica '55…' (mesma que o funil criaria). Assim o importarConversa
+// (ON CONFLICT exato) casa a conversa certa ou cria a canônica — igual ao fluxo ao vivo.
+async function _resolverExternalId(tenantId, dig, run) {
+  return run(tenantId, async (c) => {
+    const ex = (await c.query(
+      `SELECT external_id FROM conversations
+        WHERE tenant_id = $1 AND channel = 'whatsapp' AND br_phone_key(external_id) = br_phone_key($2)
+        ORDER BY updated_at DESC LIMIT 1`, [tenantId, dig])).rows[0];
+    if (ex) return ex.external_id;
+    return dig.startsWith('55') ? dig : ((dig.length === 10 || dig.length === 11) ? `55${dig}` : dig);
+  });
 }
 
 // Lê o estado guardado da conexão do tenant (wa_sync_state). Null se ainda não há linha.
@@ -66,107 +91,96 @@ async function _gravarEstado(tenantId, patch, run) {
     vals));
 }
 
-// TODAS as conversas de WhatsApp do tenant (deep/reconexão). Grupos fora. Teto só anti-patológico.
-// Ordena pela mais recente (as que mais provavelmente truncaram primeiro).
-async function _todasConversas(tenantId, limite, run) {
-  return run(tenantId, async (c) => (await c.query(
-    `SELECT c.id, c.external_id
-       FROM conversations c
-      WHERE c.tenant_id = $1 AND c.channel = 'whatsapp' AND c.external_id NOT LIKE '%@g.us'
-      ORDER BY c.updated_at DESC
-      LIMIT $2`,
-    [tenantId, limite])).rows);
+// Puxa o HISTÓRICO INTEIRO de um chat (paginando por where.key.remoteJid até acabar) e devolve os
+// registros crus. Best-effort: nunca lança. Retorna { records, paginas, erro? }.
+async function _puxarMensagens(evolution, creds, jid) {
+  const records = []; let paginas = 0; let erro = null;
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    let res;
+    try { res = await evolution.findMessages(creds, jid, { page, pageSize: PAGE_SIZE }); }
+    catch (e) { erro = e.message; break; }
+    const reg = (res && Array.isArray(res.records)) ? res.records : [];
+    paginas = page;
+    if (!reg.length) break;
+    records.push(...reg);
+    // Para por metadados de páginas (a Evolution v2 expõe messages.pages) OU página incompleta.
+    if (res.pages != null) { if (page >= res.pages) break; }
+    else if (reg.length < (res.pageSize || PAGE_SIZE)) break;
+  }
+  return { records, paginas, erro };
 }
 
-// Conversas de WhatsApp com atividade dentro da janela (inbound, saída OU criação recente) —
-// usado só no safety-net periódico (shallow). Grupos fora. Ordena pela mais recente.
-async function _conversasAtivas(tenantId, windowDays, limite, run) {
-  return run(tenantId, async (c) => (await c.query(
-    `SELECT c.id, c.external_id
-       FROM conversations c
-      WHERE c.tenant_id = $1
-        AND c.channel = 'whatsapp'
-        AND c.external_id NOT LIKE '%@g.us'
-        AND (
-          c.created_at > now() - make_interval(days => $2::int)
-          OR EXISTS (SELECT 1 FROM messages m
-                      WHERE m.conversation_id = c.id
-                        AND m.received_at > now() - make_interval(days => $2::int))
-          OR EXISTS (SELECT 1 FROM staff_outbound_samples s
-                      WHERE s.tenant_id = c.tenant_id AND s.external_id = c.external_id
-                        AND s.received_at > now() - make_interval(days => $2::int))
-        )
-      ORDER BY c.updated_at DESC
-      LIMIT $3`,
-    [tenantId, windowDays, limite])).rows);
-}
-
-// Puxa o histórico INTEIRO de UMA conversa da Evolution (pagina página a página até acabar) e
-// mescla idempotentemente. Passa o external_id JÁ ARMAZENADO na conversa (não o jid recomposto)
-// p/ o ON CONFLICT casar a conversa existente — evita recriar duplicata (+55 vs 55, ver migr 094).
-// Best-effort: nunca lança. Retorna { inseridos, pulados, paginas, erro? }.
-async function backfillConversa(tenantId, creds, conv, deps = {}) {
+// Backfill de UM chat da Evolution: pagina o histórico, deriva o telefone (cobre @lid via
+// remoteJidAlt), resolve a conversa canônica (br_phone_key) e mescla via importarConversa
+// (idempotente). Retorna { inseridos, pulados, paginas, erro? }.
+async function backfillChat(tenantId, creds, chat, deps = {}) {
   const evolution = deps.evolution || evolutionDefault;
   const run = deps.withTenant || withTenant;
   const importar = deps.importarConversa || importarConversa;
-  const remoteJid = _remoteJid(conv.external_id);
-  if (!remoteJid) return { inseridos: 0, pulados: 0, paginas: 0 };
+  const jid = chat && (chat.remoteJid || chat.id || chat.jid);
+  if (!jid || /@g\.us$/i.test(String(jid))) return { inseridos: 0, pulados: 0, paginas: 0 };
 
-  let inseridos = 0; let pulados = 0; let paginas = 0; let ultimoErro = null;
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    let res;
-    try {
-      res = await evolution.findMessages(creds, remoteJid, { page, pageSize: PAGE_SIZE });
-    } catch (e) { ultimoErro = e.message; break; }
-    const registros = (res && Array.isArray(res.records)) ? res.records : [];
-    paginas = page;
-    if (!registros.length) break;                 // acabou o histórico
-    const msgs = registros.map(mapEvolutionMsg).filter(Boolean);
-    if (msgs.length) {
-      const r = await importar(tenantId, { channel: 'whatsapp', externalId: conv.external_id, msgs }, { withTenant: run });
-      inseridos += r.inseridos || 0; pulados += r.pulados || 0;
-      if (r.erro) ultimoErro = r.erro;
-    }
-    // Condições de parada: metadados de páginas (quando a versão os expõe) OU página incompleta
-    // (menos registros que o tamanho da página = era a última). Assim puxamos TUDO, sem "últimas X".
-    if (res.pages != null) { if (page >= res.pages) break; }
-    else if (registros.length < PAGE_SIZE) break;
-  }
-  return { inseridos, pulados, paginas, erro: ultimoErro };
+  const { records, paginas, erro } = await _puxarMensagens(evolution, creds, jid);
+  if (erro && !records.length) return { inseridos: 0, pulados: 0, paginas, erro };
+  if (!records.length) return { inseridos: 0, pulados: 0, paginas };
+
+  const dig = _telefoneDoChat(jid, records);
+  if (!dig) return { inseridos: 0, pulados: 0, paginas, erro: 'sem_telefone' };
+
+  const msgs = records.map(mapEvolutionMsg).filter(Boolean);
+  if (!msgs.length) return { inseridos: 0, pulados: 0, paginas };
+
+  const externalId = await _resolverExternalId(tenantId, dig, run);
+  const r = await importar(tenantId, { channel: 'whatsapp', externalId, msgs }, { withTenant: run });
+  return { inseridos: r.inseridos || 0, pulados: r.pulados || 0, paginas, erro: r.erro || erro };
 }
 
-// Backfill de UM tenant. Confirma 'open' (a queda pode ter voltado a cair) e mescla. `deep`
-// (reconexão) = TODAS as conversas; senão = só as ativas na janela (safety-net). Cada conversa é
-// paginada por INTEIRO. Atualiza wa_sync_state.last_sync_at ao fim.
-// Retorna { skipped? , state?, conversas, inseridos, erros }.
+// Backfill de UM tenant. Confirma 'open' (a queda pode ter voltado a cair). Itera os CHATS da
+// própria Evolution (findChats = fonte de verdade dos jids reais, inclusive @lid). `deep`
+// (reconexão) = TODOS os chats; senão = só os com atividade na janela (safety-net). Cada chat é
+// paginado por INTEIRO. Atualiza wa_sync_state.last_sync_at ao fim.
+// Retorna { skipped? , state?, chats, inseridos, erros }.
 async function backfillTenant(tenantId, opts = {}, deps = {}) {
   const evolution = deps.evolution || evolutionDefault;
   const run = deps.withTenant || withTenant;
   const getCreds = deps.credsForTenant || credsForTenant;
 
   const creds = await getCreds(tenantId);
-  if (!creds || !creds.instance || !creds.apikey) return { skipped: 'sem_evolution', conversas: 0, inseridos: 0, erros: 0 };
+  if (!creds || !creds.instance || !creds.apikey) return { skipped: 'sem_evolution', chats: 0, inseridos: 0, erros: 0 };
 
   let st;
   try { st = await evolution.status({ instance: creds.instance, apikey: creds.apikey }); }
-  catch (e) { return { skipped: 'status_falhou', detail: e.message, conversas: 0, inseridos: 0, erros: 0 }; }
-  if (!st || st.state !== 'open') return { skipped: 'nao_open', state: st && st.state, conversas: 0, inseridos: 0, erros: 0 };
+  catch (e) { return { skipped: 'status_falhou', detail: e.message, chats: 0, inseridos: 0, erros: 0 }; }
+  if (!st || st.state !== 'open') return { skipped: 'nao_open', state: st && st.state, chats: 0, inseridos: 0, erros: 0 };
+
+  let chats;
+  try { chats = await evolution.findChats({ instance: creds.instance, apikey: creds.apikey }); }
+  catch (e) { return { skipped: 'findchats_falhou', detail: e.message, chats: 0, inseridos: 0, erros: 0 }; }
 
   const deep = !!opts.deep;
-  // DEEP = TODAS as conversas (reconexão: garante 100%); SHALLOW = só as ativas na janela.
-  const convs = deep
-    ? await _todasConversas(tenantId, opts.limite || DEEP_LIMIT_CONVERSAS, run)
-    : await _conversasAtivas(tenantId, opts.windowDays || SHALLOW_WINDOW_DAYS, opts.limite || SHALLOW_LIMIT_CONVERSAS, run);
+  const limite = opts.limite || (deep ? DEEP_LIMIT_CONVERSAS : SHALLOW_LIMIT_CONVERSAS);
+  const windowDays = opts.windowDays || SHALLOW_WINDOW_DAYS;
+  const corte = deep ? 0 : (Date.now() - windowDays * 86400 * 1000);
+
+  // 1:1 só (grupos fora). No shallow, filtra por updatedAt do chat (a própria Evolution já dá).
+  let alvos = (Array.isArray(chats) ? chats : []).filter((ch) => {
+    const jid = ch && (ch.remoteJid || ch.id || ch.jid);
+    if (!jid || /@g\.us$/i.test(String(jid))) return false;
+    if (deep) return true;
+    const up = ch.updatedAt ? Date.parse(ch.updatedAt) : NaN;
+    return Number.isNaN(up) ? true : up >= corte;   // sem data → inclui (conservador)
+  });
+  if (alvos.length > limite) alvos = alvos.slice(0, limite);
 
   let inseridos = 0; let erros = 0; let ultimoErro = null;
-  for (const conv of convs) {
-    const r = await backfillConversa(tenantId, { instance: creds.instance, apikey: creds.apikey }, conv, deps);
+  for (const chat of alvos) {
+    const r = await backfillChat(tenantId, { instance: creds.instance, apikey: creds.apikey }, chat, deps);
     inseridos += r.inseridos;
-    if (r.erro) { erros += 1; ultimoErro = r.erro; }
+    if (r.erro && r.erro !== 'sem_telefone') { erros += 1; ultimoErro = r.erro; }
   }
   await _gravarEstado(tenantId, { last_sync_at: new Date(), last_error: ultimoErro }, run);
-  logger.info('wa_sync.backfill_tenant', { tenant_id: tenantId, deep, conversas: convs.length, inseridos, erros });
-  return { state: 'open', conversas: convs.length, inseridos, erros, ultimoErro };
+  logger.info('wa_sync.backfill_tenant', { tenant_id: tenantId, deep, chats: alvos.length, inseridos, erros });
+  return { state: 'open', chats: alvos.length, inseridos, erros, ultimoErro };
 }
 
 // Ciclo do cron: p/ cada tenant ativo, lê o status, detecta transição -> 'open' (reconexão) e
@@ -250,6 +264,6 @@ async function handleConnectionUpdate(tenantId, body, deps = {}) {
 }
 
 module.exports = {
-  backfillTenant, backfillConversa, syncReconnections, handleConnectionUpdate,
-  _remoteJid, _estadoDoConnectionUpdate,
+  backfillTenant, backfillChat, syncReconnections, handleConnectionUpdate,
+  _telefoneDoChat, _resolverExternalId, _estadoDoConnectionUpdate,
 };

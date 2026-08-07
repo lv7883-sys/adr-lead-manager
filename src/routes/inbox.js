@@ -1115,7 +1115,8 @@ router.post('/:tenantId/inbox/sincronizar', authenticate, requireTenantAccess(WR
     if (out.skipped === 'sem_evolution') return res.status(400).json({ error: 'tenant_sem_evolution' });
     if (out.skipped === 'nao_open') return res.status(409).json({ error: 'instancia=' + (out.state || 'desconhecido') });
     if (out.skipped === 'status_falhou') return res.status(502).json({ error: 'status_falhou', detail: out.detail });
-    res.json({ ok: true, conversas: out.conversas, inseridos: out.inseridos, erros: out.erros });
+    if (out.skipped === 'findchats_falhou') return res.status(502).json({ error: 'findchats_falhou', detail: out.detail });
+    res.json({ ok: true, chats: out.chats, inseridos: out.inseridos, erros: out.erros });
   } catch (err) {
     logger.error('tenant.inbox.sincronizar.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'sync_failed', detail: err.message });
