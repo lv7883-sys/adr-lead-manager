@@ -534,6 +534,33 @@ async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, d
   });
 }
 
+// Fase D2 — lê a conversa e ADIVINHA o desfecho da renovação (renovou / não vai renovar / indefinido).
+// Só SUGESTÃO (a recepção confirma). Espelha o qualidade-ia.lerRenovacao do dashboard. Best-effort.
+async function lerDesfechoRenovacao({ historico } = {}) {
+  const h = String(historico || '').trim();
+  if (!h) return { situacao: 'indefinido', motivo: '' };
+  const sys =
+    'Você analisa uma conversa de WhatsApp entre a recepção de uma escola de música e a família de um ' +
+    'aluno, sobre a RENOVAÇÃO do contrato. Com base ESPECIALMENTE nas últimas mensagens, classifique:\n' +
+    '- renovou: a família confirmou que vai renovar / já renovou / já pagou / quer continuar.\n' +
+    '- nao_renovou: a família disse que NÃO vai continuar / vai cancelar / trancar / parar as aulas.\n' +
+    '- indefinido: ainda em conversa, sem decisão clara. Na dúvida, responda indefinido.\n\n' +
+    'Conversa (mais antigo → mais novo):\n"""\n' + h.slice(0, 1800) + '\n"""\n\n' +
+    'Responda SOMENTE com JSON: {"situacao":"<renovou|nao_renovou|indefinido>","motivo":"<até 12 palavras citando o trecho>"}';
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({
+      model: modelName,
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
+    });
+    const res = await model.generateContent(sys);
+    const p = JSON.parse(res.response.text());
+    return {
+      situacao: ['renovou', 'nao_renovou', 'indefinido'].includes(p.situacao) ? p.situacao : 'indefinido',
+      motivo: typeof p.motivo === 'string' ? p.motivo.trim().slice(0, 120) : '',
+    };
+  });
+}
+
 // E1-02 — classifica a intenção do lead em uma das 4 categorias.
 const INTENTS = ['SCHEDULE_INTEREST', 'PRICE_INQUIRY', 'GENERAL_INFO', 'OUT_OF_SCOPE'];
 const INTENT_PROMPT = `Classifique a intenção principal da mensagem do lead de uma escola de música em UMA categoria:
@@ -729,6 +756,7 @@ module.exports = {
   assistantReply,
   sugestaoRetomada,
   sugestaoRenovacao,
+  lerDesfechoRenovacao,
   classifyIntent,
   extractQualification,
   classifySongGenres,        // Rock Hour (ADR-039)

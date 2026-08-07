@@ -23,6 +23,9 @@ const MARCO_DE = { 10: 'D-10', 2: 'D-2' };
 // Fase 2 — trava anti-ban do envio AUTOMÁTICO (conservador por padrão; ajustável por env).
 const AUTO_CAP_DIA = Number(process.env.RENOVACAO_AUTO_CAP_DIA || 40);        // teto de auto-envios/dia/tenant
 const AUTO_THROTTLE_MS = Number(process.env.RENOVACAO_AUTO_THROTTLE_MS || 4000); // respiro entre envios
+// Fase D2 — passe diário que lê a conversa dos vencidos/vencendo e SUGERE o desfecho (renovou/não).
+const SUGESTAO_CAP = Number(process.env.RENOVACAO_SUGESTAO_CAP || 60);   // leituras IA por tenant/dia
+const SUGESTAO_TTL_H = Number(process.env.RENOVACAO_SUGESTAO_TTL_H || 20); // não relê se sugestão recente
 
 // Config de renovação + contexto da Janis do tenant. Sem linha em automacao_config → defaults
 // (habilitada=true, auto=false). school_name (tenant_lead_config) é fallback de contexto.
@@ -188,11 +191,67 @@ async function renovacaoPrevisao(tenantId, { horizonteDias = 45 } = {}) {
   });
 }
 
+// Fase D2 — SUGERE o desfecho da renovação lendo a conversa dos contratos vencidos/vencendo. Só grava
+// em renovacao_sugestao (NÃO mexe na estatística — isso é a renovacao_dismiss, confirmada pela
+// recepção). Pula contratos já CONFIRMADOS (dismiss) e sugestões recentes (< TTL). Teto por tenant/dia.
+async function sugerirDesfechosTenant(tenantId, deps = {}) {
+  const gemini = deps.gemini || geminiDefault;
+  const cap = deps.sugestaoCap != null ? deps.sugestaoCap : SUGESTAO_CAP;
+  const cfg = await withTenant(tenantId, (c) => loadRenovacaoConfig(c, tenantId));
+  if (!cfg.habilitada) return { tenant_id: tenantId, skipped: 'desabilitada' };
+
+  // Contratos vencidos há pouco / a vencer, COM conversa, ainda NÃO confirmados e sem sugestão fresca.
+  const alvos = await withTenant(tenantId, async (c) => (await c.query(
+    `WITH alvo AS (
+       SELECT sa.fim_vigencia AS venc, lead_manager.br_phone_key(cp.value_raw) AS rk,
+              (SELECT cv.id FROM lead_manager.conversations cv
+                WHERE cv.tenant_id = $1 AND lead_manager.br_phone_key(cv.external_id) = lead_manager.br_phone_key(cp.value_raw)
+                ORDER BY cv.updated_at DESC LIMIT 1) AS conv_id
+         FROM lead_manager.service_account sa
+         JOIN lead_manager.account_member am ON am.account_id = sa.id AND am.tenant_id = $1 AND am.bond IN ('pagador','beneficiario')
+         JOIN lead_manager.contact_point cp ON cp.person_id = am.person_id AND cp.tenant_id = $1 AND cp.kind = 'phone'
+        WHERE sa.tenant_id = $1 AND sa.fonte_ausente_em IS NULL AND sa.status IS DISTINCT FROM 'cancelado'
+          AND (sa.fim_vigencia - current_date) BETWEEN -45 AND 15
+          AND lead_manager.br_phone_key(cp.value_raw) <> ''
+     )
+     SELECT DISTINCT ON (a.rk, a.venc) a.rk, a.venc, a.conv_id
+       FROM alvo a
+       LEFT JOIN lead_manager.renovacao_dismiss rd ON rd.tenant_id = $1 AND rd.br_key = a.rk AND rd.venc IS NOT DISTINCT FROM a.venc
+       LEFT JOIN lead_manager.renovacao_sugestao rs ON rs.tenant_id = $1 AND rs.br_key = a.rk AND rs.venc IS NOT DISTINCT FROM a.venc
+      WHERE a.conv_id IS NOT NULL AND rd.situacao IS NULL
+        AND (rs.em IS NULL OR rs.em < now() - ($2 || ' hours')::interval)
+      LIMIT $3`, [tenantId, String(SUGESTAO_TTL_H), cap])).rows);
+
+  let feitas = 0;
+  for (const a of alvos) {
+    const msgs = await withTenant(tenantId, async (c) => (await c.query(
+      `SELECT role, body FROM lead_manager.messages
+        WHERE conversation_id = $1 AND tenant_id = $2 AND coalesce(body,'') <> ''
+          AND deleted_at IS NULL AND discarded IS NOT TRUE AND body !~ '^\\['
+        ORDER BY received_at DESC LIMIT 8`, [a.conv_id, tenantId])).rows).catch(() => []);
+    if (!msgs.length) continue;
+    const historico = msgs.reverse()
+      .map((m) => `${m.role === 'USER' ? 'Família' : 'Escola'}: ${String(m.body).replace(/\s+/g, ' ').trim()}`)
+      .join('\n');
+    let out;
+    try { out = await gemini.lerDesfechoRenovacao({ historico }); } catch (e) { continue; }
+    if (!out || !out.situacao) continue;
+    await withTenant(tenantId, (c) => c.query(
+      `INSERT INTO lead_manager.renovacao_sugestao (tenant_id, br_key, venc, situacao, motivo, em)
+       VALUES ($1, $2, $3::date, $4, $5, now())
+       ON CONFLICT (tenant_id, br_key, COALESCE(venc, '1900-01-01'::date))
+         DO UPDATE SET situacao = $4, motivo = $5, em = now()`,
+      [tenantId, a.rk, a.venc, out.situacao, out.motivo || null])).catch(() => {});
+    feitas += 1;
+  }
+  return { tenant_id: tenantId, candidatos: alvos.length, sugestoes: feitas };
+}
+
 // Ciclo em todos os tenants ativos. deps injetáveis p/ teste (pool, gemini).
 async function runRenovacaoSweep(deps = {}) {
   const q = deps.pool || pool;
   const tenants = (await q.query('SELECT tenant_id FROM tenants_active()')).rows;
-  const summary = { tenants: tenants.length, marcos: 0, enfileirados: 0, perTenant: [] };
+  const summary = { tenants: tenants.length, marcos: 0, enfileirados: 0, sugestoes: 0, perTenant: [] };
   for (const t of tenants) {
     try {
       const r = await processarTenant(t.tenant_id, deps);
@@ -202,8 +261,15 @@ async function runRenovacaoSweep(deps = {}) {
     } catch (err) {
       logger.error('renovacao.tenant_error', { tenant_id: t.tenant_id, error: err.message });
     }
+    // D2 — passe de sugestão de desfecho (independente dos marcos D-10/D-2; não interrompe o sweep).
+    try {
+      const s = await sugerirDesfechosTenant(t.tenant_id, deps);
+      summary.sugestoes += s.sugestoes || 0;
+    } catch (err) {
+      logger.error('renovacao.sugestao_error', { tenant_id: t.tenant_id, error: err.message });
+    }
   }
-  logger.info('renovacao.done', { tenants: summary.tenants, marcos: summary.marcos, enfileirados: summary.enfileirados });
+  logger.info('renovacao.done', { tenants: summary.tenants, marcos: summary.marcos, enfileirados: summary.enfileirados, sugestoes: summary.sugestoes });
   return summary;
 }
 
@@ -288,7 +354,7 @@ async function runRenovacaoAutoEnvio(deps = {}) {
   return summary;
 }
 
-module.exports = { runRenovacaoSweep, processarTenant, renovacaoPrevisao, loadRenovacaoConfig, runRenovacaoAutoEnvio, autoEnviarTenant };
+module.exports = { runRenovacaoSweep, processarTenant, renovacaoPrevisao, loadRenovacaoConfig, runRenovacaoAutoEnvio, autoEnviarTenant, sugerirDesfechosTenant };
 
 if (require.main === module) {
   const fn = process.argv.includes('--auto') ? runRenovacaoAutoEnvio : runRenovacaoSweep;

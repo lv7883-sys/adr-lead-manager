@@ -151,7 +151,7 @@ if (require.main === module) {
     '0 8 * * *',
     () => {
       runRenovacaoSweep()
-        .then((s) => logger.info('cron.renovacao_sweep.done', { tenants: s.tenants, marcos: s.marcos, enfileirados: s.enfileirados }))
+        .then((s) => logger.info('cron.renovacao_sweep.done', { tenants: s.tenants, marcos: s.marcos, enfileirados: s.enfileirados, sugestoes: s.sugestoes }))
         .catch((e) => logger.error('cron.renovacao_sweep.error', { error: e.message }));
     },
     { timezone: 'America/Sao_Paulo' }
