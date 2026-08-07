@@ -104,8 +104,8 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   //       falou em renovar — INDEPENDENTE do vencimento. Saída automática segue valendo: ao renovar,
   //       MAX(fim_vigencia) vai pra frente e, sem toque/contexto, o contrato deixa a janela sozinho.
   else if (v === 'renovacoes') {
-    // Contatos INTERNOS (equipe/dono) nunca entram — mesmo com contrato/tema de renovação.
-    extra.push("((venc IS NOT NULL AND venc <= current_date + interval '15 days' AND venc >= current_date - interval '60 days') OR renov_ctx) AND NOT is_interno");
+    // Internos nunca entram; e o que a recepção RESOLVEU (migr. 095) sai da aba (reversível).
+    extra.push("((venc IS NOT NULL AND venc <= current_date + interval '15 days' AND venc >= current_date - interval '60 days') OR renov_ctx) AND NOT is_interno AND NOT dismissed");
   }
 
   // Keyset entra como MAIS UM predicado do WHERE (não como cláusula solta — senão vira
@@ -230,6 +230,11 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
         -- na conversa (leads.aborda_renovacao, migr. 093 — interpretação no gate 0, não palavra-chave).
         (rc.rk IS NOT NULL OR m.lead_aborda_renovacao IS TRUE) AS renov_ctx,
         (ic.rk IS NOT NULL) AS is_interno,   -- contato interno (equipe/dono) → fora da aba Renovações
+        -- RESOLVIDO pela recepção (migr. 095): retira da aba. Amarrado ao venc do ciclo — se renovar
+        -- (venc muda), a marca não casa e a conversa VOLTA sozinha. Reversível pelo "desfazer".
+        EXISTS (SELECT 1 FROM renovacao_dismiss rd
+                 WHERE rd.tenant_id = $1 AND rd.br_key = m.rkey
+                   AND rd.venc IS NOT DISTINCT FROM rn.venc) AS dismissed,
         m.lead_id, m.lead_status, m.lead_desfecho,
         -- Nome EMPILHADO (usa ao máximo o canônico): cadastro → lead → pushName do WhatsApp → número.
         COALESCE(pe.display_name, m.lead_name,
