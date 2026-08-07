@@ -312,11 +312,14 @@ function mapConversationRow(r) {
     // ADR-049: presente quando a pessoa tem contrato com vencimento (renovação). venc = data ISO
     // (YYYY-MM-DD); dias = dias até vencer (negativo = vencido). O estágio (D-45/30/15/7/vencido)
     // é rotulado no dashboard, reusando a lógica da régua.
-    renovacao: (r.venc || r.toque_marco) ? {
+    renovacao: (r.venc || r.toque_marco || r.renovacao_draft || r.renov_ctx) ? {
       venc: r.venc ? (r.venc instanceof Date ? r.venc.toISOString().slice(0, 10) : String(r.venc).slice(0, 10)) : null,
       dias: r.venc_dias == null ? null : Number(r.venc_dias),
       // 'D-10' | 'D-2' | null — há um rascunho da Janis pronto na fila (migr. 092) p/ esta pessoa.
       toque: r.toque_marco || null,
+      // Fase C — MOTIVO de a conversa estar na aba Renovação, p/ o selo explicar (em vez de "D-73"):
+      draft: r.renovacao_draft === true,          // aberta pelo gráfico, 1ª msg ainda não enviada
+      tema: r.renov_ctx === true && !r.toque_marco, // a IA achou que a conversa fala de renovação
     } : null,
   };
 }
