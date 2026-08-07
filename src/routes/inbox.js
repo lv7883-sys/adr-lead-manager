@@ -96,16 +96,19 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       extra.push(`nome ILIKE $${pNome}`);   // sem dígito → só nome (senão '%%' casaria TUDO)
     }
   }
-  if (v === 'leads') extra.push('is_lead = true');
-  else if (v === 'nao_lead') extra.push('is_lead = false');
   // Renovações (ADR-049 rev.): o que está DE FATO em jogo de renovação, não "vence algum dia".
   //   (a) PERTO do fim ou VENCIDO — janela apertada [hoje-60d, hoje+15d] (sai o "cedo demais" D-16..90);
   //   (b) OU em CONTEXTO de renovação (renov_ctx): tem toque nosso (pendente/enviado) ou a pessoa
-  //       falou em renovar — INDEPENDENTE do vencimento. Saída automática segue valendo: ao renovar,
-  //       MAX(fim_vigencia) vai pra frente e, sem toque/contexto, o contrato deixa a janela sozinho.
-  else if (v === 'renovacoes') {
-    // Internos nunca entram; e o que a recepção RESOLVEU (migr. 095) sai da aba (reversível).
-    extra.push("((venc IS NOT NULL AND venc <= current_date + interval '15 days' AND venc >= current_date - interval '60 days') OR renov_ctx) AND NOT is_interno AND NOT dismissed");
+  //       falou em renovar — INDEPENDENTE do vencimento;
+  //   (c) OU RASCUNHO de renovação (migr. 097) — conversa aberta pelo gráfico, ainda sem 1ª mensagem.
+  // Internos nunca entram; o que a recepção RESOLVEU (migr. 095) sai (reversível).
+  if (v === 'renovacoes') {
+    extra.push("((venc IS NOT NULL AND venc <= current_date + interval '15 days' AND venc >= current_date - interval '60 days') OR renov_ctx OR renovacao_draft) AND NOT is_interno AND NOT dismissed");
+  } else {
+    // Rascunho de renovação só aparece na aba Renovação — nunca na Caixa normal (Todas/Leads/Outras).
+    extra.push('renovacao_draft IS NOT TRUE');
+    if (v === 'leads') extra.push('is_lead = true');
+    else if (v === 'nao_lead') extra.push('is_lead = false');
   }
 
   // Keyset entra como MAIS UM predicado do WHERE (não como cláusula solta — senão vira
@@ -127,7 +130,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     ),
     conv AS (
       SELECT cv.id AS conversation_id, cv.channel, cv.external_id, cv.last_read_at,
-             cv.updated_at, cv.conversation_kind, ${IDENT_CONV} AS ident,
+             cv.updated_at, cv.conversation_kind, cv.renovacao_draft, ${IDENT_CONV} AS ident,
              br_phone_key(cv.external_id) AS rkey   -- chave canônica p/ casar contrato (migr. 085)
         FROM conversations cv
        WHERE cv.tenant_id = $1
@@ -235,6 +238,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
         EXISTS (SELECT 1 FROM renovacao_dismiss rd
                  WHERE rd.tenant_id = $1 AND rd.br_key = m.rkey
                    AND rd.venc IS NOT DISTINCT FROM rn.venc) AS dismissed,
+        m.renovacao_draft,   -- rascunho de renovação (migr. 097): só na aba Renovação até enviar
         m.lead_id, m.lead_status, m.lead_desfecho,
         -- Nome EMPILHADO (usa ao máximo o canônico): cadastro → lead → pushName do WhatsApp → número.
         COALESCE(pe.display_name, m.lead_name,
@@ -475,6 +479,18 @@ async function ensureConversation(client, tenantId, phoneRaw) {
   return { conversation_id: ins.id, created: true };
 }
 
+// Fase B — abre a conversa (find-or-create) de renovação como RASCUNHO (migr. 097). Recém-criada →
+// fica SÓ na aba Renovação até a 1ª mensagem. Se a pessoa já tem conversa, reusa (não vira rascunho).
+async function ensureRenovacaoDraft(client, tenantId, phoneRaw) {
+  const conv = await ensureConversation(client, tenantId, phoneRaw);
+  if (!conv) return null;
+  if (conv.created) {
+    await client.query('UPDATE conversations SET renovacao_draft = true WHERE id = $1 AND tenant_id = $2',
+      [conv.conversation_id, tenantId]);
+  }
+  return conv;
+}
+
 // Envia mensagem humana (E12-06) numa conversa, via Z-API/Evolution, e persiste a saída.
 // Reusa o MESMO caminho da rota /leads/:id/mensagem (evolution.sendText + outbound.registrarSaida),
 // mas ancorado em conversation_id (telefone = conversations.external_id) — serve não-lead também.
@@ -551,6 +567,10 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
     phone, externalMessageId: messageId, sender, body: text,
     replyToMessageId: citada ? citada.id : null,
   });
+  // 1ª mensagem enviada → a conversa deixa de ser rascunho e passa a aparecer na Caixa normal (migr. 097).
+  await withTenant(tenantId, (c) => c.query(
+    'UPDATE conversations SET renovacao_draft = false WHERE id = $1 AND tenant_id = $2 AND renovacao_draft = true',
+    [conversationId, tenantId])).catch(() => {});
   return { ok: true, message_id: messageId, quoted: !!quoted };
 }
 
@@ -637,6 +657,21 @@ router.post('/:tenantId/inbox/iniciar', authenticate, requireTenantAccess(WRITE_
   }
 });
 
+// POST /tenant/:tenantId/inbox/rascunho-renovacao — Fase B: encontra/cria a conversa de um telefone como
+// RASCUNHO de renovação (só na aba Renovação até enviar). Devolve o conversation_id p/ o inbox abrir. { phone }.
+router.post('/:tenantId/inbox/rascunho-renovacao', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const phone = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
+  if (String(phone).replace(/\D/g, '').length < 8) return res.status(400).json({ error: 'invalid_phone' });
+  try {
+    const conv = await withTenant(req.tenantId, (c) => ensureRenovacaoDraft(c, req.tenantId, phone));
+    if (!conv) return res.status(400).json({ error: 'invalid_phone' });
+    res.json({ ok: true, conversation_id: conv.conversation_id, created: conv.created });
+  } catch (err) {
+    logger.error('tenant.inbox.rascunho.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(502).json({ error: 'rascunho_failed', detail: err.message });
+  }
+});
+
 // GET /tenant/:tenantId/inbox/conversations/:conversationId — thread da conversa (E12-05).
 router.get('/:tenantId/inbox/conversations/:conversationId', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   const { conversationId } = req.params;
@@ -680,6 +715,7 @@ router.get('/:tenantId/inbox/nao-lidas', authenticate, requireTenantAccess(READ_
                     AND (cv.last_read_at IS NULL OR m.received_at > cv.last_read_at)) AS n
            FROM conversations cv
           WHERE cv.tenant_id = $1 AND coalesce(cv.external_id, '') NOT LIKE '%@g.us'
+            AND cv.renovacao_draft IS NOT TRUE   -- rascunho de renovação não conta no badge (migr. 097)
        ) u`, [req.tenantId])).rows[0].total);
     res.json({ total });
   } catch (err) {
@@ -1131,6 +1167,7 @@ module.exports.listConversations = listConversations;
 module.exports.getConversationThread = getConversationThread;
 module.exports.sendMessage = sendMessage;
 module.exports.ensureConversation = ensureConversation;
+module.exports.ensureRenovacaoDraft = ensureRenovacaoDraft;
 module.exports.ocultarComentario = ocultarComentario;
 module.exports.deleteInboxMessage = deleteInboxMessage;
 module.exports.editInboxMessage = editInboxMessage;

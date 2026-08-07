@@ -25,6 +25,7 @@ before(async () => {
     CREATE TABLE conversations (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, conversation_kind text DEFAULT 'DIRECT', updated_at timestamptz DEFAULT now(), last_read_at timestamptz,
+      renovacao_draft boolean DEFAULT false,   -- migr. 097 (Fase B)
       UNIQUE (tenant_id, channel, external_id));   -- prod tem (engine.js/ensureConversation dependem)
     CREATE TABLE messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), conversation_id uuid, role text,
@@ -418,6 +419,24 @@ test('(8f) view=renovacoes: recepção RESOLVE → sai da aba; dismiss de outro 
   const cv2 = await conv(tenant, H(751)); await msg(cv2); await contrato(tenant, D(751), -20);
   await dismiss(tenant, D(751), 5);
   assert.ok(byExt((await list(tenant, { view: 'renovacoes', limit: 50 })).items, H(751)), 'dismiss de outro venc não retira (ciclo novo reaparece)');
+});
+
+test('(8g) rascunho de renovação (Fase B): só na aba Renovação; após enviar, aparece na Caixa normal', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000f1'; await cfg(tenant, 7);
+  const r = await inbox.ensureRenovacaoDraft(c, tenant, '5519990022001');
+  assert.equal(r.created, true, 'cria a conversa como rascunho');
+  const cid = r.conversation_id;
+  const emView = (v) => list(tenant, { view: v, limit: 50 }).then((x) => x.items.some((i) => i.conversation_id === cid));
+  assert.equal(await emView('renovacoes'), true, 'rascunho aparece na aba Renovação');
+  assert.equal(await emView('todas'), false, 'rascunho NÃO aparece na Caixa normal');
+  assert.equal(await emView('nao_lead'), false, 'nem em Outras');
+  // simula a 1ª mensagem enviada (limpa o flag) → passa a aparecer na Caixa normal
+  await c.query('UPDATE conversations SET renovacao_draft=false WHERE id=$1', [cid]);
+  assert.equal(await emView('todas'), true, 'após enviar, aparece na Caixa normal');
+  // reusar o MESMO telefone não recria nem re-rascunha (conversa já existe)
+  const r2 = await inbox.ensureRenovacaoDraft(c, tenant, '(19) 99002-2001');
+  assert.equal(r2.created, false, 'reusa a conversa existente');
+  assert.equal(r2.conversation_id, cid);
 });
 
 test('(9) nome empilhado: cadastro > lead > pushName > número', async () => {
