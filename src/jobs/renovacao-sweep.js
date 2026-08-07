@@ -28,7 +28,7 @@ const AUTO_THROTTLE_MS = Number(process.env.RENOVACAO_AUTO_THROTTLE_MS || 4000);
 // (habilitada=true, auto=false). school_name (tenant_lead_config) é fallback de contexto.
 async function loadRenovacaoConfig(c, tenantId) {
   const ac = (await c.query(
-    `SELECT nome_ia, contexto_ia, renovacao_habilitada, renovacao_auto_envio
+    `SELECT nome_ia, contexto_ia, renovacao_habilitada, renovacao_auto_envio, renovacao_orientacao
        FROM lead_manager.automacao_config WHERE tenant_id = $1`, [tenantId])).rows[0] || {};
   const lc = (await c.query(
     `SELECT school_name FROM tenant_lead_config WHERE tenant_id = $1`, [tenantId])).rows[0] || {};
@@ -37,6 +37,7 @@ async function loadRenovacaoConfig(c, tenantId) {
     autoEnvio: ac.renovacao_auto_envio === true,          // default false (Fase 2)
     nomeIa: ac.nome_ia || null,
     schoolContext: ac.contexto_ia || lc.school_name || null,
+    orientacao: (ac.renovacao_orientacao || '').trim() || null, // Fase C2 — orientação do gestor
   };
 }
 
@@ -137,6 +138,7 @@ async function processarTenant(tenantId, deps = {}) {
         dataFimISO: a.fim_iso,
         schoolContext: cfg.schoolContext,
         nomeIa: cfg.nomeIa,
+        orientacao: cfg.orientacao,
       });
       if (!sug || !sug.rascunho) {
         logger.warn('renovacao.sem_rascunho', { tenant_id: tenantId, account_id: a.account_id, marco });

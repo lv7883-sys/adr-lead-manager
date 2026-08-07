@@ -495,7 +495,7 @@ function _dataPt(iso) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
   return m ? `${m[3]}/${m[2]}/${m[1]}` : String(iso || '');
 }
-async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, dataFimISO, schoolContext, nomeIa } = {}) {
+async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, dataFimISO, schoolContext, nomeIa, orientacao } = {}) {
   const dataFim = _dataPt(dataFimISO);
   const paraAluno = !responsavelNome || responsavelNome === alunoNome;
   const quem = paraAluno
@@ -515,6 +515,8 @@ async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, d
     'NÃO invente preço, valores, horários novos, descontos ou condições que não estejam nas ' +
     'informações da escola. Seja curta, calorosa e natural, sem emojis.' +
     (nomeIa ? `\n\nAssine como "${nomeIa}" (nome da assistente da escola).` : '') +
+    // Fase C2 — orientação do gestor (tom/foco/o que oferecer/evitar) tem prioridade sobre o tom padrão.
+    (orientacao ? `\n\nORIENTAÇÃO DO GESTOR para a renovação (siga à risca no tom e no foco):\n${orientacao}` : '') +
     (schoolContext ? `\n\nINFORMAÇÕES DA ESCOLA (referência):\n${schoolContext}` : '') +
     '\n\nResponda SOMENTE com JSON: {"estrategia":"<por que e como abordar, 1-2 frases para a ' +
     'recepcionista>","rascunho":"<mensagem pronta para enviar, tom da escola, sem emojis>"}';
