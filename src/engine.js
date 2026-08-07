@@ -726,7 +726,7 @@ async function captureForPendingClassification(tenantId, channel, externalId, ms
 // (roteia pra fora do funil). Compartilhada pelo caminho VIVO (conversa estabelecida) e
 // pela RECLASSIFICAÇÃO do buffer (job/evento) — uma única lógica, provada pelo Osvaldo.
 function _decideConversaRoute(r, isRelationship) {
-  const estado = { conversation_state: r.conversation_state, state_reasoning: r.state_reasoning };
+  const estado = { conversation_state: r.conversation_state, state_reasoning: r.state_reasoning, aborda_renovacao: r.aborda_renovacao === true };
   const sugEtapa = r.is_lead ? r.suggested_stage : null;
   const sugMotivo = r.is_lead ? r.stage_reasoning : null;
   if (r.intent === 'NOVA_OPORTUNIDADE') {
@@ -776,6 +776,7 @@ async function _resolvePendingTo(tenantId, leadId, route) {
          classification_signals = $6,
          conversation_state = COALESCE($7, conversation_state),
          state_reasoning = COALESCE($8, state_reasoning),
+         aborda_renovacao = COALESCE($9, aborda_renovacao),
          state_computed_at = CASE WHEN $7 IS NOT NULL THEN now() ELSE state_computed_at END,
          classification_pending_since = NULL,
          classification_attempts = 0,
@@ -785,7 +786,8 @@ async function _resolvePendingTo(tenantId, leadId, route) {
        RETURNING id`,
       [leadId, route.status, route.reviewQueue, route.confidence,
        route.reasoning, JSON.stringify([route.intent].filter(Boolean)),
-       route.conversation_state || null, route.state_reasoning || null]
+       route.conversation_state || null, route.state_reasoning || null,
+       route.aborda_renovacao ?? null]
     ));
     return r.rowCount > 0;
   } catch (e) {
@@ -858,6 +860,7 @@ async function reprocessPendingLead(tenant, leadRow, deps = {}) {
     reasoning: decision.cls.reasoning, confidence: decision.cls.confidence,
     suggested_stage: decision.cls.suggested_stage, stage_reasoning: decision.cls.stage_reasoning,
     conversation_state: decision.cls.conversation_state, state_reasoning: decision.cls.state_reasoning,
+    aborda_renovacao: decision.cls.aborda_renovacao,
   };
   const moved = await _resolvePendingTo(tenantId, leadRow.id, route);
   if (moved && route.status === 'QUALIFYING' && route.suggested_stage) {
@@ -888,6 +891,7 @@ async function captureRoutedEstablished(tenantId, channel, externalId, msg, rawB
      classification_signals = EXCLUDED.classification_signals,
      conversation_state = EXCLUDED.conversation_state,
      state_reasoning = EXCLUDED.state_reasoning,
+     aborda_renovacao = EXCLUDED.aborda_renovacao,
      state_computed_at = now(),
      classification_pending_since = NULL,
      classification_attempts = 0,
@@ -900,25 +904,25 @@ async function captureRoutedEstablished(tenantId, channel, externalId, msg, rawB
         lead = await c.query(
           `INSERT INTO leads (tenant_id, name, status, meta_psid, review_queue,
                               classification_confidence, classification_reasoning, classification_signals,
-                              conversation_state, state_reasoning, state_computed_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+                              conversation_state, state_reasoning, aborda_renovacao, state_computed_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
            ON CONFLICT (tenant_id, meta_psid) WHERE meta_psid IS NOT NULL
            DO UPDATE SET ${onConflictSet}
            RETURNING id`,
           [tenantId, msg.sender || externalId, route.status, externalId, route.reviewQueue,
-           route.confidence, route.reasoning, signals, route.conversation_state || null, route.state_reasoning || null]
+           route.confidence, route.reasoning, signals, route.conversation_state || null, route.state_reasoning || null, route.aborda_renovacao === true]
         );
       } else {
         lead = await c.query(
           `INSERT INTO leads (tenant_id, name, phone, status, review_queue,
                               classification_confidence, classification_reasoning, classification_signals,
-                              conversation_state, state_reasoning, state_computed_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+                              conversation_state, state_reasoning, aborda_renovacao, state_computed_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
            ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
            DO UPDATE SET ${onConflictSet}
            RETURNING id`,
           [tenantId, msg.sender || phone, phone, route.status, route.reviewQueue,
-           route.confidence, route.reasoning, signals, route.conversation_state || null, route.state_reasoning || null]
+           route.confidence, route.reasoning, signals, route.conversation_state || null, route.state_reasoning || null, route.aborda_renovacao === true]
         );
       }
       const conv = (
