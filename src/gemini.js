@@ -271,7 +271,10 @@ async function classifyConversa({ conversation, examples, stageDefinitions, lead
       intent: CONVERSA_INTENTS.includes(parsed.intent) ? parsed.intent : 'INDEFINIDO',
       conversation_state: state,
       state_reasoning: typeof parsed.state_reasoning === 'string' ? parsed.state_reasoning : null,
-      aborda_renovacao: parsed.aborda_renovacao === true,   // tema renovação (independe de is_lead)
+      // tema renovação (independe de is_lead) — MAS nunca em conversa INTERNA/de candidato a vaga:
+      // renovação é sobre o contrato de um CLIENTE, não papo interno da equipe (mesmo citando o tema).
+      aborda_renovacao: parsed.aborda_renovacao === true
+        && parsed.intent !== 'INTERNO' && parsed.intent !== 'CANDIDATO',
       suggested_stage: suggestedStage,
       stage_reasoning: suggestedStage && typeof parsed.stage_reasoning === 'string'
         ? parsed.stage_reasoning : null,

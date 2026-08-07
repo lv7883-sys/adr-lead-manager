@@ -56,6 +56,9 @@ before(async () => {
     CREATE TABLE renovacao_touchpoint (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid,
       phone text, marco text, status text DEFAULT 'pendente');
+    -- Contatos internos (equipe/dono, ADR-018) — excluídos da aba Renovações.
+    CREATE TABLE internal_contacts (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, phone text, name text, type text);
     -- Espelho da migr. 085 (a query usa br_phone_key sem schema; aqui vive em public).
     CREATE OR REPLACE FUNCTION br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
       WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
@@ -136,6 +139,12 @@ async function touchpoint(tenant, phoneRaw, marco = 'D-10', over = {}) {
   const valueRaw = over.valueRaw || `((${localDig.slice(0, 2)}))${localDig.slice(2)}`;
   await c.query(`INSERT INTO renovacao_touchpoint (tenant_id, phone, marco, status) VALUES ($1,$2,$3,$4)`,
     [tenant, valueRaw, marco, over.status || 'pendente']);
+}
+
+// Contato interno (equipe/dono) — casa por dígitos.
+async function interno(tenant, phoneRaw) {
+  await c.query(`INSERT INTO internal_contacts (tenant_id, phone, name, type) VALUES ($1,$2,'Interno','gestor')`,
+    [tenant, phoneRaw]);
 }
 
 const list = (tenant, opts = {}) => inbox.listConversations(c, tenant, opts);
@@ -370,6 +379,20 @@ test('(8c) ensureConversation (outbound-first): cria e REUSA por br_phone_key', 
   assert.equal(d.created, false); assert.equal(d.conversation_id, cid);
   // 4) telefone inválido → null
   assert.equal(await inbox.ensureConversation(c, tenant, '123'), null);
+});
+
+test('(8e) view=renovacoes: contato INTERNO nunca aparece (mesmo com contrato na janela + toque)', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000ee'; await cfg(tenant, 7);
+  // interno com contrato vencido 20d (na janela) E toque pendente — mesmo assim FORA
+  const cInt = await conv(tenant, H(740)); await msg(cInt); await contrato(tenant, D(740), -20);
+  await touchpoint(tenant, D(740), 'D-2', { status: 'pendente' });
+  await interno(tenant, D(740));
+  // controle: NÃO-interno, mesmo contrato vencido 20d -> ENTRA
+  const cOk = await conv(tenant, H(741)); await msg(cOk); await contrato(tenant, D(741), -20);
+
+  const { items } = await list(tenant, { view: 'renovacoes', limit: 50 });
+  assert.ok(!byExt(items, H(740)), 'interno fica fora da aba mesmo com contrato+toque');
+  assert.ok(byExt(items, H(741)), 'não-interno com contrato na janela entra (controle)');
 });
 
 test('(9) nome empilhado: cadastro > lead > pushName > número', async () => {

@@ -58,6 +58,10 @@ async function setCfg(t, { habilitada = true, auto = false, nomeIa = 'Janis', co
      ON CONFLICT (tenant_id) DO UPDATE SET nome_ia=$2, contexto_ia=$3, renovacao_habilitada=$4, renovacao_auto_envio=$5`,
     [t, nomeIa, contexto, habilitada, auto]));
 }
+async function setInterno(t, phoneRaw) {
+  await withTenant(t, (c) => c.query(
+    `INSERT INTO lead_manager.internal_contacts (tenant_id, phone, name, type) VALUES ($1,$2,'Interno','gestor')`, [t, phoneRaw]));
+}
 const tpsOf = (t, accId) => withTenant(t, async (c) =>
   (await c.query(`SELECT marco, phone, destinatario_nome, aluno_nome, servico_label, status, rascunho, estrategia,
                          to_char(fim_vigencia,'YYYY-MM-DD') fim, to_char(due_date,'YYYY-MM-DD') due
@@ -182,6 +186,14 @@ test('R9 auto-envio ON: dispara pendentes (mock), marca enviado(auto), respeita 
     `SELECT count(*)::int AS n FROM lead_manager.renovacao_touchpoint
       WHERE tenant_id=$1 AND status='enviado' AND auto=true`, [B])).rows[0].n);
   assert.equal(enviadosAuto, 2, 'marcou 2 como enviado(auto)');
+});
+
+test('R11 contato INTERNO em D-10 → NÃO enfileira toque', async () => {
+  await setCfg(A);
+  const acc = await seedContract(A, { finDias: 10, aluno: 'Dono Aluno', alunoPhone: '5519990011011' });
+  await setInterno(A, '5519990011011');
+  await sweep.processarTenant(A, { gemini: fakeGemini() });
+  assert.equal((await tpsOf(A, acc)).length, 0, 'interno não recebe toque de renovação');
 });
 
 test('R10 auto-envio OFF: não dispara nada', async () => {
