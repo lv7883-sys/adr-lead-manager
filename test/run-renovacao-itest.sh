@@ -52,7 +52,14 @@ echo "[itest] config mínima (automacao_config/tenant_lead_config — shape usad
 docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest >/dev/null <<SQL
 CREATE TABLE lead_manager.automacao_config (tenant_id uuid PRIMARY KEY, nome_ia text, contexto_ia text);
 CREATE TABLE lead_manager.tenant_lead_config (tenant_id uuid PRIMARY KEY, school_name text, updated_at timestamptz DEFAULT now());
-GRANT SELECT, INSERT, UPDATE, DELETE ON lead_manager.automacao_config, lead_manager.tenant_lead_config TO lead_manager_user;
+-- Contatos internos (ADR-018) + br_phone_key (espelho da migr 085) — usados pela exclusão de internos no sweep.
+CREATE TABLE lead_manager.internal_contacts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, phone text, name text, type text);
+CREATE OR REPLACE FUNCTION lead_manager.br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS \$fn\$
+  WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
+       loc AS (SELECT CASE WHEN length(v) IN (12,13) AND left(v,2)='55' THEN substr(v,3) ELSE v END AS v FROM d)
+  SELECT CASE WHEN length(v)=11 AND substr(v,3,1)='9' THEN left(v,2)||substr(v,4) ELSE v END FROM loc
+\$fn\$;
+GRANT SELECT, INSERT, UPDATE, DELETE ON lead_manager.automacao_config, lead_manager.tenant_lead_config, lead_manager.internal_contacts TO lead_manager_user;
 SQL
 
 echo "[itest] migration 092 (renovacao_touchpoint + toggles) …"

@@ -104,7 +104,8 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   //       falou em renovar — INDEPENDENTE do vencimento. Saída automática segue valendo: ao renovar,
   //       MAX(fim_vigencia) vai pra frente e, sem toque/contexto, o contrato deixa a janela sozinho.
   else if (v === 'renovacoes') {
-    extra.push("((venc IS NOT NULL AND venc <= current_date + interval '15 days' AND venc >= current_date - interval '60 days') OR renov_ctx)");
+    // Contatos INTERNOS (equipe/dono) nunca entram — mesmo com contrato/tema de renovação.
+    extra.push("((venc IS NOT NULL AND venc <= current_date + interval '15 days' AND venc >= current_date - interval '60 days') OR renov_ctx) AND NOT is_interno");
   }
 
   // Keyset entra como MAIS UM predicado do WHERE (não como cláusula solta — senão vira
@@ -202,6 +203,13 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
         FROM renovacao_touchpoint
        WHERE tenant_id = $1 AND status IN ('pendente','enviado') AND br_phone_key(phone) <> ''
     ),
+    -- CONTATOS INTERNOS (equipe/dono/parceiro — internal_contacts, ADR-018): NUNCA são alvo de
+    -- renovação, mesmo tendo contrato próprio (ex.: dono que foi aluno). Excluídos da aba Renovações.
+    interno AS (
+      SELECT DISTINCT br_phone_key(phone) AS rk
+        FROM internal_contacts
+       WHERE tenant_id = $1 AND br_phone_key(phone) <> ''
+    ),
     -- Nome do CADASTRO (canônico): telefone → person.display_name pela MESMA chave br_phone_key.
     -- O aluno não vira lead, então sem isto a lista mostra o número. min() = 1 nome por telefone.
     pess AS (
@@ -221,6 +229,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
         -- EM CONTEXTO de renovação: tem toque nosso (pendente/enviado) OU a IA marcou o TEMA renovação
         -- na conversa (leads.aborda_renovacao, migr. 093 — interpretação no gate 0, não palavra-chave).
         (rc.rk IS NOT NULL OR m.lead_aborda_renovacao IS TRUE) AS renov_ctx,
+        (ic.rk IS NOT NULL) AS is_interno,   -- contato interno (equipe/dono) → fora da aba Renovações
         m.lead_id, m.lead_status, m.lead_desfecho,
         -- Nome EMPILHADO (usa ao máximo o canônico): cadastro → lead → pushName do WhatsApp → número.
         COALESCE(pe.display_name, m.lead_name,
@@ -251,6 +260,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       LEFT JOIN renov rn ON rn.rk = m.rkey AND m.rkey <> ''
       LEFT JOIN toque tq ON tq.rk = m.rkey AND m.rkey <> ''
       LEFT JOIN renovtp rc ON rc.rk = m.rkey AND m.rkey <> ''
+      LEFT JOIN interno ic ON ic.rk = m.rkey AND m.rkey <> ''
       LEFT JOIN pess pe ON pe.rk = m.rkey AND m.rkey <> ''
       -- alias m2 = a MESMA linha de lead, so p/ os fragmentos SQL do lifecycle.js (que
       -- esperam colunas status/desfecho num alias). LATERAL de 1 linha, sem custo.

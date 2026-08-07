@@ -86,6 +86,12 @@ async function contratosNoMarco(c, tenantId) {
                WHERE rt.tenant_id = $1 AND rt.account_id = a.account_id
                  AND rt.fim_vigencia = a.fim_vigencia
                  AND rt.marco = (CASE WHEN a.dias = 2 THEN 'D-2' ELSE 'D-10' END)
+            )
+        -- Contato INTERNO (equipe/dono) nunca recebe toque de renovação, mesmo com contrato próprio.
+        AND NOT EXISTS (
+              SELECT 1 FROM lead_manager.internal_contacts ic
+               WHERE ic.tenant_id = $1
+                 AND lead_manager.br_phone_key(ic.phone) = lead_manager.br_phone_key(r.phone)
             )`,
     [tenantId]
   )).rows;
