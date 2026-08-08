@@ -13,7 +13,8 @@ const { isUuid } = require('../validation');
 const { fromLegacy, canonicaliza, validaHorarioJson, normaliza, minToHm } = require('../horario'); // H1: horário por-dia
 const logger = require('../logger');
 const { resumoPlantao } = require('../plantao');   // ADR-040: plantão (resumo de saúde)
-const { retomadaLateral, reengajouExists } = require('../reativacao');   // #8 Fatia B: fonte única da retomada
+// (#8 Fatia B) retomadaLateral/reengajouExists saíram daqui na reescrita perf do /leads (CTE
+// 'retom' reimplementa a MESMA regra em forma de janela); metrics.js/plantao.js seguem usando.
 const evolution = require('../evolution');   // E4: envio direto via Evolution
 const meta = require('../meta');              // E6: envio outbound via Messenger/IG
 const onboardingMeta = require('../onboardingMeta');   // conexão Meta por token de System User
@@ -691,95 +692,114 @@ router.get(
         const dormancyDays = Number.isInteger(dorm?.dormancy_days) && dorm.dormancy_days > 0 ? dorm.dormancy_days : 7;
         const leads = (
           await c.query(
-            `SELECT l.id, l.name, l.phone, l.status, l.intent, l.temperatura_manual,
+            `WITH
+             -- PERF (2026-08-07): a forma antiga fazia ~10 subqueries POR LEAD varrendo messages/
+             -- staff_outbound_samples — sob RLS o planner rebaixa filtros de expressão (regexp_replace
+             -- não é leakproof) p/ DEPOIS da security qual → seq scan por lead (~30s; o Regente corta
+             -- em 10s). Agora agrega UMA VEZ por telefone (ident = dígitos) e junta por hash — padrão
+             -- do metrics.js. BÔNUS de correção: casa por DÍGITOS em toda parte; leads.phone é E.164
+             -- ('+55…', engine.js/toE164BR) e conversations.external_id é dígitos crus (webhook) — os
+             -- antigos 'cv.external_id = l.phone' não casavam (last_contact/awaiting_reply vinham nulos).
+             conv AS (
+               SELECT cv.id, cv.channel, cv.updated_at,
+                      regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident
+                 FROM conversations cv
+             ),
+             msg AS (
+               SELECT c.ident,
+                      max(m.received_at) AS last_any,
+                      max(m.received_at) FILTER (WHERE m.role = 'USER') AS last_in,
+                      -- CINTO (#3): reação (emoji) não é turno do cliente (senão 👍 reabre "devemos resposta").
+                      max(m.received_at) FILTER (WHERE m.role = 'USER' AND coalesce(m.body, '') NOT LIKE '[reação]%') AS last_in_turno,
+                      (array_agg(m.body ORDER BY m.received_at) FILTER (WHERE m.role = 'USER'))[1] AS first_message,
+                      array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) FILTER (WHERE m.role = 'USER') AS ts_in
+                 FROM conv c JOIN messages m ON m.conversation_id = c.id
+                WHERE c.ident <> ''
+                GROUP BY c.ident
+             ),
+             outb AS (
+               SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident,
+                      max(s.received_at) AS last_out,
+                      bool_or(s.received_at >= ${SP_HOJE}) AS responded_today,
+                      array_agg(EXTRACT(EPOCH FROM s.received_at) ORDER BY s.received_at) AS ts_out
+                 FROM staff_outbound_samples s
+                GROUP BY 1
+             ),
+             chan AS (
+               SELECT DISTINCT ON (ident) ident, channel
+                 FROM conv WHERE ident <> ''
+                ORDER BY ident, updated_at DESC
+             ),
+             -- EMENDA #8 (Opção B): retomada = saída NOSSA cuja lacuna desde o inbound ANTERIOR é
+             -- >= dormancy_days ($1). MESMA regra do retomadaLateral (src/reativacao.js), em forma de
+             -- JANELA: eventos in/out por ident em ordem; prev_in = último inbound antes da saída
+             -- (NULL = sem inbound anterior → não conta, igual ao original — evita falso-positivo
+             -- de 1º contato). reengajou = inbound do lead APÓS a retomada (max > threshold ≡ EXISTS).
+             ev AS (
+               SELECT c.ident, m.received_at, 'in'::text AS kind
+                 FROM conv c JOIN messages m ON m.conversation_id = c.id AND m.role = 'USER'
+                WHERE c.ident <> ''
+               UNION ALL
+               SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g'), s.received_at, 'out'
+                 FROM staff_outbound_samples s
+             ),
+             retom AS (
+               SELECT ident, max(received_at) AS retomada_em
+                 FROM (SELECT ident, received_at, kind,
+                              max(CASE WHEN kind = 'in' THEN received_at END)
+                                OVER (PARTITION BY ident ORDER BY received_at
+                                      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_in
+                         FROM ev) e
+                WHERE kind = 'out' AND prev_in <= received_at - make_interval(days => $1::int)
+                GROUP BY ident
+             )
+             SELECT l.id, l.name, l.phone, l.status, l.intent, l.temperatura_manual,
                     l.created_at, l.updated_at, l.desfecho, l.desfecho_em,
                     l.suggested_stage, l.stage_reasoning, l.stage_suggested_at,
                     -- Card compartilhado (recep-decisao) na Reativação: resumo cacheado + 1ª msg.
                     l.classification_reasoning AS reasoning, l.classification_confidence AS confidence,
-                    -- ADR-027 Reativação Etapa 1 — rastros do CICLO (derivado na leitura, sem status marcado).
-                    -- EMENDA #8 (Opção B): retomada DERIVADA DO LOG REAL DE ENVIO (staff_outbound_samples,
-                    -- via LATERAL rtm abaixo), NÃO de reabordagem_tentativas — que a recepção alimenta pelo
-                    -- /approve (nunca gravava 'enviado'). retomada_enviado_em = saída nossa após silêncio
-                    -- >= dormancy_days do inbound anterior; reengajou = inbound do lead APÓS essa retomada.
-                    -- Captura /approve E enviar-retomada, é retroativo, e conserta o bug do reengajou
-                    -- (que comparava contra um enviado_em sempre NULL). retomada_sugestao_pendente segue
-                    -- lendo reabordagem_tentativas (é a fila de sugestão, não a fonte do "foi enviado").
                     rtm.retomada_em AS retomada_enviado_em,
                     EXISTS (SELECT 1 FROM reabordagem_tentativas rt
                              WHERE rt.lead_id = l.id AND rt.status = 'pendente') AS retomada_sugestao_pendente,
-                    (rtm.retomada_em IS NOT NULL AND ${reengajouExists('rtm.retomada_em')}) AS retomada_reengajou,
-                    (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-                      WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
-                          = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
-                        AND m.role = 'USER'
-                      ORDER BY m.received_at ASC LIMIT 1) AS first_message,
+                    (rtm.retomada_em IS NOT NULL AND mg.last_in > rtm.retomada_em) AS retomada_reengajou,
+                    mg.first_message,
                     q.instrument,
                     q.availability,
                     COALESCE(q.qualification_complete, false) AS qualification_complete,
-                    (SELECT max(m.received_at)
-                       FROM messages m
-                       JOIN conversations cv ON cv.id = m.conversation_id
-                      WHERE cv.external_id = l.phone) AS last_contact_at,
+                    mg.last_any AS last_contact_at,
                     -- item B: última mensagem recebida DO lead (role USER).
-                    (SELECT max(m.received_at)
-                       FROM messages m
-                       JOIN conversations cv ON cv.id = m.conversation_id
-                      WHERE cv.external_id = l.phone AND m.role = 'USER') AS ultimo_contato_lead,
-                    (SELECT cv.channel FROM conversations cv
-                      WHERE regexp_replace(cv.external_id, '[^0-9]', '', 'g')
-                          = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
-                      ORDER BY cv.updated_at DESC LIMIT 1) AS channel,
+                    mg.last_in AS ultimo_contato_lead,
+                    ch.channel AS channel,
                     EXISTS (SELECT 1 FROM pending_approvals pa
                              WHERE pa.lead_id = l.id AND pa.status = 'PENDING') AS pending_approval,
                     -- ADR / Parte 5: flags p/ os filtros dos cards de indicadores.
-                    -- Mesmas fontes do painel (staff_outbound_samples, pending_approvals).
-                    EXISTS (SELECT 1 FROM staff_outbound_samples s
-                             WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
-                                 = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
-                               AND s.received_at >= ${SP_HOJE}) AS responded_today,
+                    COALESCE(ob.responded_today, false) AS responded_today,
                     EXISTS (SELECT 1 FROM pending_approvals pa
                              WHERE pa.lead_id = l.id AND pa.status = 'APPROVED' AND pa.decided_at >= ${SP_HOJE}) AS approved_today,
                     EXISTS (SELECT 1 FROM pending_approvals pa
                              WHERE pa.lead_id = l.id AND pa.status = 'EDITED' AND pa.decided_at >= ${SP_HOJE}) AS edited_today,
-                    -- D1 — "aguardando resposta" = a bola está conosco. AGUARDANDO_RECEPCAO só
-                    -- vale se NÃO houve saída NOSSA posterior ao estado (senão a bola JÁ virou —
-                    -- "estado vencido"). É leitura só: NÃO reescreve conversation_state no banco.
-                    -- state_computed_at NULL cai no fallback por timestamps (não travar). Empate
-                    -- (received_at == state_computed_at) resolve como aguardando (viés conservador).
-                    -- Fora: EXPERIMENTAL_AGENDADA, CONVERTED, desfecho.
+                    -- D1 — "aguardando resposta" = a bola está conosco (mesma régua de antes, agora
+                    -- sobre os agregados). AGUARDANDO_RECEPCAO só vale se NÃO houve saída nossa
+                    -- posterior ao estado; fallback por timestamps quando o estado é nulo/vencido.
                     (l.status <> 'EXPERIMENTAL_AGENDADA' AND l.status <> 'CONVERTED' AND l.desfecho IS NULL AND (
                       (l.conversation_state = 'AGUARDANDO_RECEPCAO' AND l.state_computed_at IS NOT NULL
-                        AND NOT EXISTS (SELECT 1 FROM staff_outbound_samples s
-                                         WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
-                                             = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
-                                           AND s.received_at > l.state_computed_at))
+                        AND NOT COALESCE(ob.last_out > l.state_computed_at, false))
                       OR ((l.conversation_state IS NULL
                            OR (l.conversation_state = 'AGUARDANDO_RECEPCAO' AND l.state_computed_at IS NULL)) AND
-                          -- CINTO (#3): REAÇÃO (emoji) NÃO é turno do cliente. A reação inbound é
-                          -- gravada em messages com role='USER' e body '[reação] …'; sem esse filtro,
-                          -- um "👍" reabria "devemos resposta" no fallback. Exclui só reação (coalesce
-                          -- trata body NULL de mídia: imagem/áudio continuam contando como turno).
-                          (SELECT max(m.received_at) FROM messages m
-                             JOIN conversations cv ON cv.id = m.conversation_id
-                            WHERE cv.external_id = l.phone AND m.role = 'USER'
-                              AND coalesce(m.body, '') NOT LIKE '[reação]%')
-                          > COALESCE((SELECT max(s.received_at) FROM staff_outbound_samples s
-                             WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
-                                 = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')), 'epoch'::timestamptz))
+                          mg.last_in_turno > COALESCE(ob.last_out, 'epoch'::timestamptz))
                     )) AS awaiting_reply,
                     -- P5: sequências de msgs p/ classificar o engajamento do cliente.
-                    (SELECT array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at)
-                       FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-                      WHERE cv.external_id = l.phone AND m.role = 'USER') AS ts_in,
-                    (SELECT array_agg(EXTRACT(EPOCH FROM s.received_at) ORDER BY s.received_at)
-                       FROM staff_outbound_samples s
-                      WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
-                          = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')) AS ts_out
+                    mg.ts_in,
+                    ob.ts_out
                FROM leads l
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
-               -- EMENDA #8 (Fatia B): retomada agora vem do helper compartilhado (src/reativacao.js),
-               -- a MESMA regra usada por metrics.js e plantao.js → os 3 dão o mesmo número. $1 = dormancy_days.
-               ${retomadaLateral('$1')}
+               LEFT JOIN LATERAL (
+                 SELECT regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g') AS ident
+               ) li ON true
+               LEFT JOIN msg   mg  ON li.ident <> '' AND mg.ident  = li.ident
+               LEFT JOIN outb  ob  ON li.ident <> '' AND ob.ident  = li.ident
+               LEFT JOIN chan  ch  ON li.ident <> '' AND ch.ident  = li.ident
+               LEFT JOIN retom rtm ON li.ident <> '' AND rtm.ident = li.ident
               WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
               ORDER BY l.created_at DESC
               LIMIT 1000`,
