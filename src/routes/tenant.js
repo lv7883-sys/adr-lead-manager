@@ -13,8 +13,7 @@ const { isUuid } = require('../validation');
 const { fromLegacy, canonicaliza, validaHorarioJson, normaliza, minToHm } = require('../horario'); // H1: horário por-dia
 const logger = require('../logger');
 const { resumoPlantao } = require('../plantao');   // ADR-040: plantão (resumo de saúde)
-// (#8 Fatia B) retomadaLateral/reengajouExists saíram daqui na reescrita perf do /leads (CTE
-// 'retom' reimplementa a MESMA regra em forma de janela); metrics.js/plantao.js seguem usando.
+const { retomadaCtes, identLateral } = require('../reativacao');   // #8 Fatia B: fonte única da retomada (forma em janela)
 const evolution = require('../evolution');   // E4: envio direto via Evolution
 const meta = require('../meta');              // E6: envio outbound via Messenger/IG
 const onboardingMeta = require('../onboardingMeta');   // conexão Meta por token de System User
@@ -730,29 +729,10 @@ router.get(
                  FROM conv WHERE ident <> ''
                 ORDER BY ident, updated_at DESC
              ),
-             -- EMENDA #8 (Opção B): retomada = saída NOSSA cuja lacuna desde o inbound ANTERIOR é
-             -- >= dormancy_days ($1). MESMA regra do retomadaLateral (src/reativacao.js), em forma de
-             -- JANELA: eventos in/out por ident em ordem; prev_in = último inbound antes da saída
-             -- (NULL = sem inbound anterior → não conta, igual ao original — evita falso-positivo
-             -- de 1º contato). reengajou = inbound do lead APÓS a retomada (max > threshold ≡ EXISTS).
-             ev AS (
-               SELECT c.ident, m.received_at, 'in'::text AS kind
-                 FROM conv c JOIN messages m ON m.conversation_id = c.id AND m.role = 'USER'
-                WHERE c.ident <> ''
-               UNION ALL
-               SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g'), s.received_at, 'out'
-                 FROM staff_outbound_samples s
-             ),
-             retom AS (
-               SELECT ident, max(received_at) AS retomada_em
-                 FROM (SELECT ident, received_at, kind,
-                              max(CASE WHEN kind = 'in' THEN received_at END)
-                                OVER (PARTITION BY ident ORDER BY received_at
-                                      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_in
-                         FROM ev) e
-                WHERE kind = 'out' AND prev_in <= received_at - make_interval(days => $1::int)
-                GROUP BY ident
-             )
+             -- EMENDA #8 (Opção B): retomada = saída NOSSA cuja lacuna desde o inbound ANTERIOR
+             -- é >= dormancy_days ($1). FONTE ÚNICA em src/reativacao.js (retomadaCtes — forma em
+             -- janela), a MESMA de metrics.js/plantao.js. reengajou usa mg.last_in (≡ rt_in daqui).
+             ${retomadaCtes('$1')}
              SELECT l.id, l.name, l.phone, l.status, l.intent, l.temperatura_manual,
                     l.created_at, l.updated_at, l.desfecho, l.desfecho_em,
                     l.suggested_stage, l.stage_reasoning, l.stage_suggested_at,
@@ -793,13 +773,11 @@ router.get(
                     ob.ts_out
                FROM leads l
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
-               LEFT JOIN LATERAL (
-                 SELECT regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g') AS ident
-               ) li ON true
+               ${identLateral('l')}
                LEFT JOIN msg   mg  ON li.ident <> '' AND mg.ident  = li.ident
                LEFT JOIN outb  ob  ON li.ident <> '' AND ob.ident  = li.ident
                LEFT JOIN chan  ch  ON li.ident <> '' AND ch.ident  = li.ident
-               LEFT JOIN retom rtm ON li.ident <> '' AND rtm.ident = li.ident
+               LEFT JOIN rt_retom rtm ON li.ident <> '' AND rtm.ident = li.ident
               WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
               ORDER BY l.created_at DESC
               LIMIT 1000`,
