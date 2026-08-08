@@ -6,7 +6,7 @@
 //
 const { withTenant } = require('./db');
 const { dentroDoExpediente, normaliza, minToHm } = require('./horario');
-const { retomadaLateral, reengajouExists } = require('./reativacao');   // #8 Fatia B: fonte única da retomada
+const { retomadaCtes, identLateral } = require('./reativacao');   // #8 Fatia B: fonte única da retomada (forma em janela)
 const { terminalSql, isTerminal, isConvertido } = require('./lifecycle');   // Fatia A: régua canônica lead ativo/convertido
 // Passo 1 — régua canônica de estágios (fonte única; substitui kanbanColuna/_ETAPAS_TRABALHO/
 // KANBAN_TRANSICOES/PERDIDO_DESFECHOS locais e o OR-proxy inline do computeFunil).
@@ -246,14 +246,17 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     // passássemos sem usar, o PG erra "could not determine data type of parameter").
     const reab = (
       await c.query(
-        `SELECT
+        `WITH ${retomadaCtes('$2')}
+         SELECT
            count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL
                               AND rtm.retomada_em >= now() - ($1 || ' days')::interval)::int AS total,
            count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL
                               AND rtm.retomada_em >= now() - ($1 || ' days')::interval
-                              AND ${reengajouExists('rtm.retomada_em')})::int AS responderam
+                              AND rin.last_in > rtm.retomada_em)::int AS responderam
            FROM leads l
-           ${retomadaLateral('$2')}
+           ${identLateral('l')}
+           LEFT JOIN rt_retom rtm ON li.ident <> '' AND rtm.ident = li.ident
+           LEFT JOIN rt_in   rin ON li.ident <> '' AND rin.ident = li.ident
           WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')`,
         [days, dormancyDays]
       )
@@ -261,7 +264,10 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     // Leads com retomada REAL (derivada de staff_outbound), pro % de silenciosos reabordados.
     const reabIds = new Set(
       (await c.query(
-        `SELECT l.id FROM leads l ${retomadaLateral('$1')}
+        `WITH ${retomadaCtes('$1')}
+         SELECT l.id FROM leads l
+           ${identLateral('l')}
+           LEFT JOIN rt_retom rtm ON li.ident <> '' AND rtm.ident = li.ident
           WHERE l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE') AND rtm.retomada_em IS NOT NULL`,
         [dormancyDays]))
         .rows.map((r) => r.id)

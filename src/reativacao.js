@@ -3,40 +3,57 @@
 //
 // Uma RETOMADA = uma saída nossa (staff_outbound_samples) cuja lacuna desde o inbound
 // ANTERIOR (o mais recente antes dela) é >= dormancy_days do tenant. Sem inbound anterior
-// → a comparação é NULL → NÃO conta (evita falso-positivo de 1º contato / resposta same-day).
+// → NÃO conta (evita falso-positivo de 1º contato / resposta same-day).
 //
-// Esta era a regra que a Fase 1 introduziu SÓ no /leads (tenant.js). A Fatia B extrai-a
-// pra cá e a reusa em tenant.js (/leads), metrics.js (BI de gestão) e plantao.js — assim os
-// TRÊS lugares dão o MESMO número de retomadas pros mesmos dados (antes divergiam: metrics
-// e plantão liam reabordagem_tentativas, a fonte antiga).
+// FORMA EM JANELA (2026-08-07 — lição do incidente de perf do /leads): CTEs que agregam UMA
+// vez por ident (dígitos do telefone) — O(n log n) no total. A forma antiga (LEFT JOIN
+// LATERAL por lead) re-varria staff/messages POR LINHA e, sob RLS, o planner rebaixa filtros
+// de expressão (regexp_replace não é leakproof) p/ depois da security qual → seq scan por
+// lead (~30s na tela de Leads; o Regente corta em 10s). Usada por tenant.js (/leads),
+// metrics.js (BI) e plantao.js — os TRÊS dão o MESMO número pros mesmos dados.
 //
-// Tabelas: por padrão UNQUALIFIED (o search_path do lead_manager_user já aponta pro schema).
-// `schema='lead_manager.'` p/ quem qualifica (plantao.js). `dorm` = expressão SQL de
-// dormancy_days (param, ex.: '$3', ou literal). `alias` = alias da tabela de leads na FROM.
+// USO (o chamador injeta na sua WITH):
+//   `WITH ${retomadaCtes('$2')}            -- ou { schema: 'lead_manager.' } p/ quem qualifica
+//    SELECT ... FROM leads l
+//    ${identLateral('l')}                   -- li.ident = dígitos de phone/meta_psid
+//    LEFT JOIN rt_retom rtm ON li.ident <> '' AND rtm.ident = li.ident
+//    LEFT JOIN rt_in   rin ON li.ident <> '' AND rin.ident = li.ident`
+//   retomada:          rtm.retomada_em (NULL = nunca)
+//   reengajou:         rin.last_in > rtm.retomada_em
+//   reengajou desde X: rin.last_in > rtm.retomada_em AND rin.last_in >= X
+//   (max > threshold ≡ EXISTS > threshold — as condições são fechadas p/ cima, então o
+//    máximo satisfaz sse algum elemento satisfaz. rt_in não referenciada não executa.)
 
-// LEFT JOIN LATERAL que devolve `rtm.retomada_em` (última saída-retomada do lead, ou NULL).
-function retomadaLateral(dorm, { alias = 'l', schema = '' } = {}) {
-  return `LEFT JOIN LATERAL (
-    SELECT max(s.received_at) AS retomada_em
+// CTEs rt_ev/rt_retom/rt_in. `dorm` = expressão SQL de dormancy_days (ex.: '$2' ou literal).
+function retomadaCtes(dorm, { schema = '' } = {}) {
+  return `rt_ev AS (
+    SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident, m.received_at, 'in'::text AS kind
+      FROM ${schema}messages m JOIN ${schema}conversations cv ON cv.id = m.conversation_id
+     WHERE m.role = 'USER'
+    UNION ALL
+    SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g'), s.received_at, 'out'
       FROM ${schema}staff_outbound_samples s
-     WHERE regexp_replace(s.external_id, '[^0-9]', '', 'g')
-         = regexp_replace(coalesce(${alias}.phone, ${alias}.meta_psid, ''), '[^0-9]', '', 'g')
-       AND (SELECT max(m.received_at) FROM ${schema}messages m
-              JOIN ${schema}conversations cv ON cv.id = m.conversation_id
-             WHERE cv.external_id = ${alias}.phone AND m.role = 'USER'
-               AND m.received_at < s.received_at)
-           <= s.received_at - make_interval(days => (${dorm})::int)
-  ) rtm ON true`;
+  ),
+  rt_retom AS (
+    SELECT ident, max(received_at) AS retomada_em
+      FROM (SELECT ident, received_at, kind,
+                   max(CASE WHEN kind = 'in' THEN received_at END)
+                     OVER (PARTITION BY ident ORDER BY received_at
+                           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_in
+              FROM rt_ev) e
+     WHERE kind = 'out' AND prev_in <= received_at - make_interval(days => (${dorm})::int)
+     GROUP BY ident
+  ),
+  rt_in AS (
+    SELECT ident, max(received_at) AS last_in FROM rt_ev WHERE kind = 'in' GROUP BY ident
+  )`;
 }
 
-// EXISTS de REENGAJAMENTO: inbound do lead APÓS a retomada (`retomadaCol` = expressão da
-// retomada_em, ex.: 'rtm.retomada_em'). `since` (opcional) = expressão SQL p/ limitar o
-// inbound a uma janela (ex.: SP_HOJE no plantão).
-function reengajouExists(retomadaCol, { alias = 'l', schema = '', since = null } = {}) {
-  const sinceClause = since ? ` AND m.received_at >= ${since}` : '';
-  return `EXISTS (SELECT 1 FROM ${schema}messages m JOIN ${schema}conversations cv ON cv.id = m.conversation_id
-                   WHERE cv.external_id = ${alias}.phone AND m.role = 'USER'
-                     AND m.received_at > ${retomadaCol}${sinceClause})`;
+// LATERAL do ident do lead (dígitos de phone/meta_psid) — a ponte leads↔CTEs acima.
+function identLateral(alias = 'l') {
+  return `LEFT JOIN LATERAL (
+    SELECT regexp_replace(coalesce(${alias}.phone, ${alias}.meta_psid, ''), '[^0-9]', '', 'g') AS ident
+  ) li ON true`;
 }
 
-module.exports = { retomadaLateral, reengajouExists };
+module.exports = { retomadaCtes, identLateral };

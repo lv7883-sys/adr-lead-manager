@@ -7,7 +7,7 @@
 // (recebe tenantId; sem hardcode). Custo: ~6 SELECTs de contagem por tenant, 1x/dia (+ o card).
 //
 const { withTenant } = require('./db');
-const { retomadaLateral, reengajouExists } = require('./reativacao');   // #8 Fatia B: fonte única da retomada
+const { retomadaCtes, identLateral } = require('./reativacao');   // #8 Fatia B: fonte única da retomada (forma em janela)
 
 async function _safe(fn, def) { try { return await fn(); } catch { return def; } }
 // #8 Fatia B — "hoje" em America/Sao_Paulo (antes era UTC → "hoje" do card divergia ~3h do
@@ -56,13 +56,17 @@ async function resumoPlantao(tenantId) {
     const reat = await _safe(async () => {
       const dorm = (await c.query(`SELECT dormancy_days FROM lead_manager.tenant_lead_config WHERE tenant_id=$1`, [tenantId])).rows[0];
       const N = Number.isInteger(dorm?.dormancy_days) && dorm.dormancy_days > 0 ? dorm.dormancy_days : 7;
+      // reengajou HOJE: rin.last_in > retomada E >= HOJE (max satisfaz sse existe inbound assim).
       return (await c.query(
-        `SELECT
+        `WITH ${retomadaCtes('$2', { schema: 'lead_manager.' })}
+         SELECT
            count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL AND rtm.retomada_em >= ${HOJE})::int enviadas,
            count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL
-                              AND ${reengajouExists('rtm.retomada_em', { schema: 'lead_manager.', since: HOJE })})::int reengajaram
+                              AND rin.last_in > rtm.retomada_em AND rin.last_in >= ${HOJE})::int reengajaram
            FROM lead_manager.leads l
-           ${retomadaLateral('$2', { schema: 'lead_manager.' })}
+           ${identLateral('l')}
+           LEFT JOIN rt_retom rtm ON li.ident <> '' AND rtm.ident = li.ident
+           LEFT JOIN rt_in   rin ON li.ident <> '' AND rin.ident = li.ident
           WHERE l.tenant_id=$1 AND l.status NOT IN ('NOT_LEAD','REVIEW_QUEUE')`,
         [tenantId, N])).rows[0];
     }, null);

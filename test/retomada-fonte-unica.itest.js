@@ -7,31 +7,38 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { Client } = require('pg');
-const { retomadaLateral, reengajouExists } = require('../src/reativacao');
+const { retomadaCtes, identLateral } = require('../src/reativacao');
 
 let c;
 const SP_HOJE = "date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo'";
 const UTC_HOJE = "date_trunc('day', now())";
 
-// as 3 formas, TODAS construídas do MESMO helper:
-// (A) /leads chip — retomada_em por lead
-const CHIP = `SELECT rtm.retomada_em, (rtm.retomada_em IS NOT NULL AND ${reengajouExists('rtm.retomada_em')}) reeng
-  FROM leads l ${retomadaLateral('$2')} WHERE l.phone = $1`;
+// as 3 formas, TODAS construídas do MESMO helper (forma em janela — 2026-08-07):
+const JOINS = `${identLateral('l')}
+  LEFT JOIN rt_retom rtm ON li.ident <> '' AND rtm.ident = li.ident
+  LEFT JOIN rt_in   rin ON li.ident <> '' AND rin.ident = li.ident`;
+// (A) /leads chip — retomada_em por lead (reengajou: max > threshold ≡ EXISTS)
+const CHIP = `WITH ${retomadaCtes('$2')}
+  SELECT rtm.retomada_em, (rtm.retomada_em IS NOT NULL AND rin.last_in > rtm.retomada_em) reeng
+    FROM leads l ${JOINS} WHERE l.phone = $1`;
 // contagem de leads com retomada (universo do dashboard) — espelha o que o chip enumeraria
-const CHIP_COUNT = `SELECT count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL)::int n
-  FROM leads l ${retomadaLateral('$1')} WHERE l.status NOT IN ('NOT_LEAD','REVIEW_QUEUE')`;
+const CHIP_COUNT = `WITH ${retomadaCtes('$1')}
+  SELECT count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL)::int n
+    FROM leads l ${JOINS} WHERE l.status NOT IN ('NOT_LEAD','REVIEW_QUEUE')`;
 // (B) metrics — reabordados no período + reengajaram (unqualified)
-const METRICS = `SELECT
+const METRICS = `WITH ${retomadaCtes('$2')}
+  SELECT
   count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL AND rtm.retomada_em >= now()-($1||' days')::interval)::int total,
   count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL AND rtm.retomada_em >= now()-($1||' days')::interval
-                    AND ${reengajouExists('rtm.retomada_em')})::int responderam
-  FROM leads l ${retomadaLateral('$2')} WHERE l.status NOT IN ('NOT_LEAD','REVIEW_QUEUE')`;
+                    AND rin.last_in > rtm.retomada_em)::int responderam
+  FROM leads l ${JOINS} WHERE l.status NOT IN ('NOT_LEAD','REVIEW_QUEUE')`;
 // (C) plantão — retomadas HOJE (SP) + reengajaram HOJE (schema-qualified, exercita o prefixo)
-const PLANTAO = `SELECT
+const PLANTAO = `WITH ${retomadaCtes('$1', { schema: 'lead_manager.' })}
+  SELECT
   count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL AND rtm.retomada_em >= ${SP_HOJE})::int enviadas,
   count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL
-                    AND ${reengajouExists('rtm.retomada_em', { schema: 'lead_manager.', since: SP_HOJE })})::int reengajaram
-  FROM lead_manager.leads l ${retomadaLateral('$1', { schema: 'lead_manager.' })}
+                    AND rin.last_in > rtm.retomada_em AND rin.last_in >= ${SP_HOJE})::int reengajaram
+  FROM lead_manager.leads l ${JOINS}
  WHERE l.status NOT IN ('NOT_LEAD','REVIEW_QUEUE')`;
 
 const chip = async (phone, dorm = 7) => (await c.query(CHIP, [phone, dorm])).rows[0];
@@ -120,8 +127,9 @@ test('(5) fuso SP: retomada às 22h BRT HOJE conta hoje; 23h BRT ONTEM não (UTC
   assert.equal((await plantao()).enviadas, 1, 'SP: só o de hoje conta (o de ontem fica fora)');
   // demonstra o bug antigo: sob UTC o de ONTEM (23h BRT = 02h UTC hoje) vazaria pra "hoje"
   const utc = (await c.query(
-    `SELECT count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL AND rtm.retomada_em >= ${UTC_HOJE})::int n
-       FROM leads l ${retomadaLateral('$1')} WHERE l.status NOT IN ('NOT_LEAD','REVIEW_QUEUE') AND l.phone LIKE '19000005%'`, [7])).rows[0].n;
+    `WITH ${retomadaCtes('$1')}
+     SELECT count(*) FILTER (WHERE rtm.retomada_em IS NOT NULL AND rtm.retomada_em >= ${UTC_HOJE})::int n
+       FROM leads l ${JOINS} WHERE l.status NOT IN ('NOT_LEAD','REVIEW_QUEUE') AND l.phone LIKE '19000005%'`, [7])).rows[0].n;
   assert.ok(utc >= 2, `UTC contaria os 2 (leak do fuso): utc=${utc}`);
 });
 
