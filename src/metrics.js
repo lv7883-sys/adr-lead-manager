@@ -38,6 +38,12 @@ function spHourDow(ts) {
 function spDay(ts) {
   return new Date(new Date(ts).getTime() - 3 * 3600 * 1000).toISOString().slice(0, 10);
 }
+// Chave canônica de instrumento (texto livre da IA): minúsculas, sem acentos,
+// espaços colapsados — "Violão"/"violao " agregam na mesma linha do BI.
+function instrKey(s) {
+  return String(s || '').trim().replace(/\s+/g, ' ').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
 // Faixa de silêncio (PARTE 3): 3-7 / 7-15 / +15 dias.
 function faixaSilencio(dias) {
   if (dias > 15) return 'd15_mais';
@@ -432,8 +438,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     // BLOCO 2 — funil / temperatura / heatmap / instrumento
     const funil = { NEW: 0, QUALIFYING: 0, QUALIFIED: 0, CONVERTED: 0, OUTRO: 0 };
     const temps = { quente: 0, morno: 0, frio: 0 };
-    const instrProcura = new Map();
-    const instrConvert = new Map();
+    const instrProcura = new Map(); // instrKey -> { n, conv, variantes: Map(raw -> count) }
     const porCanal = new Map();
     for (const l of rows) {
       // Fatia A: "convertido" unificado (status CONVERTED/WON OU desfecho='matriculado') — antes
@@ -443,8 +448,16 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       else funil[l.status in funil ? l.status : 'OUTRO']++;
       temps[temperatura(l)]++;
       if (l.instrument) {
-        instrProcura.set(l.instrument, (instrProcura.get(l.instrument) || 0) + 1);
-        if (l.desfecho === 'matriculado') instrConvert.set(l.instrument, (instrConvert.get(l.instrument) || 0) + 1);
+        // Instrumento é TEXTO LIVRE (extraído pela IA): "Bateria"/"bateria"/"violao "
+        // são o mesmo — agrega pela chave normalizada; o rótulo sai da variante
+        // mais frequente (na montagem do payload, abaixo).
+        const k = instrKey(l.instrument);
+        const e = instrProcura.get(k) || { n: 0, conv: 0, variantes: new Map() };
+        e.n++;
+        if (l.desfecho === 'matriculado') e.conv++;
+        const raw = String(l.instrument).trim().replace(/\s+/g, ' ').toLowerCase();
+        e.variantes.set(raw, (e.variantes.get(raw) || 0) + 1);
+        instrProcura.set(k, e);
       }
       const ch = l.channel || '(sem canal)';
       porCanal.set(ch, (porCanal.get(ch) || 0) + 1);
@@ -631,8 +644,18 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
         temperatura: temps,
         heatmap: heat,
         por_mes: porMes.map((m) => ({ mes: m.mes, n: Number(m.n) })),
-        instrumento_procurado: Object.fromEntries([...instrProcura.entries()].sort((a, b) => b[1] - a[1])),
-        instrumento_convertido: Object.fromEntries([...instrConvert.entries()].sort((a, b) => b[1] - a[1])),
+        // Rótulo = variante mais frequente (capitalizada); o MESMO rótulo indexa os dois
+        // objetos, pro cruzamento procurado×matrículas do dashboard continuar batendo.
+        ...(() => {
+          const lista = [...instrProcura.values()].map((e) => {
+            const raw = [...e.variantes.entries()].sort((a, b) => b[1] - a[1])[0][0];
+            return { label: raw.charAt(0).toUpperCase() + raw.slice(1), n: e.n, conv: e.conv };
+          }).sort((a, b) => b.n - a.n);
+          return {
+            instrumento_procurado: Object.fromEntries(lista.map((e) => [e.label, e.n])),
+            instrumento_convertido: Object.fromEntries(lista.filter((e) => e.conv).map((e) => [e.label, e.conv])),
+          };
+        })(),
       },
       bloco3_desfechos: {
         com_desfecho: comDesfecho.length,
