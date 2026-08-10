@@ -134,10 +134,16 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
               AND coalesce(l.desfecho, '') <> 'cliente'          -- 079: pré-existente fora do BI (numerador E denominador)
          ),
          inb AS (
+           -- Recorte NO PERÍODO: o join é por ident (telefone), então sem o filtro de
+           -- received_at um lead novo herdaria first_in/first_out do histórico inteiro
+           -- do número (ex-aluno, lead antigo) — SLA e gráfico semanal saíam com semanas
+           -- de um ano atrás. created_at >= now()-days (base) garante que as msgs do
+           -- próprio lead estão dentro da janela.
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
                   min(m.received_at) AS first_in, max(m.received_at) AS last_in
              FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
             WHERE cv.tenant_id = $1 AND m.role = 'USER'
+              AND m.received_at >= now() - ($2 || ' days')::interval
             GROUP BY 1
          ),
          outb AS (
@@ -147,6 +153,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
              FROM staff_outbound_samples s
             WHERE s.tenant_id = $1
               AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+              AND s.received_at >= now() - ($2 || ' days')::interval
             GROUP BY 1
          ),
          chan AS (
@@ -497,10 +504,14 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
               AND NOT ${terminalSql('l')}   -- Fatia A: ¬TERMINAL canônico (CONVERTED/WON OU desfecho)
          ),
          inb AS (
+           -- Mesmo recorte NO PERÍODO do SLA: sem ele, gaps de conversas antigas do
+           -- mesmo número (join por ident) contaminavam o engajamento.
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
                   array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) AS ts
              FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-            WHERE cv.tenant_id = $1 AND m.role = 'USER' GROUP BY 1
+            WHERE cv.tenant_id = $1 AND m.role = 'USER'
+              AND m.received_at >= now() - ($2 || ' days')::interval
+            GROUP BY 1
          ),
          outb AS (
            SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident,
@@ -508,6 +519,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
              FROM staff_outbound_samples s
             WHERE s.tenant_id = $1
               AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+              AND s.received_at >= now() - ($2 || ' days')::interval
             GROUP BY 1
          )
          SELECT b.id, i.ts AS inb_ts, o.ts AS out_ts
