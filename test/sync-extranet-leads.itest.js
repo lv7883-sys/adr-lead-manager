@@ -46,8 +46,9 @@ test('(u) unit — normSituacao/mapSituacao', () => {
   assert.equal(normSituacao('Exp. Agendada'), 'exp agendada');
   assert.deepEqual(mapSituacao('Exp. Agendada'), { key: 'experimental', known: true });
   assert.deepEqual(mapSituacao('CONEXÃO'), { key: 'qualificando', known: true });
-  assert.deepEqual(mapSituacao('Matriculado'), { key: 'convertido', known: true });
-  assert.deepEqual(mapSituacao('Desistiu'), { key: null, known: true });       // mirror-only mapeado
+  assert.deepEqual(mapSituacao('Ganhou'), { key: 'convertido', known: true });
+  assert.deepEqual(mapSituacao('Perdeu'), { key: null, known: true });         // mirror-only mapeado
+  assert.deepEqual(mapSituacao('Stand By'), { key: null, known: true });       // mirror-only mapeado
   assert.deepEqual(mapSituacao('Situação Nova Qualquer'), { key: null, known: false });
 });
 
