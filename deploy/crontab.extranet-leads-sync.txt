@@ -1,0 +1,21 @@
+# Migr 102 — Cron de LEADS da Extranet (mod_leads): a cada 3h em HORÁRIO COMERCIAL (8-20h),
+# America/Sao_Paulo → 08h, 11h, 14h, 17h, 20h. Decisão do Leo 2026-08-11: lead cadastrado na
+# recepção de manhã aparece no LM no mesmo dia (follow-up rápido), sem disputar a madrugada
+# dos syncs pesados (recursos 03h, cadastro 04h).
+#
+# Run CURTO (1–3 fetches de lista, ~1min com o gap de 25s). LOCK: o adapter pega
+# pg_advisory_lock(2037495811) POR FETCH e solta entre requests — serializa com o cadastro,
+# os recursos e o adr-dashboard sem deadlock; quem chegar primeiro espera na fila.
+#
+# IDEMPOTENTE: upsert por (tenant_id, extranet_id); re-run não duplica lead nem evento.
+# Salvaguarda aborta antes de escrever se o snapshot vier < 66% do presente (parse quebrado/login).
+# Tenant com extranet_lead_mode='off' é pulado (kill-switch por tenant, sem tocar o cron).
+#
+# Instalar no HOST (crontab do root) — idempotente:
+#   ( crontab -l 2>/dev/null | grep -v 'extranet-leads-sync'; \
+#     grep -vE '^\s*#' /apps/lead-manager/deploy/crontab.extranet-leads-sync.txt ) | crontab -
+#
+# Conferir:  crontab -l | grep extranet-leads-sync
+# Log:       /var/log/extranet-leads-sync.log
+CRON_TZ=America/Sao_Paulo
+0 8-20/3 * * * docker exec adr-lead-manager node /app/src/cadastro/daily-sync-leads.js >> /var/log/extranet-leads-sync.log 2>&1

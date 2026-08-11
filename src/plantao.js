@@ -77,7 +77,12 @@ async function resumoPlantao(tenantId) {
     const cad = await _safe(async () => (await c.query(
       `SELECT status, duration_ms, stats, error_kind, finished_at,
               (now() - finished_at) > interval '26 hours' AS stale
-         FROM lead_manager.cadastro_sync_log WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 1`, [tenantId])).rows[0] || null, null);
+         FROM lead_manager.cadastro_sync_log WHERE tenant_id=$1 AND kind='SCRAPE_EXTRANET'
+        ORDER BY created_at DESC LIMIT 1`, [tenantId])).rows[0] || null, null);
+    // ⚠ kind: a 102 passou a gravar TAMBÉM kind='SCRAPE_EXTRANET_LEADS' (5 runs/dia) nesta tabela;
+    // sem o filtro, este card leria o run de LEADS como se fosse o de cadastro (stats erradas +
+    // stale de 26h nunca dispararia). O card 'Scrape' abaixo segue SEM filtro de propósito
+    // (falha de login/block de QUALQUER sync da Extranet deve aparecer lá).
     if (!cad) {
       // "nunca rodou" NÃO é problema (o 1º run é o 04h natural) → CINZA/neutro, não amarelo.
       push({ key: 'cadastro_sync', label: 'Cadastro sync', status: 'cinza', numeros: 'ainda não rodou', detalhe: '1º run às 04h', link: null });

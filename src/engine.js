@@ -13,6 +13,7 @@ const redisClient = require('./redisClient');
 const gating = require('./gating');
 const { kanbanColuna } = require('./metrics');   // ADR sugestão-de-etapa: travas de posição
 const stages = require('./stages');              // régua canônica: KEY_TO_STATUS/KANBAN_TRANSICOES (auto-apply)
+const extranetStage = require('./cadastro/extranetLeadStage');   // migr 102: HUMANO > EXTRANET > IA
 const { gateSaida } = require('./bolaGate');     // ADR-030 Passo 2: gate determinístico da saída
 
 const CONFIDENCE_THRESHOLD = 0.7;
@@ -206,6 +207,16 @@ async function _autoAplicarEtapa(c, { tenantId, leadId, destCol, reasoning, sour
   const origem = stages.stageOfLead(lead);
   if (origem === destCol) return { terminal: true };                       // já está lá (nada a mover)
   if (!(stages.KANBAN_TRANSICOES[origem] || []).includes(destCol)) return { invalid: true, origem };
+  // HIERARQUIA EXTRANET > IA (migr 102): a IA não REBAIXA sozinha um lead abaixo da etapa
+  // sustentada por FATO da Extranet (situação mapeada no espelho extranet_lead). Ela ainda pode
+  // SUGERIR a volta (suggested_stage fica gravado acima) — a recepção decide. Sem essa guarda
+  // haveria tira-e-põe: a IA rebaixa no evento, o sync das 3h re-avança, e assim por diante.
+  if (extranetStage.ORDINAL[destCol] < extranetStage.ORDINAL[origem]) {
+    const sustained = await extranetStage.sustainedStageKey(c, { tenantId, leadId });
+    if (sustained && extranetStage.ORDINAL[destCol] < extranetStage.ORDINAL[sustained]) {
+      return { extranetLocked: true, origem, sustained };
+    }
+  }
   // UPDATE de status por destino — espelho EXATO dos ramos de _aplicarMoverEtapa (não-terminais zeram
   // desfecho; 'convertido' grava matriculado). 'perdido' nunca é auto (exige motivo) → não cai aqui.
   if (destCol === 'qualificando') await c.query("UPDATE leads SET status='QUALIFYING', desfecho=NULL, desfecho_em=NULL, updated_at=now() WHERE id=$1", [leadId]);

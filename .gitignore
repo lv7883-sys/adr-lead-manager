@@ -10,6 +10,10 @@
 # Evita que um `git add -A` arraste mídia pesada e o extranet-session.json.
 uploads/
 
+# HTML bruto do probe da Extranet (contém PII real — nomes/telefones de leads).
+# A fixture ANONIMIZADA versionada é test/fixtures/extranet-leads-lista.html.
+test/fixtures-probe-raw/
+
 # Dependências
 node_modules/
 
