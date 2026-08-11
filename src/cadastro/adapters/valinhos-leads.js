@@ -5,8 +5,11 @@
 // Reusa o extranet-client (sessão/re-login/throttle) + advisory lock POR FETCH (molde
 // valinhos-contratos: gap FORA do lock, clique humano tem prioridade na fila).
 //
-// TELA (probe 2026-08-11): /mod_leads/lista_todos_leads.php?pg=N&palavra=&vencido=0&curso=&statusA=&motivo=&npg=50
-//   — params EXATOS do JS da própria tela (função de busca); npg máximo = 50; sem endpoint monta_lista.
+// TELA (probes 2026-08-11): /mod_leads/lista_todos_leads.php?pg=N&npg=50 — URL MÍNIMA, de propósito.
+//   ⚠ NÃO mandar os params de filtro vazios (palavra=&vencido=0&curso=&statusA=&motivo=): a presença
+//   deles cai num branch do PHP que devolve só o SUBCONJUNTO de follow-up vencido (o run inicial veio
+//   sem nenhum 'Exp. Agendada' por isso — diagnóstico no probe v2). A mínima devolve a lista COMPLETA
+//   em ordem desc de Data, idêntica ao navegador. npg máximo = 50; sem endpoint monta_lista.
 //   Linha: <tr> com id em contato_edit(<id>); tds = [0]=data<br/>hora [1]=Nome/fone visível/Curso/Prof
 //   [2]=badge Situação [3]=Últ.Contato [4]=Próx.Contato [5]=ações. Fone: usar o TEXTO visível
 //   "(19)99422-8953" — o href do wa.me vem com DDD 0-prefixado (55019...) que quebraria a chave.
@@ -116,7 +119,7 @@ async function produce(binding, { tenantId } = {}) {
   const windowStart = new Date(Date.now() - WINDOW_DIAS * 864e5).toISOString().slice(0, 10);
   const leads = []; const seen = new Set();
   for (let pg = 1; pg <= MAX_PAGES; pg++) {
-    const h = await get(`/mod_leads/lista_todos_leads.php?pg=${pg}&palavra=&vencido=0&curso=&statusA=&motivo=&npg=${NPG}`);
+    const h = await get(`/mod_leads/lista_todos_leads.php?pg=${pg}&npg=${NPG}`);
     const rows = parseLista(h);
     stats.paginas++;
     let novos = 0;

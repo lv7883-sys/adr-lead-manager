@@ -1,10 +1,10 @@
 'use strict';
 //
 // probe-valinhos-leads.js — PROBE one-shot READ-ONLY da tela de leads da Extranet (mod_leads).
-// Objetivo: capturar o HTML real (lista + paginação + edição de UM lead) para calibrar o parser
-// do adapter valinhos-leads. NUNCA roda pelo cron; rodar manualmente 1x:
+// v2 (diagnóstico): compara a lista SEM parâmetros (o que o navegador mostra) com a URL
+// paginada que o adapter usa — o run inicial veio sem nenhum 'Exp. Agendada', suspeita de
+// que os params retornam um SUBCONJUNTO. NUNCA roda pelo cron; rodar manualmente:
 //   docker exec adr-lead-manager node /app/src/cadastro/adapters/probe-valinhos-leads.js
-// Saída: /app/uploads/.probe/leads-*.html + resumo no stdout (endpoint, params, Situações).
 // Só GET — escrever na Extranet é proibido (regra do projeto).
 //
 const fs = require('node:fs');
@@ -12,8 +12,11 @@ const path = require('node:path');
 const { pool, withTenant } = require('../../db');
 const { withExtranetLock } = require('../../resources/extranet-lock');
 const client = require('../../resources/adapters/extranet-client');
+const { parseLista } = require('./valinhos-leads');
 
 const OUT_DIR = process.env.PROBE_OUT_DIR || '/app/uploads/.probe';
+const t0 = Date.now();
+const log = (...a) => console.log(`[probe +${Math.round((Date.now() - t0) / 1000)}s]`, ...a);
 
 async function firstBinding() {
   const { rows: tenants } = await pool.query('SELECT tenant_id FROM tenants_active()');
@@ -26,42 +29,19 @@ async function firstBinding() {
   throw new Error('nenhum binding SCRAPE_EXTRANET ativo');
 }
 
-// <select name=X> → { name, options: [{value, label}] } (mesmo decode manual dos adapters)
-const dec = (s) => String(s || '')
-  .replace(/&ccedil;/g, 'ç').replace(/&atilde;/g, 'ã').replace(/&otilde;/g, 'õ').replace(/&aacute;/g, 'á')
-  .replace(/&eacute;/g, 'é').replace(/&iacute;/g, 'í').replace(/&oacute;/g, 'ó').replace(/&uacute;/g, 'ú')
-  .replace(/&acirc;/g, 'â').replace(/&ecirc;/g, 'ê').replace(/&ocirc;/g, 'ô').replace(/&agrave;/g, 'à')
-  .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
-function selects(html) {
-  const out = [];
-  for (const m of html.matchAll(/<select[^>]*name=["']([^"']+)["'][\s\S]*?<\/select>/gi)) {
-    const options = [...m[0].matchAll(/<option[^>]*value=["']([^"']*)["'][^>]*>([^<]*)</gi)]
-      .map((o) => ({ value: o[1], label: dec(o[2]).trim() }));
-    out.push({ name: m[1], options });
-  }
-  return out;
-}
-function inputs(html) {
-  return [...html.matchAll(/<input[^>]*name=["']([^"']+)["'][^>]*>/gi)].map((m) => m[1]);
-}
-
-const t0 = Date.now();
-const log = (...a) => console.log(`[probe +${Math.round((Date.now() - t0) / 1000)}s]`, ...a);
-
 async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  log('resolvendo binding SCRAPE_EXTRANET…');
-  const { tenantId, binding } = await firstBinding();
+  const { binding } = await firstBinding();
   const cfg = binding.config || {};
   const senha = require('../../crypto').decrypt(cfg.credential_enc);
   if (!senha) throw new Error('credencial vazia/indecifrável no binding');
   const creds = { email: cfg.email, senha, perfil: cfg.perfil, unidade: cfg.unidade };
-  log('binding ok (tenant', tenantId + '); resolvendo sessão (login Keycloak se não houver cache — pode levar ~1-2min)…');
+  log('resolvendo sessão…');
   let session = await client.getSession(creds);
-  log('sessão ok; iniciando fetches (gap ≥25s entre cada um, anti-WAF)…');
+  log('sessão ok');
 
   const get = async (p) => {
-    log('aguardando gap + advisory lock para GET', p);
+    log('GET', p);
     await client.throttleGap();
     try {
       return await withExtranetLock(() => client.fetchAuthed(p, session, { noGap: true }));
@@ -74,42 +54,29 @@ async function main() {
       throw e;
     }
   };
-  const save = (name, html) => {
-    fs.writeFileSync(path.join(OUT_DIR, name), html);
-    log(`salvo ${name} (${html.length} bytes)`);
+  const dump = (rows, label) => {
+    console.log(`\n== ${label}: ${rows.length} linhas ==`);
+    for (const r of rows.slice(0, 20)) {
+      console.log(` ${r.extranetId} | ${(r.dataCadastro || '').slice(0, 16)} | ${(r.situacao || '?').padEnd(15)} | ${r.nome}`);
+    }
   };
 
-  // 1) A tela da lista (revela form de filtro, action e o mecanismo de paginação)
+  // (a) a tela como o navegador vê (sem params)
   const tela = await get('/mod_leads/lista_todos_leads.php');
-  save('leads-tela.html', tela);
-  console.log('[probe] tenant:', tenantId);
-  console.log('[probe] inputs do form:', JSON.stringify(inputs(tela)));
-  for (const s of selects(tela)) console.log(`[probe] select "${s.name}":`, JSON.stringify(s.options));
-  const actions = [...tela.matchAll(/(?:action|href|url|open)\s*[:=(]\s*["']([^"']*mod_leads[^"']*)["']/gi)].map((m) => m[1]);
-  console.log('[probe] referências mod_leads na tela:', JSON.stringify([...new Set(actions)]));
+  fs.writeFileSync(path.join(OUT_DIR, 'diag-tela.html'), tela);
+  dump(parseLista(tela), 'SEM params (navegador)');
 
-  // 2) Endpoint de paginação: monta_lista.php se referenciado (padrão da casa), senão a própria tela com pg
-  const montaRef = actions.find((a) => /monta_lista\.php/i.test(a));
-  const pgPath = montaRef
-    ? `/mod_leads/monta_lista.php?pg=1&num_por_pagina=500&nome=&curso=&status=`
-    : `/mod_leads/lista_todos_leads.php?pg=1&num_por_pagina=500&nome=&curso=&status=`;
-  const pg1 = await get(pgPath);
-  save('leads-pg1.html', pg1);
-  console.log('[probe] paginação usada:', pgPath);
-  console.log('[probe] <tr> na pg1:', (pg1.match(/<tr/gi) || []).length);
+  // (b) a URL exata do adapter (pg1, npg=50, params completos do JS da tela)
+  const sync1 = await get('/mod_leads/lista_todos_leads.php?pg=1&palavra=&vencido=0&curso=&statusA=&motivo=&npg=50');
+  fs.writeFileSync(path.join(OUT_DIR, 'diag-sync-pg1.html'), sync1);
+  dump(parseLista(sync1), 'URL do adapter (pg=1, npg=50)');
 
-  // 3) Tela de edição de UM lead (se a linha trouxer link com id)
-  const edit = (pg1.match(/["']([^"']*mod_leads[^"']*(?:update|edit|detalh)[^"']*\bid=\d+[^"']*)["']/i)
-    || pg1.match(/["']([^"']*\bid=\d+[^"']*)["']/i) || [])[1];
-  if (edit) {
-    const p = edit.startsWith('/') ? edit : `/mod_leads/${edit.replace(/^\.\//, '')}`;
-    const h = await get(p.replace(/&amp;/g, '&'));
-    save('leads-edit.html', h);
-    console.log('[probe] edição capturada de:', p);
-  } else {
-    console.log('[probe] NENHUM link de edição com id encontrado na pg1 — inspecionar leads-pg1.html');
-  }
-  console.log('[probe] concluído. Arquivos em', OUT_DIR);
+  // (c) variação: só pg+npg (sem os filtros vazios) — isola qual param muda o resultado
+  const min1 = await get('/mod_leads/lista_todos_leads.php?pg=1&npg=50');
+  fs.writeFileSync(path.join(OUT_DIR, 'diag-min-pg1.html'), min1);
+  dump(parseLista(min1), 'mínima (pg=1&npg=50)');
+
+  log('concluído. HTMLs em', OUT_DIR);
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error('[probe] ERRO:', e.message); process.exit(1); });
