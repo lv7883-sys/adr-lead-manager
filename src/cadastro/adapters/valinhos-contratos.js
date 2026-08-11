@@ -17,6 +17,18 @@ const client = require('../../resources/adapters/extranet-client');
 
 const kind = 'SCRAPE_EXTRANET';
 
+// RETRY POR-FETCH em erro TRANSIENTE (rede/timeout/429/cooldown/sessão): este run faz
+// ~1.200 requisições em ~8h; um único "fetch failed" NÃO pode descartar o run inteiro
+// (a salvaguarda exige snapshot completo, então não dá pra gravar parcial). Erros
+// não-transientes (credencial etc.) falham na hora. Backoff exponencial com teto.
+const FETCH_RETRIES = Number(process.env.CADASTRO_FETCH_RETRIES ?? 4);
+const _TRANSIENT_CODES = new Set(['BLOCK', 'TIMEOUT', 'SESSION_EXPIRED', 'NETWORK', 'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNRESET']);
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function _isTransient(e) {
+  if (e && _TRANSIENT_CODES.has(e.code)) return true;
+  return /cooldown|rate|429|fetch failed|network|socket|ECONN|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|timeout de \d+s/i.test((e && e.message) || '');
+}
+
 // ---- parse helpers (idênticos ao ctr_runner provado na ingestão 1x) ----
 const toISO = (br) => { const m = String(br || '').match(/(\d{2})\/(\d{2})\/(\d{4})/); return m ? `${m[3]}-${m[2]}-${m[1]}` : null; };
 const dec = (s) => String(s || '')
@@ -47,20 +59,31 @@ async function produce(binding, { tenantId } = {}) {
   const creds = { email: cfg.email, senha, perfil: cfg.perfil, unidade: cfg.unidade };
 
   let session = await client.getSession(creds);
-  const stats = { fetches: 0, fichas: 0 };
-  // 1 requisição: gap FORA do lock; fetch SOB o lock (noGap: o gap já foi dado); re-login 1x.
+  const stats = { fetches: 0, fichas: 0, retries: 0 };
+  // 1 requisição: gap FORA do lock; fetch SOB o lock (noGap: o gap já foi dado). Re-loga em
+  // sessão expirada e RETENTA em erro transiente (backoff), até FETCH_RETRIES; erro não-
+  // transiente (credencial) sobe na hora. O laço é limitado (nunca fica preso).
   const get = async (path) => {
-    await client.throttleGap();
-    stats.fetches++;
-    try {
-      return await withExtranetLock(() => client.fetchAuthed(path, session, { noGap: true }));
-    } catch (e) {
-      if (/expirad|login|redirect|SESSION_EXPIRED/i.test(e.message)) {
-        session = await client.getSession(creds, { force: true });
-        return await withExtranetLock(() => client.fetchAuthed(path, session, { noGap: true }));
+    let lastErr;
+    for (let attempt = 0; attempt <= FETCH_RETRIES; attempt++) {
+      await client.throttleGap();
+      try {
+        const r = await withExtranetLock(() => client.fetchAuthed(path, session, { noGap: true }));
+        stats.fetches++;
+        return r;
+      } catch (e) {
+        lastErr = e;
+        // sessão expirada: re-loga e tenta de novo (não consome a cota de retries transientes)
+        if (/expirad|login|redirect|SESSION_EXPIRED/i.test(e.message)) {
+          session = await client.getSession(creds, { force: true });
+          continue;
+        }
+        if (!_isTransient(e) || attempt === FETCH_RETRIES) throw e;   // não-transiente ou acabaram as tentativas
+        stats.retries++;
+        await _sleep(Math.min(60000, 5000 * 2 ** attempt));           // 5s, 10s, 20s, 40s… (teto 60s)
       }
-      throw e;
     }
+    throw lastErr;   // esgotou as tentativas (todas transientes)
   };
 
   // ----- LISTA paginada (300/pág; dedup por idC; para quando não traz idC novo) -----
