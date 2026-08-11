@@ -34,6 +34,7 @@ function normSituacao(s) {
 const SITUACAO_MAP = {
   'pendente': null,                 // estado inicial da Extranet — lead novo já nasce NEW aqui
   'conexao': 'qualificando',
+  'atendido': 'qualificando',       // status legado (fora do select de filtro): recepção em contato
   'exp agendada': 'experimental',
   'exp realizada': 'experimental',  // 'realizada' não é coluna do kanban (funilOnly) — sustenta experimental
   'ganhou': 'convertido',           // matrícula (decisão 2026-08-11: aplica direto, desfecho_source='extranet')
