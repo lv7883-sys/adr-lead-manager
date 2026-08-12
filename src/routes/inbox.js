@@ -240,12 +240,16 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
                    AND rd.venc IS NOT DISTINCT FROM rn.venc) AS dismissed,
         m.renovacao_draft,   -- rascunho de renovação (migr. 097): só na aba Renovação até enviar
         m.lead_id, m.lead_status, m.lead_desfecho,
-        -- Nome EMPILHADO (usa ao máximo o canônico): cadastro → lead → pushName do WhatsApp → número.
-        COALESCE(pe.display_name, m.lead_name,
+        -- Nome do CONTATO = quem você realmente fala (pushName do WhatsApp) PRIMEIRO; cadastro/lead como
+        -- fallback. Recepcionistas reclamavam que aparecia o ALUNO quando o contato é o pai/responsável.
+        COALESCE(
                  (SELECT sm.sender FROM messages sm
                    WHERE sm.conversation_id = m.conversation_id AND sm.role = 'USER'
                      AND coalesce(sm.sender, '') <> '' ORDER BY sm.received_at DESC LIMIT 1),
+                 pe.display_name, m.lead_name,
                  m.external_id) AS nome,
+        -- Nome do ALUNO/cadastro — vira badge discreto quando DIFERE do contato (ex.: contato = responsável).
+        NULLIF(COALESCE(pe.display_name, m.lead_name), '') AS aluno,
         m.lead_phone, m.lead_psid,
         COALESCE(m.lead_origem, m.channel) AS fonte,
         (m.lead_id IS NOT NULL
@@ -298,7 +302,7 @@ function mapConversationRow(r) {
     lead_id: r.lead_id || null,
     lead_status: r.lead_status || null,
     desfecho: r.lead_desfecho || null,
-    contato: { nome: r.nome, phone: r.lead_phone || null, meta_psid: r.lead_psid || null },
+    contato: { nome: r.nome, aluno: (r.aluno && r.aluno !== r.nome) ? r.aluno : null, phone: r.lead_phone || null, meta_psid: r.lead_psid || null },
     ultima_mensagem: r.last_activity_at ? {
       preview: preview(r.ultima_body, r.ultima_media_type, r.ultima_deleted_at),
       kind: r.ultima_kind || null,
@@ -453,7 +457,10 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
       last_read_at: cv.last_read_at,
       atribuicao,
       contato: {
-        nome: cadastroNome || (lead && lead.name) || pushNome || cv.external_id,
+        // Contato = quem você fala no WhatsApp (pushName) PRIMEIRO; cadastro/lead é fallback.
+        nome: pushNome || cadastroNome || (lead && lead.name) || cv.external_id,
+        // Aluno/cadastro discreto — só quando DIFERE do contato (ex.: contato = pai/responsável).
+        aluno: (() => { const a = cadastroNome || (lead && lead.name) || null; const n = pushNome || cadastroNome || (lead && lead.name) || cv.external_id; return (a && a !== n) ? a : null; })(),
         phone: lead ? lead.phone : null,
         meta_psid: lead ? lead.meta_psid : null,
       },

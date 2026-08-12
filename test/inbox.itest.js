@@ -439,24 +439,28 @@ test('(8g) rascunho de renovação (Fase B): só na aba Renovação; após envia
   assert.equal(r2.conversation_id, cid);
 });
 
-test('(9) nome empilhado: cadastro > lead > pushName > número', async () => {
+test('(9) nome do CONTATO = WhatsApp (pushName) primeiro; ALUNO/cadastro vira campo discreto', async () => {
   const tenant = '00000000-0000-0000-0000-0000000000ea'; await cfg(tenant, 7);
-  // a) cadastro tem o nome → vence lead e pushName
+  // a) pushName + cadastro + lead → nome = pushName (WhatsApp); aluno = cadastro (difere)
   const cCad = await conv(tenant, H(800)); await msg(cCad, { sender: 'Zé do Zap' });
   await pessoaNome(tenant, D(800), 'João da Silva');
   await lead(tenant, { phone: D(800), name: 'Lead Antigo', status: 'QUALIFYING' });
-  // b) sem cadastro, tem lead → nome do lead
+  // b) pushName + lead (sem cadastro) → nome = pushName; aluno = lead
   const cLead = await conv(tenant, H(801)); await msg(cLead, { sender: 'Fulano WA' });
   await lead(tenant, { phone: D(801), name: 'Maria Lead', status: 'QUALIFYING' });
-  // c) sem cadastro nem lead, tem pushName → nome do WhatsApp
+  // c) só pushName → nome = pushName; aluno = null
   const cPush = await conv(tenant, H(802)); await msg(cPush, { sender: 'Pedro WhatsApp' });
-  // d) nada → cai no número (external_id)
+  // d) nada → cai no número (external_id); aluno = null
   const cNum = await conv(tenant, H(803)); await msg(cNum, {});
 
   const { items } = await list(tenant, { limit: 50 });
-  assert.equal(byExt(items, H(800)).contato.nome, 'João da Silva', 'cadastro vence lead e pushName');
-  assert.equal(byExt(items, H(801)).contato.nome, 'Maria Lead', 'lead quando não há cadastro');
-  assert.equal(byExt(items, H(802)).contato.nome, 'Pedro WhatsApp', 'pushName quando não há cadastro/lead');
+  const a = byExt(items, H(800));
+  assert.equal(a.contato.nome, 'Zé do Zap', 'WhatsApp (pushName) é o nome do contato');
+  assert.equal(a.contato.aluno, 'João da Silva', 'cadastro vira o aluno discreto (difere do contato)');
+  const b = byExt(items, H(801));
+  assert.equal(b.contato.nome, 'Fulano WA'); assert.equal(b.contato.aluno, 'Maria Lead');
+  const cc = byExt(items, H(802));
+  assert.equal(cc.contato.nome, 'Pedro WhatsApp'); assert.equal(cc.contato.aluno, null, 'sem cadastro/lead → sem aluno');
   assert.equal(byExt(items, H(803)).contato.nome, H(803), 'número quando não há nada');
 });
 
