@@ -17,18 +17,22 @@ async function captureOutbound(tenantId, msg, rawBody) {
   const media = msg.media || null;
   const body = msg.body || (media && (media.placeholder || '[mídia]')) || null;
   if (!body && !media) return null; // nada aproveitável (sem texto e sem mídia)
+  // migr. 103: marca saída para GRUPO (@g.us) a partir do remoteJid cru do eco. A lista da
+  // Caixa de Entrada exclui grupos por esta coluna (sem reabrir o JSON `raw` por linha).
+  const remoteJid = (rawBody && rawBody.data && rawBody.data.key && rawBody.data.key.remoteJid) || '';
+  const isGroup = String(remoteJid).endsWith('@g.us');
   try {
     const inserted = await withTenant(tenantId, (c) =>
       c.query(
         `INSERT INTO staff_outbound_samples
            (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
-            media_type, media_filename)
-         VALUES ($1, 'whatsapp', $2, $3, $4, $5, $6, $7, $8, $9)
+            media_type, media_filename, is_group)
+         VALUES ($1, 'whatsapp', $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (tenant_id, external_message_id)
            WHERE external_message_id IS NOT NULL DO NOTHING
          RETURNING id`,
         [tenantId, msg.externalId, msg.externalMessageId, msg.source ?? null, msg.sender ?? null, body, rawBody,
-         media ? (media.kind || null) : null, media ? (media.filename || null) : null]
+         media ? (media.kind || null) : null, media ? (media.filename || null) : null, isGroup]
       )
     );
     if (inserted.rowCount > 0) {

@@ -34,7 +34,8 @@ before(async () => {
     CREATE TABLE staff_outbound_samples (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, external_id text,
       body text, media_type text, edited_at timestamptz, deleted_at timestamptz,
-      received_at timestamptz DEFAULT now(), raw jsonb);
+      received_at timestamptz DEFAULT now(), raw jsonb,
+      is_group boolean NOT NULL DEFAULT false);   -- migr. 103: filtro de grupo materializado
     CREATE TABLE leads (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, phone text,
       meta_psid text, status text, desfecho text, origem text, aborda_renovacao boolean,
@@ -105,10 +106,10 @@ async function pessoaNome(tenant, phoneRaw, nome) {
 }
 async function outbound(tenant, extDigits, over = {}) {
   return (await c.query(
-    `INSERT INTO staff_outbound_samples (tenant_id, external_id, body, media_type, received_at, raw)
-     VALUES ($1,$2,$3,$4, now() - make_interval(days => $5), $6) RETURNING id`,
+    `INSERT INTO staff_outbound_samples (tenant_id, external_id, body, media_type, received_at, raw, is_group)
+     VALUES ($1,$2,$3,$4, now() - make_interval(days => $5), $6, $7) RETURNING id`,
     [tenant, extDigits, over.body ?? 'resposta', over.media_type || null,
-     over.diasAtras || 0, over.raw || null])).rows[0].id;
+     over.diasAtras || 0, over.raw || null, over.is_group === true])).rows[0].id;
 }
 async function lead(tenant, over = {}) {
   return (await c.query(
@@ -240,6 +241,11 @@ test('(3) last_activity_at inclui outbound e ordena por atividade real', async (
   const it = byExt(items, H(200));
   assert.equal(it.ultima_mensagem.kind, 'recepcao', 'última mensagem é a saída');
   assert.equal(it.ultima_mensagem.preview, 'resposta recente');
+
+  // migr. 103: uma saída de GRUPO (is_group) MAIS RECENTE não pode virar a última atividade 1:1.
+  await outbound(tenant, D(200), { diasAtras: -1, body: 'msg de grupo', is_group: true });
+  const it2 = byExt((await list(tenant, { limit: 50 })).items, H(200));
+  assert.equal(it2.ultima_mensagem.preview, 'resposta recente', 'saída de grupo é ignorada na lista');
 });
 
 test('(4) não-lidas + marcar-lido (migr. 080, compartilhado por tenant)', async () => {

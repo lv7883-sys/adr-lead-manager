@@ -157,27 +157,44 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     ),
     -- Atividade = entrada do lead (messages USER) + saida da recepcao (staff_outbound).
     -- (conversations.updated_at = ultimo INBOUND apenas; nao confiar nele p/ ordenar - D-7.)
-    act AS (
-      SELECT c.conversation_id, m.received_at, 'lead'::text AS kind, m.body,
-             m.media_type, m.edited_at, m.deleted_at
+    -- PERF (2026-08-14): antes UNION ALL de TODAS as msgs + TODAS as saidas (~102k linhas) +
+    -- DISTINCT ON — varria 60k staff_outbound abrindo o JSON raw por linha (filtro @g.us),
+    -- ~630ms. Agora pega so a ULTIMA de cada fonte VIA INDICE e combina. O filtro de grupo virou
+    -- a coluna is_group (migr. 103) — sem reabrir o raw. idx_messages_conv_role_recv (entradas)
+    -- e idx_staff_notgroup_ident_recv (saidas) dao a ordem (conv/ident, received_at DESC) sem sort.
+    ult_lead AS (
+      SELECT DISTINCT ON (m.conversation_id)
+             m.conversation_id, m.received_at, m.body, m.media_type, m.edited_at, m.deleted_at
         FROM conv c
         JOIN messages m ON m.conversation_id = c.conversation_id AND m.role = 'USER'
-      UNION ALL
-      SELECT c.conversation_id, s.received_at, 'recepcao'::text AS kind, s.body,
-             s.media_type, s.edited_at, s.deleted_at
-        FROM conv c
-        JOIN staff_outbound_samples s
-          ON s.tenant_id = $1
-         AND c.ident <> ''
-         AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = c.ident
-         AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+       ORDER BY m.conversation_id, m.received_at DESC
     ),
+    ult_recep AS (
+      SELECT DISTINCT ON (regexp_replace(s.external_id, '[^0-9]', '', 'g'))
+             regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident,
+             s.received_at, s.body, s.media_type, s.edited_at, s.deleted_at
+        FROM staff_outbound_samples s
+       WHERE s.tenant_id = $1
+         AND NOT s.is_group
+         AND regexp_replace(s.external_id, '[^0-9]', '', 'g') <> ''
+       ORDER BY regexp_replace(s.external_id, '[^0-9]', '', 'g'), s.received_at DESC
+    ),
+    -- Combina: por conversa, a fonte (lead|recepcao) MAIS RECENTE carrega prévia/checks.
     last_act AS (
-      SELECT DISTINCT ON (a.conversation_id)
-             a.conversation_id, a.received_at, a.kind, a.body,
+      SELECT c.conversation_id, a.received_at, a.kind, a.body,
              a.media_type, a.edited_at, a.deleted_at
-        FROM act a
-       ORDER BY a.conversation_id, a.received_at DESC
+        FROM conv c
+        LEFT JOIN ult_lead  ul ON ul.conversation_id = c.conversation_id
+        LEFT JOIN ult_recep ur ON c.ident <> '' AND ur.ident = c.ident
+        CROSS JOIN LATERAL (
+          SELECT * FROM (VALUES
+            (ul.received_at, 'lead'::text,     ul.body, ul.media_type, ul.edited_at, ul.deleted_at),
+            (ur.received_at, 'recepcao'::text, ur.body, ur.media_type, ur.edited_at, ur.deleted_at)
+          ) v(received_at, kind, body, media_type, edited_at, deleted_at)
+          WHERE v.received_at IS NOT NULL
+          ORDER BY v.received_at DESC
+          LIMIT 1
+        ) a
     ),
     -- Renovações (ADR-049): vencimento do contrato MAIS RECENTE por telefone (dígitos), lendo o
     -- canônico service_account via account_member→person→contact_point (mesma ponte do
