@@ -135,18 +135,25 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
         FROM conversations cv
        WHERE cv.tenant_id = $1
     ),
+    -- Lead por telefone (dígitos): pré-agregado UMA vez, não por-conversa. O LATERAL antigo virava
+    -- Seq Scan em leads por linha (1 por conversa) porque, sob RLS, o filtro de tenant (segurança) é
+    -- avaliado ANTES do regexp_replace(phone)=ident → nenhum índice em phone é usável. Como CTE, leads
+    -- é varrido só uma vez e casado por hash. DISTINCT ON (ident) ORDER BY created_at ASC = o lead MAIS
+    -- ANTIGO por telefone (idêntico ao ORDER BY created_at ASC LIMIT 1 do LATERAL original).
+    leadk AS (
+      SELECT DISTINCT ON (${IDENT_LEAD})
+             ${IDENT_LEAD} AS ident,
+             l.id, l.name, l.phone, l.meta_psid, l.status, l.desfecho, l.origem, l.aborda_renovacao
+        FROM leads l
+       WHERE l.tenant_id = $1 AND ${IDENT_LEAD} <> ''
+       ORDER BY ${IDENT_LEAD}, l.created_at ASC
+    ),
     matched AS (
-      SELECT c.*, l.id AS lead_id, l.name AS lead_name, l.phone AS lead_phone,
-             l.meta_psid AS lead_psid, l.status AS lead_status, l.desfecho AS lead_desfecho,
-             l.origem AS lead_origem, l.aborda_renovacao AS lead_aborda_renovacao
+      SELECT c.*, lk.id AS lead_id, lk.name AS lead_name, lk.phone AS lead_phone,
+             lk.meta_psid AS lead_psid, lk.status AS lead_status, lk.desfecho AS lead_desfecho,
+             lk.origem AS lead_origem, lk.aborda_renovacao AS lead_aborda_renovacao
         FROM conv c
-        LEFT JOIN LATERAL (
-          SELECT l.id, l.name, l.phone, l.meta_psid, l.status, l.desfecho, l.origem, l.aborda_renovacao
-            FROM leads l
-           WHERE c.ident <> '' AND ${IDENT_LEAD} = c.ident
-           ORDER BY l.created_at ASC
-           LIMIT 1
-        ) l ON true
+        LEFT JOIN leadk lk ON c.ident <> '' AND lk.ident = c.ident
     ),
     -- Atividade = entrada do lead (messages USER) + saida da recepcao (staff_outbound).
     -- (conversations.updated_at = ultimo INBOUND apenas; nao confiar nele p/ ordenar - D-7.)
