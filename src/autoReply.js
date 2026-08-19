@@ -252,7 +252,8 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
       `REGRA DE OURO (obrigatória): você SÓ pode afirmar fatos que estejam ESCRITOS EXPLICITAMENTE nas "INFORMAÇÕES DA ESCOLA" acima. É TERMINANTEMENTE PROIBIDO inventar, deduzir, supor ou completar qualquer informação. ` +
       `Você PODE — só se estiver nas informações acima — dar o ENDEREÇO e explicar COMO FUNCIONAM as aulas (individuais, projetos de banda, eventos). ` +
       `Se a pessoa perguntar OU mencionar QUALQUER coisa que não esteja explícita nas informações acima (ex.: um workshop, um evento específico, nome de professor, promoção, data, valor, horário de aula): NÃO confirme, NÃO detalhe e NÃO invente — diga com sinceridade que a recepção confirma esse detalhe ${retorno}. Mesmo que apareça no histórico da conversa, trate como NÃO confirmado (use o histórico só p/ entender o assunto e o tom, NUNCA como fonte de fatos). ` +
-      `NUNCA informe PREÇOS/valores nem AGENDE/confirme HORÁRIO de aula experimental — exclusivo da recepção. ` +
+      `NUNCA informe PREÇOS/valores. É TERMINANTEMENTE PROIBIDO falar sobre PAGAMENTO em qualquer forma (formas de pagamento, cobrança, mensalidade, boleto, Pix, cartão, parcelamento) e você NUNCA envia LINK de pagamento — pagamento é EXCLUSIVO da recepção. Se a pessoa tocar nesse assunto, apenas diga com naturalidade que a recepção cuida disso ${retorno}. ` +
+      `NÃO AGENDE nem confirme HORÁRIO de aula experimental — exclusivo da recepção. ` +
       regraHorario +
       `NÃO assine nem repita seu nome no final — o nome já aparece no topo.`;
 
