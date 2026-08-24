@@ -23,19 +23,70 @@ const _iso = (s) => {
   return (y && m && d) ? v : null;
 };
 
-// Pessoa por external_ref; cria BARE se não existir (campos vêm pelo _syncPersonField). {id, novo}.
-async function _person(c, tid, type, extId) {
+// nome-norm p/ casar o MESMO humano cadastrado 2x na Extranet (sem acento, minúsculo, só [a-z0-9 ]).
+// Igual ao de dedup-person.js — mantido local p/ o sync não depender do script de manutenção.
+function _normNome(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+const _ult8 = (s) => String(s || '').replace(/\D/g, '').slice(-8);
+
+// ANTI-DUPLICATA (raiz do problema de person por-cadastro): antes de CRIAR uma person nova p/ um
+// aluno_id inédito, procura um humano JÁ cadastrado (com OUTRO aluno_id) que seja o mesmo:
+//   casa se nome-norm igual E ( mesma data_nascimento  OU  (nasc ausente num deles + telefone casa) ).
+// NUNCA casa dois nascimentos DIFERENTES → homônimos reais ficam separados. Só considera persons que
+// já são beneficiárias da Extranet (não funde papéis diferentes). Devolve o id existente ou null.
+async function _findByIdentity(c, tid, match) {
+  const nomeAlvo = _normNome(match && match.nome);
+  if (!nomeAlvo) return null;
+  const dob = _iso(match.dataNascimento);
+  const tel = _ult8(match.telefone);
+  if (!dob && !tel) return null;                       // sem âncora de identidade → não arrisca
+  const { rows } = await c.query(
+    `SELECT p.id, p.display_name, to_char(p.data_nascimento,'YYYY-MM-DD') AS dob,
+            (SELECT array_agg(right(regexp_replace(cp.value_raw,'[^0-9]','','g'),8))
+               FROM lead_manager.contact_point cp WHERE cp.person_id=p.id AND cp.kind='phone') AS fones
+       FROM lead_manager.person p
+      WHERE tenant_id=$1
+        AND EXISTS (SELECT 1 FROM lead_manager.external_ref er
+                     WHERE er.entity_kind='person' AND er.entity_id=p.id
+                       AND er.source=$2 AND er.external_type='beneficiario')
+        AND ( ($3::date IS NOT NULL AND p.data_nascimento=$3::date)
+           OR ($4 <> '' AND EXISTS (SELECT 1 FROM lead_manager.contact_point cp
+                 WHERE cp.person_id=p.id AND cp.kind='phone'
+                   AND right(regexp_replace(cp.value_raw,'[^0-9]','','g'),8)=$4)) )`,
+    [tid, CADASTRO_SOURCE, dob, tel]);
+  for (const r of rows) {
+    if (_normNome(r.display_name) !== nomeAlvo) continue;
+    if (dob && r.dob && dob !== r.dob) continue;        // nascimentos divergem → homônimo, não casa
+    const foneOk = tel && (r.fones || []).some((f) => f === tel);
+    if ((dob && r.dob && dob === r.dob) || foneOk) return r.id;  // mesmo nasc OU (nasc-ausente + fone casa)
+  }
+  return null;
+}
+
+// Pessoa por external_ref; se não houver, tenta casar por IDENTIDADE (anti-duplicata); só então cria
+// BARE (campos vêm pelo _syncPersonField). `match` (opcional, só p/ beneficiário) = {nome, dataNascimento,
+// telefone}. Devolve {id, novo, reused}. reused=true → reaproveitou humano existente de outro aluno_id.
+async function _person(c, tid, type, extId, match) {
   const ex = (await c.query(
     `SELECT entity_id FROM lead_manager.external_ref
       WHERE tenant_id=$1 AND entity_kind='person' AND source=$2 AND external_type=$3 AND external_id=$4`,
     [tid, CADASTRO_SOURCE, type, String(extId)])).rows[0];
   if (ex) return { id: ex.entity_id, novo: false };
-  const pid = (await c.query(`INSERT INTO lead_manager.person (tenant_id) VALUES ($1) RETURNING id`, [tid])).rows[0].id;
+  // anti-duplicata: reusa o humano já cadastrado (outro aluno_id) e só ADICIONA o external_ref novo.
+  const existente = match ? await _findByIdentity(c, tid, match) : null;
+  const pid = existente
+    || (await c.query(`INSERT INTO lead_manager.person (tenant_id) VALUES ($1) RETURNING id`, [tid])).rows[0].id;
   await c.query(
     `INSERT INTO lead_manager.external_ref (tenant_id, entity_kind, entity_id, source, external_type, external_id)
      VALUES ($1,'person',$2,$3,$4,$5) ON CONFLICT (tenant_id, source, external_type, external_id) DO NOTHING`,
     [tid, pid, CADASTRO_SOURCE, type, String(extId)]);
-  return { id: pid, novo: true };
+  return { id: pid, novo: !existente, reused: !!existente };
 }
 
 // PROVENIÊNCIA: escreve um campo de pessoa SÓ se aplicar_scraping devolver 'ESCREVE'. Devolve
@@ -126,15 +177,18 @@ async function _contato(c, tid, personId, telefone) {
 
 // Diff completo de um snapshot. Devolve stats. NÃO faz fetch (o adapter já produziu).
 async function syncCadastro(c, { tenantId, snapshot }) {
-  const st = { contratos_novos: 0, atualizados: 0, inalterados: 0, pessoas_novas: 0, vinculos_novos: 0,
+  const st = { contratos_novos: 0, atualizados: 0, inalterados: 0, pessoas_novas: 0, pessoas_reusadas: 0, vinculos_novos: 0,
     person_escreveu: 0, person_divergencia: 0, soft_deleted: 0, reaparecidos: 0, contatos_novos: 0 };
   const presentes = new Set();
 
   for (const ct of snapshot.contratos) {
     presentes.add(String(ct.idC));
-    // --- BENEFICIÁRIO (pessoa) ---
-    const pa = await _person(c, tenantId, 'beneficiario', ct.aluno.idExterno);
+    // --- BENEFICIÁRIO (pessoa) --- anti-duplicata: casa o mesmo humano cadastrado 2x (aluno_id ≠) por
+    // nome+nascimento OU nome+telefone antes de criar uma person nova (raiz do person por-cadastro).
+    const pa = await _person(c, tenantId, 'beneficiario', ct.aluno.idExterno,
+      { nome: ct.aluno.nome, dataNascimento: ct.aluno.dataNascimento, telefone: ct.aluno.telefone });
     if (pa.novo) st.pessoas_novas++;
+    if (pa.reused) st.pessoas_reusadas++;
     for (const [f, v, tp] of [['display_name', ct.aluno.nome, ''], ['data_nascimento', ct.aluno.dataNascimento, '::date'], ['payer_relation', ct.aluno.payerRelation, '']]) {
       const verd = await _syncPersonField(c, tenantId, pa.id, pa.novo, f, v, tp);
       if (verd === 'ESCREVE' || verd === 'novo') st.person_escreveu++;
