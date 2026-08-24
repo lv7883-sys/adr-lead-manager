@@ -7,6 +7,13 @@
 const { withTenant } = require('./db');
 const logger = require('./logger');
 
+// "Responder = ler" (badge de não-lidas): quando a recepção responde por um app WhatsApp real
+// (WhatsApp Web/celular), a LEITURA não volta como recibo (leitura no Web não propaga) — mas a
+// RESPOSTA volta pelo eco fromMe. Então uma saída HUMANA (source de device) marca a conversa como
+// lida até o instante da resposta. NÃO usamos 'api' (Regente já marca lido ao abrir) nem 'unknown'
+// (pode ser envio automático — NPS/campanha) p/ nunca esconder uma não-lida genuína.
+const FONTES_HUMANAS = new Set(['web', 'android', 'ios', 'desktop']);
+
 async function captureOutbound(tenantId, msg, rawBody) {
   if (!msg) return;
   // Antes só capturava TEXTO. Agora uma saída só-mídia (áudio/imagem/doc) também vira
@@ -22,8 +29,8 @@ async function captureOutbound(tenantId, msg, rawBody) {
   const remoteJid = (rawBody && rawBody.data && rawBody.data.key && rawBody.data.key.remoteJid) || '';
   const isGroup = String(remoteJid).endsWith('@g.us');
   try {
-    const inserted = await withTenant(tenantId, (c) =>
-      c.query(
+    const inserted = await withTenant(tenantId, async (c) => {
+      const ins = await c.query(
         `INSERT INTO staff_outbound_samples
            (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
             media_type, media_filename, is_group)
@@ -33,8 +40,23 @@ async function captureOutbound(tenantId, msg, rawBody) {
          RETURNING id`,
         [tenantId, msg.externalId, msg.externalMessageId, msg.source ?? null, msg.sender ?? null, body, rawBody,
          media ? (media.kind || null) : null, media ? (media.filename || null) : null, isGroup]
-      )
-    );
+      );
+      // "Responder = ler": saída HUMANA 1:1 avança o last_read_at até o instante da resposta (roda
+      // sempre, mesmo no ON CONFLICT — a resposta aconteceu). Usa o timestamp do eco (não now())
+      // p/ não marcar lida uma entrada que chegou entre a resposta e o processamento do webhook.
+      if (!isGroup && FONTES_HUMANAS.has(msg.source)) {
+        const dig = String(msg.externalId || '').replace(/\D/g, '');
+        const tsUnix = rawBody && rawBody.data && rawBody.data.messageTimestamp;
+        const readAt = tsUnix ? new Date(Number(tsUnix) * 1000) : new Date();
+        if (dig) await c.query(
+          `UPDATE conversations SET last_read_at = $3
+             WHERE tenant_id = $1 AND regexp_replace(external_id, '[^0-9]', '', 'g') = $2
+               AND (last_read_at IS NULL OR last_read_at < $3)`,
+          [tenantId, dig, readAt]
+        );
+      }
+      return ins;
+    });
     if (inserted.rowCount > 0) {
       logger.info('staff_sample.captured', { tenant_id: tenantId, source: msg.source ?? null });
     }
