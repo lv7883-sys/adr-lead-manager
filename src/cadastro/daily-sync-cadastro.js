@@ -15,6 +15,7 @@ const { pool, withTenant } = require('../db');
 const logger = require('../logger');
 const valinhosContratos = require('./adapters/valinhos-contratos');
 const { syncCadastro } = require('./sync-cadastro');
+const { syncProfessores } = require('./sync-professores');
 const { runContractConvert, loadConfig } = require('./contractConvert');
 
 const MAX_DROP_FRAC = Number(process.env.CADASTRO_SAFEGUARD_MAX_DROP ?? 0.34);
@@ -110,11 +111,35 @@ async function runDailySync() {
       summary[res.status === 'OK' ? 'ok' : 'error']++;
     }
   }
+  // PROFESSOR CANÔNICO (105): garante person + external_ref(professor) p/ todo professor dos contratos
+  // e fecha service_account.professor_person_id. Lê o estado PRESENTE (professor_nome enriquecido);
+  // idempotente e independente do sync do binding ter tido sucesso. Nunca lança.
+  summary.professores = await runProfessoresAllTenants(tenants);
   // CONVERTIDO POR CONTRATO (079): passa a base atualizada contra os leads ATIVOS. Independe do sync
   // ter tido sucesso (é idempotente e lê o que está presente); gated por contract_convert_mode. Nunca lança.
   summary.contractConvert = await runContractConvertAllTenants(tenants);
   logger.info('cadastro_sync.done', summary);
   return summary;
+}
+
+// Reconcilia o professor canônico de cada tenant ATIVO. Best-effort (nunca lança); por-tenant sob RLS.
+async function runProfessoresAllTenants(tenants) {
+  const out = { tenants: 0, pessoas_novas: 0, refs_novos: 0, contratos_fechados: 0, byTenant: [] };
+  for (const { tenant_id: tenantId } of tenants) {
+    try {
+      const stats = await withTenant(tenantId, (c) => syncProfessores(c, { tenantId }));
+      out.tenants++;
+      out.pessoas_novas += stats.pessoas_novas || 0;
+      out.refs_novos += stats.refs_novos || 0;
+      out.contratos_fechados += stats.contratos_fechados || 0;
+      out.byTenant.push({ tenant: tenantId, ...stats });
+      logger.info('sync_professores.tenant_done', { tenant_id: tenantId, ...stats });
+    } catch (e) {
+      logger.error('sync_professores.tenant_error', { tenant_id: tenantId, error: e.message });
+      out.byTenant.push({ tenant: tenantId, error: e.message });
+    }
+  }
+  return out;
 }
 
 // Roda o casador contrato→lead para cada tenant ATIVO, conforme contract_convert_mode. Best-effort.
@@ -144,7 +169,7 @@ async function runContractConvertAllTenants(tenants) {
   return out;
 }
 
-module.exports = { runDailySync, processBinding, classifyError, safeguard, runContractConvertAllTenants };
+module.exports = { runDailySync, processBinding, classifyError, safeguard, runContractConvertAllTenants, runProfessoresAllTenants };
 
 if (require.main === module) {
   runDailySync().then((s) => process.exit(s.error ? 1 : 0)).catch((e) => { logger.error('cadastro_sync.fatal', { error: e.message }); process.exit(1); });
