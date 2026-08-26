@@ -212,7 +212,9 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     // 3) MÊS A MÊS (últimos 6 meses): volume de leads + taxa de aceitação da IA.
     const porMes = (
       await c.query(
-        `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS mes, count(*) AS n
+        // TZ: agrupar em UTC jogava o lead criado entre 21h e 00h do último dia do mês para o mês
+        // SEGUINTE — e esse é o horário de pico de captação. Ver nota extensa em computeFunil.
+        `SELECT to_char(date_trunc('month', created_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS mes, count(*) AS n
            FROM leads WHERE created_at >= now() - interval '6 months'
              AND status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
           GROUP BY 1 ORDER BY 1`,
@@ -221,7 +223,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     ).rows;
     const aceitMes = (
       await c.query(
-        `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS mes,
+        `SELECT to_char(date_trunc('month', created_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS mes,
                 count(*) FILTER (WHERE status IN ('APPROVED','EDITED')) AS aceitos,
                 count(*) FILTER (WHERE status IN ('APPROVED','EDITED','REJECTED')) AS decididos
            FROM pending_approvals WHERE created_at >= now() - interval '6 months'
@@ -707,7 +709,14 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
   return withTenant(tenantId, async (c) => {
     const rows = (
       await c.query(
-        `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS mes,
+        // TIMEZONE (auditoria 2026-08-26): agrupava e filtrava em UTC — não há SET TIME ZONE na
+        // sessão, então o mês virava à meia-noite de Londres e o lead criado entre 21h e 00h do
+        // último dia caía no mês SEGUINTE. É o horário de pico de captação por WhatsApp/Instagram,
+        // então deslocava barras e taxas. O resto do LM já usa SP (SP_HOJE); o funil era a exceção.
+        // As BORDAS são convertidas, não a coluna: `created_at AT TIME ZONE ...` no WHERE
+        // inutilizaria o índice de created_at; `$1::date AT TIME ZONE ...` vira um timestamptz
+        // constante e o índice segue valendo. No GROUP BY a expressão é inevitável (e barata).
+        `SELECT to_char(date_trunc('month', created_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS mes,
                 count(*) AS leads,
                 -- Passo 1: buckets do funil vêm da régua canônica (stages.funilBucketSql), com a
                 -- precedência FATO>IA>PROXY. Hoje só o proxy da Fatia E está ligado → SQL idêntico
@@ -717,7 +726,8 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
                 count(*) FILTER (WHERE ${funilBucketSql('realizada')}) AS realizadas,
                 count(*) FILTER (WHERE ${funilBucketSql('convertido')}) AS matriculas
            FROM leads
-          WHERE created_at >= $1::date AND created_at < $2::date
+          WHERE created_at >= ($1::date AT TIME ZONE 'America/Sao_Paulo')
+            AND created_at <  ($2::date AT TIME ZONE 'America/Sao_Paulo')
             AND status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
             -- 079 (TAXA POR ORIGEM): o CLIENTE pré-existente sai do NUMERADOR *e* do DENOMINADOR.
             -- O denominador segue sendo "leads criados no período" — quem nasceu no Regente —, e o
