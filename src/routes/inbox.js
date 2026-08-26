@@ -759,8 +759,15 @@ router.get('/:tenantId/inbox/nao-lidas', authenticate, requireTenantAccess(READ_
                     AND ${naoEhReacaoSql('m')}   -- reação não é turno (idem lista, src/reacao.js)
                     AND (cv.last_read_at IS NULL OR m.received_at > cv.last_read_at)) AS n
            FROM conversations cv
-          WHERE cv.tenant_id = $1 AND coalesce(cv.external_id, '') NOT LIKE '%@g.us'
-            AND cv.renovacao_draft IS NOT TRUE   -- rascunho de renovação não conta no badge (migr. 097)
+          -- PARIDADE COM O WHATSAPP (decisão do Leo 2026-08-26): o badge conta o MESMO universo
+          -- que a aba "Todas" mostra, para recepção e gestão terem a mesma impressão de uso do
+          -- app. Grupo NÃO é excluído: no WhatsApp grupo tem badge e entra no total, e a lista
+          -- daqui sempre mostrou grupo com balão azul — só o badge excluía por '%@g.us',
+          -- então a soma dos balões era MAIOR que o número do menu.
+          -- Rascunho de renovação segue fora: é conversa sintética (migr. 097), não existe no
+          -- WhatsApp e só aparece na aba Renovação.
+          WHERE cv.tenant_id = $1
+            AND cv.renovacao_draft IS NOT TRUE
        ) u`, [req.tenantId])).rows[0].total);
     res.json({ total });
   } catch (err) {
