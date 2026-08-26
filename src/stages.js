@@ -5,13 +5,23 @@
 // à mão em 2 repos (kanbanColuna no LM / colunaDeLead no dashboard / DESTINO/ETAPAS no client JS).
 //
 // ------------------------------------------------------------------------------------------------
-// PRECEDÊNCIA DE FONTES (por estágio) — desenhada AGORA, só o PROXY ligado nesta fatia:
+// PRECEDÊNCIA DE FONTES (por estágio):
 //   FATO externo (Extranet/TrialEvent)  >  SUGESTÃO da IA (suggested_stage acima de limiar)  >  PROXY
 //
 //   Cada estágio-de-funil declara os três em ordem. detectSql() escolhe o PRIMEIRO não-nulo
-//   (precedência COALESCE, não OR): hoje sourceOfTruth e iaSuggestion são null → cai EXATO no
-//   proxyFallback atual → ZERO mudança de comportamento. Ligar a fonte de cima (Passo 2: Extranet
-//   → 'experimental'/'realizada' vira FATO) é trocar `null` por um fragmento; nada re-hardcoda.
+//   (precedência COALESCE, não OR) — salvo quando o estágio declara `combina:'uniao'`, e aí soma
+//   as fontes com OR.
+//
+//   PASSO 2 (migr 106) — LIGADO para 'experimental' e 'realizada': o FATO vem dos carimbos
+//   append-only de extranet_lead (exp_agendada_em / exp_realizada_em), em UNIÃO com o proxy.
+//   Une, em vez de substituir, porque o carimbo só existe para lead LINKADO ao espelho — trocar o
+//   proxy faria sumir do funil quem só tem sinal da IA. Os demais estágios seguem em precedência
+//   pura, com sourceOfTruth/iaSuggestion null → proxy da Fatia E, byte-a-byte.
+//
+//   O que o Passo 2 conserta: `status` é campo único mutável, e o move para 'convertido'
+//   (tenant.js) sobrescrevia EXPERIMENTAL_AGENDADA — o lead saía de "agendadas" E de "realizadas"
+//   mas continuava em "matrículas", produzindo taxa de conversão acima de 100% no BI. O carimbo é
+//   imune: ninguém o reescreve.
 // ------------------------------------------------------------------------------------------------
 //
 // DUAS PROJEÇÕES sobre a mesma régua, propositalmente distintas (não confundir):
@@ -46,6 +56,24 @@ const MOTIVOS_PERDA = [
 const col = (a, n) => (a ? `${a}.${n}` : n);
 const q = (arr) => arr.map((d) => `'${d}'`).join(', ');
 
+// leadRef(alias,name) — como col(), MAS para referenciar o lead DE DENTRO de uma subquery
+// correlacionada. Sem alias, col() devolve a coluna crua e isso é uma armadilha aqui: dentro do
+// EXISTS, um `id` cru resolveria para a coluna id do PRÓPRIO espelho (o escopo interno vence),
+// não para o lead de fora. Qualifica pelo nome da tabela, que é válido no `FROM leads` sem alias
+// do computeFunil.
+const leadRef = (a, n) => (a ? `${a}.${n}` : `leads.${n}`);
+
+// FATO da Extranet (Passo 2, migr 106) — carimbos append-only do espelho. Lidos em vez do badge
+// `situacao` de propósito: o upsert do sync faz `situacao=EXCLUDED.situacao`, então 'Exp. Realizada'
+// é APAGADA quando a Extranet passa o lead para 'Ganhou'. Os carimbos são gravados no instante da
+// observação e nunca limpos, então a matrícula deixa de apagar a aula.
+// NÃO filtra fonte_ausente_em: o lead pode ter saído da lista, mas a aula aconteceu — o funil é
+// histórico, ao contrário do sustainedStageKey (que pergunta o que a Extranet sustenta HOJE).
+// Escopo por tenant vem da RLS de extranet_lead (migr 102); a query roda sob withTenant.
+const _fatoExp = (a, campo) =>
+  `EXISTS (SELECT 1 FROM lead_manager.extranet_lead el
+            WHERE el.lead_id = ${leadRef(a, 'id')} AND el.${campo} IS NOT NULL)`;
+
 // Proxy da coluna "experimental" / bucket "agendada" do funil (Fatia E, preservado). Extraído p/
 // função porque "realizada" o referencia (composição, sem re-declarar a string).
 const _experimentalProxy = (a) =>
@@ -67,16 +95,21 @@ const STAGES = [
   { ordinal: 2, key: 'qualificado',   status: 'QUALIFIED',             emoji: '✅', label: 'Qualificado', column: true },
   { ordinal: 3, key: 'experimental',  status: 'EXPERIMENTAL_AGENDADA', emoji: '🎯', label: 'Experimental',
     dica: 'Aula experimental agendada', column: true,
-    // bucket "agendada" do funil. FATO/IA desligados nesta fatia → proxy da Fatia E.
-    sourceOfTruth: null,        // Passo 2: TrialEvent status ∈ {Programada, Confirmada} correlacionado
+    // bucket "agendada" do funil. Passo 2 LIGADO: FATO da Extranet unido ao proxy.
+    combina: 'uniao',           // ver detectSql — decisão do Leo 2026-08-26 (cobertura)
+    sourceOfTruth: (a) => _fatoExp(a, 'exp_agendada_em'),
     iaSuggestion:  null,        // futuro: suggested_stage='experimental' acima de limiar de confiança
     proxyFallback: (a) => _experimentalProxy(a) },
   { ordinal: 4, key: 'realizada',     status: null,                    emoji: '🎯', label: 'Experimental realizada',
     column: false, funilOnly: true,
-    // bucket "realizada" do funil. FATO = aula aconteceu de verdade (Extranet status='Realizada').
-    sourceOfTruth: null,        // Passo 2: TrialEvent status = 'Realizada' correlacionado
+    // bucket "realizada" do funil. FATO = aula aconteceu de verdade ('Exp. Realizada' na Extranet).
+    combina: 'uniao',
+    sourceOfTruth: (a) => _fatoExp(a, 'exp_realizada_em'),
     iaSuggestion:  null,
-    // Proxy negativo atual (Fatia E): dentro de "agendada" E chegou a um desfecho que não é no-show.
+    // Proxy negativo (Fatia E): dentro de "agendada" E chegou a um desfecho que não é no-show. Ele
+    // COLAPSA quando o lead converte (o move sobrescreve status e o lead sai de _experimentalProxy)
+    // — é o que derrubava "realizadas" para perto de zero. Fica na união como fallback de quem não
+    // tem link com a Extranet; quem tem passa a contar pelo carimbo.
     proxyFallback: (a) => `(${_experimentalProxy(a)}) AND ${col(a, 'desfecho')} IS NOT NULL AND ${col(a, 'desfecho')} <> 'nao_compareceu_aula'` },
   { ordinal: 5, key: 'convertido',    status: 'CONVERTED',             emoji: '🎓', label: 'Matriculado', column: true,
     // bucket "matrícula" do funil.
@@ -139,12 +172,19 @@ function stageSql(alias = 'l') {
     ELSE 'qualificando' END`;
 }
 
-// ---- buckets do funil (precedência FATO > IA > PROXY) -------------------------------------------
-// Escolhe o PRIMEIRO não-nulo (COALESCE de fontes, não OR). Hoje só o proxy existe → devolve o
-// proxy da Fatia E, semanticamente idêntico ao que o computeFunil tinha inline.
+// ---- buckets do funil (FATO > IA > PROXY, ou união quando o estágio pede) -----------------------
+// `combina:'uniao'` (Passo 2) = FATO ∪ IA ∪ PROXY em vez de precedência. Decisão do Leo
+// (2026-08-26) para os buckets de experimental: o carimbo da Extranet só existe para lead LINKADO
+// ao espelho, e substituir o proxy faria sumir do funil quem só tem sinal da IA. A união é
+// monotônica — nenhum lead que conta hoje deixa de contar, e os que a conversão apagava voltam.
+// Sem `combina`, o comportamento é o de sempre: PRIMEIRO não-nulo (COALESCE de fontes, não OR).
 function detectSql(stage, alias = 'l') {
-  const src = (stage && (stage.sourceOfTruth || stage.iaSuggestion || stage.proxyFallback)) || null;
-  return src ? `(${src(alias)})` : null;
+  if (!stage) return null;
+  const fontes = [stage.sourceOfTruth, stage.iaSuggestion, stage.proxyFallback]
+    .filter(Boolean).map((f) => f(alias)).filter(Boolean);
+  if (!fontes.length) return null;
+  if (stage.combina === 'uniao') return `(${fontes.map((f) => `(${f})`).join(' OR ')})`;
+  return `(${fontes[0]})`;
 }
 // Fragmento do bucket do funil por key ('experimental'=agendada, 'realizada', 'convertido'=matrícula).
 // alias '' (default aqui) = colunas cruas, como no computeFunil (FROM leads sem alias).

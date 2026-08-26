@@ -72,14 +72,52 @@ test('(2) stageSql ≡ stageOfLead (SQL == JS) linha a linha na base', async () 
   }
 });
 
-test('(3) funilBucketSql reproduz o OR-proxy ANTIGO (contagens idênticas)', async () => {
+test('(3) funilBucketSql: Passo 2 UNE fato+proxy — nunca conta menos que o proxy antigo', async () => {
   const cnt = async (frag) => (await c.query(`SELECT count(*)::int n FROM leads WHERE ${frag}`)).rows[0].n;
-  assert.equal(await cnt(funilBucketSql('experimental')), await cnt(OLD_AGENDADA), 'agendadas');
-  assert.equal(await cnt(funilBucketSql('realizada')), await cnt(OLD_REALIZADA), 'realizadas');
-  assert.equal(await cnt(funilBucketSql('convertido')), await cnt(OLD_MATRICULA), 'matriculas');
-  // sanidade: as contagens não são todas zero nem todas iguais (o teste tem sinal).
-  const a = await cnt(funilBucketSql('experimental'));
-  assert.ok(a > 0, 'agendadas > 0 (senão o teste é vazio)');
+  // A união é MONOTÔNICA: quem contava pelo proxy continua contando. Não vale igualdade — o carimbo
+  // da Extranet ADICIONA justamente os leads que a conversão apagava do proxy.
+  assert.ok(await cnt(funilBucketSql('experimental')) >= await cnt(OLD_AGENDADA), 'agendadas ⊇ proxy');
+  assert.ok(await cnt(funilBucketSql('realizada')) >= await cnt(OLD_REALIZADA), 'realizadas ⊇ proxy');
+  // 'convertido' NÃO declara combina → segue em precedência pura, idêntico ao antigo.
+  assert.equal(await cnt(funilBucketSql('convertido')), await cnt(OLD_MATRICULA), 'matriculas inalteradas');
+  // sanidade: o teste tem sinal (não está medindo conjunto vazio).
+  assert.ok(await cnt(funilBucketSql('experimental')) > 0, 'agendadas > 0 (senão o teste é vazio)');
+});
+
+test('(3b) invariante do funil: realizadas ⊆ agendadas (o encadeamento não pode passar de 100%)', async () => {
+  // O bug que o Passo 2 conserta produzia agendadas≈0 com matrículas>0 → taxa acima de 100%.
+  // Aqui a garantia é estrutural: todo lead do bucket "realizada" tem de estar em "agendada",
+  // tanto pelo lado do fato (exp_realizada_em só é carimbado junto de exp_agendada_em) quanto
+  // pelo lado do proxy (o negativo é uma restrição do próprio proxy de agendada).
+  const fora = (await c.query(
+    `SELECT count(*)::int n FROM leads
+      WHERE (${funilBucketSql('realizada')}) AND NOT (${funilBucketSql('experimental')})`)).rows[0].n;
+  assert.equal(fora, 0, 'nenhum lead pode ser "realizada" sem ser "agendada"');
+});
+
+test('(3c) o carimbo da Extranet resiste à conversão (a matrícula não apaga a aula)', async () => {
+  // Regressão do bug raiz: o move para "convertido" sobrescreve status=CONVERTED, o lead sai do
+  // _experimentalProxy e sumia de agendadas/realizadas continuando em matrículas.
+  const { rows: [lead] } = await c.query(
+    `INSERT INTO leads (tenant_id, status, desfecho, desfecho_em)
+     VALUES ($1, 'CONVERTED', 'matriculado', now()) RETURNING id`, [T1]);
+  try {
+    // sem carimbo: o proxy não segura (é exatamente o buraco que o Passo 2 fecha)
+    const semCarimbo = async (k) => (await c.query(
+      `SELECT count(*)::int n FROM leads WHERE id=$1 AND (${funilBucketSql(k)})`, [lead.id])).rows[0].n;
+    assert.equal(await semCarimbo('realizada'), 0, 'sem fato, o proxy perde o lead convertido');
+
+    await c.query(
+      `INSERT INTO extranet_lead (tenant_id, extranet_id, lead_id, situacao, exp_agendada_em, exp_realizada_em)
+       VALUES ($1, $2, $3, 'Ganhou', now(), now())`,
+      [T1, `itest-${lead.id}`, lead.id]);
+    // com carimbo: conta, mesmo com a situacao já sobrescrita para 'Ganhou'
+    assert.equal(await semCarimbo('experimental'), 1, 'fato recupera agendadas');
+    assert.equal(await semCarimbo('realizada'), 1, 'fato recupera realizadas');
+  } finally {
+    await c.query('DELETE FROM extranet_lead WHERE lead_id=$1', [lead.id]);
+    await c.query('DELETE FROM leads WHERE id=$1', [lead.id]);
+  }
 });
 
 test('(4) isStage + de-para status↔coluna estáveis', () => {

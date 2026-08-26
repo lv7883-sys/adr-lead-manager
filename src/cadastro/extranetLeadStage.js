@@ -53,6 +53,30 @@ const SITUACAO_MAP = {
   'matriculado': 'convertido',
 };
 
+// ---- CARIMBOS de aula experimental (migr 106) --------------------------------------------------
+// A `situacao` do espelho é ESTADO ATUAL — o upsert do sync faz `situacao=EXCLUDED.situacao`, então
+// quando a Extranet passa o lead para 'Ganhou' o badge 'Exp. Realizada' é sobrescrito e o fato de a
+// aula ter acontecido some. O sync é o ÚNICO ponto que enxerga esse badge antes de ele sumir: estas
+// duas chaves dizem o que a situação OBSERVADA prova, para ele carimbar (COALESCE, nunca limpa).
+// 'realizada' implica 'agendada' — não se realiza aula que não foi marcada.
+// ⚠ Pergunta DIFERENTE da do SITUACAO_MAP. Lá: "esta situação faz o lead AVANÇAR de etapa?" —
+// e aula cancelada não avança (volta pra remarcação), por isso é mirror-only. Aqui: "esta situação
+// PROVA que existiu uma aula marcada?" — e cancelada prova, porque só se cancela o que foi marcado.
+// Incluir é o que faz o BI convergir com a tela Início, que conta a cancelada em "N agendadas" e
+// depois em "N não aconteceram". Excluir encolheria o denominador e INFLARIA a taxa de
+// comparecimento — o mesmo erro que a auditoria de 2026-08-26 apontou no bucket `outro` da Início.
+const SITUACAO_EXP_AGENDADA = new Set([
+  'exp agendada', 'exp realizada', 'experimental agendada', 'experimental realizada',
+  'exp cancelada', 'exp cancelada reagendar',
+]);
+const SITUACAO_EXP_REALIZADA = new Set(['exp realizada', 'experimental realizada']);
+
+// → { agendada: boolean, realizada: boolean }
+function carimbosExperimental(situacao) {
+  const n = normSituacao(situacao);
+  return { agendada: SITUACAO_EXP_AGENDADA.has(n), realizada: SITUACAO_EXP_REALIZADA.has(n) };
+}
+
 // → { key: etapa|null, known: boolean } — distingue "mapeada para nada" de "desconhecida".
 function mapSituacao(situacao) {
   const n = normSituacao(situacao);
@@ -82,4 +106,7 @@ async function sustainedStageKey(c, { tenantId, leadId }) {
   return best;
 }
 
-module.exports = { SITUACAO_MAP, normSituacao, mapSituacao, sustainedStageKey, ORDINAL };
+module.exports = {
+  SITUACAO_MAP, normSituacao, mapSituacao, sustainedStageKey, ORDINAL,
+  SITUACAO_EXP_AGENDADA, SITUACAO_EXP_REALIZADA, carimbosExperimental,
+};

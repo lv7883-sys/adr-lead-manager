@@ -22,7 +22,7 @@
 //
 const telBR = require('../telefoneBR');
 const stages = require('../stages');
-const { mapSituacao, ORDINAL } = require('./extranetLeadStage');
+const { mapSituacao, ORDINAL, carimbosExperimental } = require('./extranetLeadStage');
 
 // Alvos que o modo AUTO pode aplicar como MOVE de status (sem desfecho). 'convertido' tem caminho
 // próprio (matrícula). NUNCA derivar do ordinal cru: 'perdido' (6) e 'cliente' (7) são "maiores"
@@ -40,21 +40,34 @@ async function upsertEspelho(c, tenantId, rows, stats, windowStart) {
   const ids = [];
   for (const r of rows) {
     ids.push(r.extranetId);
+    // CARIMBOS (migr 106): `situacao` é estado atual e é SOBRESCRITA abaixo — quando a Extranet
+    // passa o lead para 'Ganhou', 'Exp. Realizada' some e o funil perde a prova de que a aula
+    // aconteceu. Este upsert é o único ponto que vê o badge antes disso, então grava o fato uma
+    // vez (COALESCE) e nunca o limpa. Situação que não é experimental passa `false` → não apaga
+    // carimbo anterior (o lead avança de Exp. Realizada para Ganhou sem perder a história).
+    const carimbo = carimbosExperimental(r.situacao);
+    if (carimbo.agendada) stats.exp_agendada_vista++;
+    if (carimbo.realizada) stats.exp_realizada_vista++;
     const up = await c.query(
       `INSERT INTO lead_manager.extranet_lead
          (tenant_id, extranet_id, nome, fone_raw, curso, professor, situacao,
-          data_cadastro, ult_contato, prox_contato)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+          data_cadastro, ult_contato, prox_contato, exp_agendada_em, exp_realizada_em)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+               CASE WHEN $11::boolean THEN now() END, CASE WHEN $12::boolean THEN now() END)
        ON CONFLICT (tenant_id, extranet_id) DO UPDATE SET
          nome=EXCLUDED.nome, fone_raw=EXCLUDED.fone_raw, curso=EXCLUDED.curso,
          professor=EXCLUDED.professor, situacao=EXCLUDED.situacao,
          data_cadastro=EXCLUDED.data_cadastro, ult_contato=EXCLUDED.ult_contato,
          prox_contato=EXCLUDED.prox_contato,
+         exp_agendada_em=COALESCE(extranet_lead.exp_agendada_em,
+                                  CASE WHEN $11::boolean THEN now() END),
+         exp_realizada_em=COALESCE(extranet_lead.exp_realizada_em,
+                                   CASE WHEN $12::boolean THEN now() END),
          last_seen_at=now(), fonte_ausente_em=NULL, updated_at=now()
        RETURNING id, lead_id, phone_key, situacao, (xmax = 0) AS inserted`,
       [tenantId, r.extranetId, r.nome || null, r.foneRaw || null, r.curso || null,
        r.professor || null, r.situacao || null, r.dataCadastro || null,
-       r.ultContato || null, r.proxContato || null]);
+       r.ultContato || null, r.proxContato || null, carimbo.agendada, carimbo.realizada]);
     const row = up.rows[0];
     stats[row.inserted ? 'espelho_novos' : 'espelho_atualizados']++;
     r._mirrorId = row.id; r._leadId = row.lead_id; r._phoneKey = row.phone_key;
@@ -179,6 +192,10 @@ async function syncExtranetLeads(c, { tenantId, snapshot, mode }) {
     espelho_novos: 0, espelho_atualizados: 0, soft_deleted: 0,
     linkados: 0, leads_criados: 0, sem_telefone: 0, ambiguos: 0,
     movidos: 0, sugeridos: 0, _desconhecidas: new Set(),
+    // migr 106 — quantos leads DESTE snapshot estavam em situação que prova aula experimental.
+    // Sem isso não dá pra verificar o carimbo depois do deploy sem abrir o banco. Não é "quantos
+    // foram carimbados agora" (o COALESCE não recarimba): é o volume observado no run.
+    exp_agendada_vista: 0, exp_realizada_vista: 0,
   };
   const rows = snapshot.leads || [];
   await upsertEspelho(c, tenantId, rows, stats, snapshot.windowStart);
