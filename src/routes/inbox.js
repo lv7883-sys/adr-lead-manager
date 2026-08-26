@@ -24,6 +24,7 @@ const { requireTenantAccess } = require('../rbac');
 const { isUuid } = require('../validation');
 const { terminalSql, statusVivoSql } = require('../lifecycle');
 const { fetchTimeline } = require('../timeline');
+const { naoEhReacaoSql } = require('../reacao');
 const outbound = require('../outbound');
 const evolutionDefault = require('../evolution');
 const metaDefault = require('../meta');
@@ -288,8 +289,12 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
         COALESCE(la.received_at, m.updated_at) AS last_activity_at,
         la.kind AS ultima_kind, la.body AS ultima_body, la.media_type AS ultima_media_type,
         la.edited_at AS ultima_edited_at, la.deleted_at AS ultima_deleted_at,
+        -- Reação (emoji) NÃO conta como não-lida: um 👍 subia o badge e a recepção abria a
+        -- conversa sem nada novo pra ler. Mesma régua do last_in_turno de tenant.js, agora
+        -- compartilhada (src/reacao.js) em vez de copiada.
         (SELECT count(*) FROM messages um
           WHERE um.conversation_id = m.conversation_id AND um.role = 'USER'
+            AND ${naoEhReacaoSql('um')}
             AND (m.last_read_at IS NULL OR um.received_at > m.last_read_at)) AS nao_lidas
       FROM matched m
       CROSS JOIN cfg
@@ -376,7 +381,8 @@ async function markRead(client, tenantId, conversationId, upTo = null) {
   if (!upd.rows.length) return null;
   const n = await client.query(
     `SELECT count(*)::int AS n FROM messages
-      WHERE conversation_id = $1 AND role = 'USER' AND received_at > $2`,
+      WHERE conversation_id = $1 AND role = 'USER' AND ${naoEhReacaoSql('messages')}
+        AND received_at > $2`,
     [conversationId, upd.rows[0].last_read_at]
   );
   return { last_read_at: upd.rows[0].last_read_at, nao_lidas: n.rows[0].n };
@@ -386,8 +392,11 @@ async function markRead(client, tenantId, conversationId, upTo = null) {
 // mensagem RECEBIDA, de modo que ela (e posteriores) voltem a contar como não-lidas. Se não
 // houver mensagem recebida, não há o que marcar. Retorna null se a conversa não é do tenant.
 async function markUnread(client, tenantId, conversationId) {
+  // Ancora na última mensagem que é TURNO de verdade. Se ancorasse numa reação, ela não contaria
+  // na régua de não-lidas e a conversa voltaria com nao_lidas=0 — o botão não faria nada.
   const last = (await client.query(
     `SELECT received_at FROM messages WHERE conversation_id = $1 AND role = 'USER'
+       AND ${naoEhReacaoSql('messages')}
       ORDER BY received_at DESC LIMIT 1`, [conversationId])).rows[0];
   if (!last) {
     const ok = (await client.query('SELECT 1 FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, tenantId])).rows[0];
@@ -400,6 +409,7 @@ async function markUnread(client, tenantId, conversationId) {
   if (!upd.rows.length) return null;
   const n = (await client.query(
     `SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1 AND role = 'USER'
+      AND ${naoEhReacaoSql('messages')}
       AND received_at > $2::timestamptz - interval '1 millisecond'`, [conversationId, last.received_at])).rows[0].n;
   return { ok: true, nao_lidas: n };
 }
@@ -746,6 +756,7 @@ router.get('/:tenantId/inbox/nao-lidas', authenticate, requireTenantAccess(READ_
       `SELECT COALESCE(SUM(n), 0)::int AS total FROM (
          SELECT (SELECT count(*) FROM messages m
                   WHERE m.conversation_id = cv.id AND m.role = 'USER'
+                    AND ${naoEhReacaoSql('m')}   -- reação não é turno (idem lista, src/reacao.js)
                     AND (cv.last_read_at IS NULL OR m.received_at > cv.last_read_at)) AS n
            FROM conversations cv
           WHERE cv.tenant_id = $1 AND coalesce(cv.external_id, '') NOT LIKE '%@g.us'

@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const express = require('express');
 const { withTenant } = require('../db');
 const logger = require('../logger');
+const { textoReacao } = require('../reacao');
 const engine = require('../engine');
 const staffSamples = require('../staffSamples');
 const evolution = require('../evolution');
@@ -51,7 +52,7 @@ function normalizeMessage(body) {
     const reaction = detectarReacao(m);   // ADR-031 — reação emoji (não é mídia)
     let texto = m.conversation ?? m.extendedTextMessage?.text ?? null;
     if (!texto && media) texto = media.placeholder;   // body legível p/ histórico
-    if (!texto && reaction) texto = `[reação] ${reaction.emoji}`;   // ADR-031: não vira bolha vazia
+    if (!texto && reaction) texto = textoReacao(reaction.emoji);   // ADR-031: não vira bolha vazia
     if (!texto && ehViewOnce(m)) texto = '[mensagem de visualização única]';   // ADR-031 (cifrada, não baixável)
     return {
       externalId: jid.split('@')[0] || jid,

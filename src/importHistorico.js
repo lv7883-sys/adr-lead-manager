@@ -12,6 +12,7 @@
 //
 const { withTenant } = require('./db');
 const logger = require('./logger');
+const { textoReacao } = require('./reacao');
 
 // Placeholder legível p/ mídia SEM texto (findMessages não baixa o binário no backfill — a
 // CURA de mídia do webhook é p/ o fluxo ao vivo). Sem isso, uma foto/áudio trocado durante a
@@ -27,7 +28,7 @@ function _placeholderMidia(m) {
     const d = m.documentMessage || (m.documentWithCaptionMessage.message && m.documentWithCaptionMessage.message.documentMessage);
     return `[documento: ${(d && d.fileName) || 'arquivo'}]`;
   }
-  if (m.reactionMessage && m.reactionMessage.text) return `[reação] ${m.reactionMessage.text}`;
+  if (m.reactionMessage && m.reactionMessage.text) return textoReacao(m.reactionMessage.text);
   return null;
 }
 

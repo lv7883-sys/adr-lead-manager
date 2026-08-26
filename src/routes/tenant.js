@@ -27,6 +27,7 @@ const stages = require('../stages');   // Passo 1: régua canônica de estágios
 const { generateDraftForLead, classificarSaida, _isTransientAIError, loadRealHistory } = require('../engine');   // Bloco 2: rascunho; ADR-030: saída; _isTransientAIError: resiliência 503; loadRealHistory: histórico completo p/ o Melhorar
 const contractConvert = require('../cadastro/contractConvert');   // 079: fila "confirmar matrícula" (contrato→lead)
 const { fetchTimeline } = require('../timeline');   // ADR-042: timeline compartilhada (fonte única) — /leads/:id e inbox
+const { naoEhReacaoSql } = require('../reacao');    // reação não é turno do cliente (fonte única do marcador)
 const { registrarSaida: _registrarSaida, msgCitada: _msgCitada, resolverKeyMensagem: _resolverKeyMensagem } = require('../outbound');   // ADR-042: outbound compartilhado (fonte única)
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
@@ -709,7 +710,8 @@ router.get(
                       max(m.received_at) AS last_any,
                       max(m.received_at) FILTER (WHERE m.role = 'USER') AS last_in,
                       -- CINTO (#3): reação (emoji) não é turno do cliente (senão 👍 reabre "devemos resposta").
-                      max(m.received_at) FILTER (WHERE m.role = 'USER' AND coalesce(m.body, '') NOT LIKE '[reação]%') AS last_in_turno,
+                      -- Régua compartilhada com a contagem de não-lidas do inbox (src/reacao.js).
+                      max(m.received_at) FILTER (WHERE m.role = 'USER' AND ${naoEhReacaoSql('m')}) AS last_in_turno,
                       (array_agg(m.body ORDER BY m.received_at) FILTER (WHERE m.role = 'USER'))[1] AS first_message,
                       array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) FILTER (WHERE m.role = 'USER') AS ts_in
                  FROM conv c JOIN messages m ON m.conversation_id = c.id
