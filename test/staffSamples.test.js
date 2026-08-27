@@ -95,7 +95,11 @@ async function _semearRascunho({ fone, msgId, criadoEm = 'now()' }) {
       `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1,'whatsapp',$2) RETURNING id`,
       [TENANT_ID, fone])).rows[0];
     const lead = (await c.query(
-      `INSERT INTO leads (tenant_id, status, phone) VALUES ($1,'QUALIFYING',$2) RETURNING id`,
+      // leads.name é NOT NULL sem default. Sem ele o INSERT estourava 23502 e as três asserções
+      // de rascunho abaixo nunca chegavam a rodar — o teste falhava no SETUP. Eu escrevi este
+      // arquivo sem conseguir executá-lo (não há Postgres na máquina de dev) e o dei como
+      // cobertura; ele só rodou de verdade contra o banco, depois do deploy.
+      `INSERT INTO leads (tenant_id, status, phone, name) VALUES ($1,'QUALIFYING',$2,'Teste Rascunho') RETURNING id`,
       [TENANT_ID, fone])).rows[0];
     const pa = (await c.query(
       `INSERT INTO pending_approvals (tenant_id, lead_id, conversation_id, suggested_response, status, created_at)

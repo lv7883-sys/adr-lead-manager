@@ -41,8 +41,17 @@ const fakeWithTenant = (tid, fn) => fn({
 
 before(async () => {
   c = new Client({ connectionString: process.env.DATABASE_URL }); await c.connect();
+  // O setup precisa espelhar o que o SQL GERADO referencia, não só o que o teste lê. Faltavam
+  // `desfecho_em` e a tabela `lead_manager.extranet_lead` (o EXISTS de _fatoExp em stages.js usa o
+  // schema explícito), e os três testes do carimbo morriam no setup — 42P01/42703 — sem nunca
+  // chegar às asserções. Eu escrevi este arquivo sem Postgres na máquina e o dei como cobertura.
   await c.query(`
-    CREATE TABLE leads (id serial PRIMARY KEY, tenant_id uuid, status text, desfecho text, intent text);
+    CREATE SCHEMA IF NOT EXISTS lead_manager;
+    CREATE TABLE leads (id serial PRIMARY KEY, tenant_id uuid, status text, desfecho text,
+                        intent text, desfecho_em timestamptz);
+    CREATE TABLE lead_manager.extranet_lead (
+      id serial PRIMARY KEY, tenant_id uuid, extranet_id text, lead_id int,
+      situacao text, exp_agendada_em timestamptz, exp_realizada_em timestamptz);
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, stage_definitions jsonb);`);
   // todas as combinações status×desfecho×intent → cobertura total da partição e do funil.
   for (const s of STATUSES) for (const d of DESFECHOS) for (const i of INTENTS) {
@@ -108,14 +117,14 @@ test('(3c) o carimbo da Extranet resiste à conversão (a matrícula não apaga 
     assert.equal(await semCarimbo('realizada'), 0, 'sem fato, o proxy perde o lead convertido');
 
     await c.query(
-      `INSERT INTO extranet_lead (tenant_id, extranet_id, lead_id, situacao, exp_agendada_em, exp_realizada_em)
+      `INSERT INTO lead_manager.extranet_lead (tenant_id, extranet_id, lead_id, situacao, exp_agendada_em, exp_realizada_em)
        VALUES ($1, $2, $3, 'Ganhou', now(), now())`,
       [T1, `itest-${lead.id}`, lead.id]);
     // com carimbo: conta, mesmo com a situacao já sobrescrita para 'Ganhou'
     assert.equal(await semCarimbo('experimental'), 1, 'fato recupera agendadas');
     assert.equal(await semCarimbo('realizada'), 1, 'fato recupera realizadas');
   } finally {
-    await c.query('DELETE FROM extranet_lead WHERE lead_id=$1', [lead.id]);
+    await c.query('DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1', [lead.id]);
     await c.query('DELETE FROM leads WHERE id=$1', [lead.id]);
   }
 });
