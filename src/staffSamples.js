@@ -54,6 +54,31 @@ async function captureOutbound(tenantId, msg, rawBody) {
                AND (last_read_at IS NULL OR last_read_at < $3)`,
           [tenantId, dig, readAt]
         );
+        // RASCUNHO OBSOLETO (regra do Leo, 2026-08-27): a recepção respondeu com o texto DELA, então
+        // o rascunho que a IA tinha preparado para esta conversa perdeu a validade — arquiva no ato.
+        // Antes só existia uma varredura periódica (jobs/sweep-stale-drafts.js) que NUNCA foi ligada
+        // no cron; por isso o selo "✏️ Rascunho pronto" aparecia em quase todo card do Kanban:
+        // verdadeiro, mas quase sempre sobre um rascunho velho — e um selo que aparece em tudo não
+        // informa nada. Aqui o gatilho é o próprio evento que torna o rascunho obsoleto, em vez de
+        // uma faxina adivinhando o que é velho.
+        //   • Só saída HUMANA de device (a guarda acima): NPS/campanha não significam que alguém
+        //     cuidou do lead.
+        //   • Só rascunho ANTERIOR à resposta: se um inbound novo chegar depois e gerar outro
+        //     rascunho, ele é legítimo e não pode ser arquivado por um eco que veio fora de ordem.
+        if (dig) {
+          const arq = await c.query(
+            `UPDATE pending_approvals pa SET status = 'ARCHIVED'
+               FROM conversations cv
+              WHERE pa.tenant_id = $1 AND pa.status = 'PENDING'
+                AND cv.id = pa.conversation_id
+                AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                AND pa.created_at <= $3
+              RETURNING pa.id`,
+            [tenantId, dig, readAt]
+          );
+          if (arq.rowCount) logger.info('draft.arquivado_por_resposta_humana',
+            { tenant_id: tenantId, ident: dig, n: arq.rowCount });
+        }
       }
       return ins;
     });
