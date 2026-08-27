@@ -41,10 +41,17 @@ async function captureOutbound(tenantId, msg, rawBody) {
         [tenantId, msg.externalId, msg.externalMessageId, msg.source ?? null, msg.sender ?? null, body, rawBody,
          media ? (media.kind || null) : null, media ? (media.filename || null) : null, isGroup]
       );
-      // "Responder = ler": saída HUMANA 1:1 avança o last_read_at até o instante da resposta (roda
+      // "Responder = ler": saída HUMANA avança o last_read_at até o instante da resposta (roda
       // sempre, mesmo no ON CONFLICT — a resposta aconteceu). Usa o timestamp do eco (não now())
       // p/ não marcar lida uma entrada que chegou entre a resposta e o processamento do webhook.
-      if (!isGroup && FONTES_HUMANAS.has(msg.source)) {
+      //
+      // GRUPO TAMBÉM (correção 2026-08-27). Havia um `!isGroup` aqui, e o efeito medido em produção
+      // foi este: o cursor dos grupos ficava DIAS para trás (um grupo lido até 24/ago com mensagens
+      // até 27/ago acumulava 61 "não-lidas"), somando 128 não-lidas fantasma. O recibo de leitura
+      // do WhatsApp Web — que deveria cobrir isso — é justamente o que não volta de forma
+      // confiável; foi por causa dele que este mecanismo existe. Excluir grupo aqui tirava a única
+      // evidência de leitura que sobrava. Se a recepção RESPONDEU no grupo, ela leu o grupo.
+      if (FONTES_HUMANAS.has(msg.source)) {
         const dig = String(msg.externalId || '').replace(/\D/g, '');
         const tsUnix = rawBody && rawBody.data && rawBody.data.messageTimestamp;
         const readAt = tsUnix ? new Date(Number(tsUnix) * 1000) : new Date();
