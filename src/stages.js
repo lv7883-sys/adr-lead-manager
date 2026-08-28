@@ -74,6 +74,34 @@ const _fatoExp = (a, campo) =>
   `EXISTS (SELECT 1 FROM lead_manager.extranet_lead el
             WHERE el.lead_id = ${leadRef(a, 'id')} AND el.${campo} IS NOT NULL)`;
 
+// Situação da Extranet que prova MATRÍCULA. 'Ganhou' é terminal na Extranet (o lead ganhou, fim),
+// então diferente de 'Exp. Realizada' ele não é apagado por um estado posterior — dá para ler do
+// badge sem precisar de carimbo. Acento normalizado porque o rótulo é texto livre da tela.
+const _situacaoNorm = (t) => `lower(translate(coalesce(${t}, ''), 'áàâãéêíóôõúüç', 'aaaaeeioooouc'))`;
+const _fatoMatricula = (a) =>
+  `EXISTS (SELECT 1 FROM lead_manager.extranet_lead el
+            WHERE el.lead_id = ${leadRef(a, 'id')}
+              AND ${_situacaoNorm('el.situacao')} IN ('ganhou', 'matricula', 'matriculado'))`;
+
+// FATO da Extranet de QUALQUER natureza: marcou aula, fez aula, ou matriculou.
+//
+// PARA QUE SERVE: ser EXCEÇÃO ao descarte do classificador. O funil exclui status NOT_LEAD/
+// REVIEW_QUEUE — o que é certo para quem o gate descartou de verdade, e errado para quem ele
+// descartou POR ENGANO. Medido em produção (2026-08-28): dos 44 leads marcados NOT_LEAD que têm
+// linha no espelho, 20 marcaram aula experimental, 8 fizeram a aula e 6 estão em 'Ganhou'. O funil
+// perdia 15 leads em junho, 6 em julho e 6 em agosto — gente com matrícula comprovada, invisível
+// no BI porque o classificador errou.
+//
+// A regra é a mesma da régua toda: FATO vence classificação. Quem marcou aula na Extranet É lead,
+// independentemente do que o gate decidiu. E de quebra torna o falso-positivo do Filtro MENSURÁVEL
+// — o Plantão dizia "falso-positivo não verificável com o gate ligado"; este EXISTS é a verificação.
+const temFatoExtranetSql = (a) =>
+  `EXISTS (SELECT 1 FROM lead_manager.extranet_lead el
+            WHERE el.lead_id = ${leadRef(a, 'id')}
+              AND (el.exp_agendada_em IS NOT NULL
+                OR el.exp_realizada_em IS NOT NULL
+                OR ${_situacaoNorm('el.situacao')} IN ('ganhou', 'matricula', 'matriculado')))`;
+
 // Proxy da coluna "experimental" / bucket "agendada" do funil (Fatia E, preservado). Extraído p/
 // função porque "realizada" o referencia (composição, sem re-declarar a string).
 const _experimentalProxy = (a) =>
@@ -112,8 +140,14 @@ const STAGES = [
     // tem link com a Extranet; quem tem passa a contar pelo carimbo.
     proxyFallback: (a) => `(${_experimentalProxy(a)}) AND ${col(a, 'desfecho')} IS NOT NULL AND ${col(a, 'desfecho')} <> 'nao_compareceu_aula'` },
   { ordinal: 5, key: 'convertido',    status: 'CONVERTED',             emoji: '🎓', label: 'Matriculado', column: true,
-    // bucket "matrícula" do funil.
-    sourceOfTruth: null, iaSuggestion: null,
+    // bucket "matrícula" do funil. FATO = 'Ganhou' na Extranet, que é onde a matrícula acontece de
+    // verdade. O proxy (desfecho preenchido à mão) continua na união, mas não dá mais para depender
+    // só dele: medido em produção, 86% a 90% dos leads com aula experimental estão SEM desfecho
+    // preenchido (44 de 49 em 'Exp. Agendada', 18 de 21 em 'Exp. Realizada'). A recepção atende e
+    // não fecha o registro — o funil estava medindo quem lembrou de preencher, não quem converteu.
+    combina: 'uniao',
+    sourceOfTruth: (a) => _fatoMatricula(a),
+    iaSuggestion: null,
     proxyFallback: (a) => `${col(a, 'desfecho')} = 'matriculado'` },
   { ordinal: 6, key: 'perdido',       status: 'PERDIDO',               emoji: '❌', label: 'Perdido',
     requerMotivo: true, column: true },
@@ -248,6 +282,6 @@ module.exports = {
   STAGES, KANBAN_STAGES, KANBAN_KEYS, ETAPAS_TRABALHO,
   PERDIDO_DESFECHOS, CLIENTE_DESFECHO, MOTIVOS_PERDA, KANBAN_TRANSICOES, KEY_TO_STATUS, STATUS_TO_KEY,
   stageKey, stageOfLead, isStage, stageSql,
-  detectSql, funilBucketSql, stageCatalog, loadStages,
+  detectSql, funilBucketSql, temFatoExtranetSql, stageCatalog, loadStages,
   terminalParaSugestaoSql, sugestaoAtivaSql, isSugestaoAtiva,
 };

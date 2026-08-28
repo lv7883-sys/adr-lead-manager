@@ -11,7 +11,7 @@ const { terminalSql, isTerminal, isConvertido } = require('./lifecycle');   // F
 // Passo 1 — régua canônica de estágios (fonte única; substitui kanbanColuna/_ETAPAS_TRABALHO/
 // KANBAN_TRANSICOES/PERDIDO_DESFECHOS locais e o OR-proxy inline do computeFunil).
 const stages = require('./stages');
-const { stageKey, funilBucketSql } = stages;
+const { stageKey, funilBucketSql, temFatoExtranetSql } = stages;
 
 const PERIODS = { '1d': 1, '7d': 7, '30d': 30, '90d': 90 };
 
@@ -728,7 +728,14 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
            FROM leads
           WHERE created_at >= ($1::date AT TIME ZONE 'America/Sao_Paulo')
             AND created_at <  ($2::date AT TIME ZONE 'America/Sao_Paulo')
-            AND status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
+            -- FATO VENCE CLASSIFICAÇÃO (auditoria 2026-08-28). Antes era só o NOT IN: quem o gate
+            -- marcou NOT_LEAD/REVIEW_QUEUE sumia do funil, inclusive quando ERA lead. Medido em
+            -- produção: dos 44 marcados NOT_LEAD com linha no espelho da Extranet, 20 marcaram aula
+            -- experimental, 8 fizeram a aula e 6 estão em 'Ganhou'. O funil perdia 15 leads em
+            -- junho, 6 em julho e 6 em agosto — gente com matrícula comprovada, invisível no BI
+            -- porque o classificador errou. Quem marcou aula na Extranet É lead: o descarte do gate
+            -- vale para quem não deixou rastro, não contra evidência externa.
+            AND (status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE') OR ${temFatoExtranetSql()})
             -- 079 (TAXA POR ORIGEM): o CLIENTE pré-existente sai do NUMERADOR *e* do DENOMINADOR.
             -- O denominador segue sendo "leads criados no período" — quem nasceu no Regente —, e o
             -- veterano que só apareceu no WhatsApp não entra nem como lead nem como matrícula.

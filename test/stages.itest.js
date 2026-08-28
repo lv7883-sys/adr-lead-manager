@@ -6,7 +6,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { Client } = require('pg');
 const {
-  stageKey, stageOfLead, isStage, stageSql, funilBucketSql, loadStages,
+  stageKey, stageOfLead, isStage, stageSql, funilBucketSql, temFatoExtranetSql, loadStages,
   KANBAN_TRANSICOES, STATUS_TO_KEY, KEY_TO_STATUS, PERDIDO_DESFECHOS,
 } = require('../src/stages');
 
@@ -87,8 +87,11 @@ test('(3) funilBucketSql: Passo 2 UNE fato+proxy — nunca conta menos que o pro
   // da Extranet ADICIONA justamente os leads que a conversão apagava do proxy.
   assert.ok(await cnt(funilBucketSql('experimental')) >= await cnt(OLD_AGENDADA), 'agendadas ⊇ proxy');
   assert.ok(await cnt(funilBucketSql('realizada')) >= await cnt(OLD_REALIZADA), 'realizadas ⊇ proxy');
-  // 'convertido' NÃO declara combina → segue em precedência pura, idêntico ao antigo.
-  assert.equal(await cnt(funilBucketSql('convertido')), await cnt(OLD_MATRICULA), 'matriculas inalteradas');
+  // 'convertido' TAMBÉM une desde 2026-08-28 (fato 'Ganhou' da Extranet ∪ desfecho preenchido).
+  // Sem linha no espelho a união colapsa no proxy, então aqui a igualdade ainda vale — o caso com
+  // fato é exercitado no (3d), que semeia o 'Ganhou'.
+  assert.equal(await cnt(funilBucketSql('convertido')), await cnt(OLD_MATRICULA),
+    'sem fato no espelho, matrículas seguem idênticas ao proxy');
   // sanidade: o teste tem sinal (não está medindo conjunto vazio).
   assert.ok(await cnt(funilBucketSql('experimental')) > 0, 'agendadas > 0 (senão o teste é vazio)');
 });
@@ -123,6 +126,80 @@ test('(3c) o carimbo da Extranet resiste à conversão (a matrícula não apaga 
     // com carimbo: conta, mesmo com a situacao já sobrescrita para 'Ganhou'
     assert.equal(await semCarimbo('experimental'), 1, 'fato recupera agendadas');
     assert.equal(await semCarimbo('realizada'), 1, 'fato recupera realizadas');
+  } finally {
+    await c.query('DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1', [lead.id]);
+    await c.query('DELETE FROM leads WHERE id=$1', [lead.id]);
+  }
+});
+
+test('(3d) matrícula pelo FATO da Extranet: "Ganhou" conta mesmo sem desfecho preenchido', async () => {
+  // POR QUE (medido em produção, 2026-08-28): 86% a 90% dos leads com aula experimental estão SEM
+  // desfecho preenchido no Regente (44 de 49 em 'Exp. Agendada', 18 de 21 em 'Exp. Realizada'). A
+  // recepção atende e não fecha o registro. Depender só do preenchimento fazia o funil medir quem
+  // lembrou de preencher, não quem converteu.
+  const { rows: [lead] } = await c.query(
+    `INSERT INTO leads (tenant_id, status, desfecho) VALUES ($1,'QUALIFYING',NULL) RETURNING id`, [T1]);
+  const conta = async (k) => (await c.query(
+    `SELECT count(*)::int n FROM leads WHERE id=$1 AND (${funilBucketSql(k)})`, [lead.id])).rows[0].n;
+  try {
+    assert.equal(await conta('convertido'), 0, 'sem fato e sem desfecho: não é matrícula');
+    await c.query(
+      `INSERT INTO lead_manager.extranet_lead (tenant_id, extranet_id, lead_id, situacao)
+       VALUES ($1,$2,$3,'Ganhou')`, [T1, `itest-ganhou-${lead.id}`, lead.id]);
+    assert.equal(await conta('convertido'), 1, '"Ganhou" na Extranet É matrícula');
+  } finally {
+    await c.query('DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1', [lead.id]);
+    await c.query('DELETE FROM leads WHERE id=$1', [lead.id]);
+  }
+});
+
+test('(3e) o rótulo da Extranet é texto livre: acento e caixa não podem derrubar o fato', async () => {
+  // 'situacao' vem do <select> da tela — texto livre. 'Matrícula' com acento e caixa alta tem de
+  // valer tanto quanto 'ganhou'. Sem normalizar, o fato sumia em silêncio (o pior modo de falhar).
+  const { rows: [lead] } = await c.query(
+    `INSERT INTO leads (tenant_id, status) VALUES ($1,'QUALIFYING') RETURNING id`, [T1]);
+  try {
+    for (const rotulo of ['Matrícula', 'GANHOU', 'matriculado']) {
+      await c.query(`DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1`, [lead.id]);
+      await c.query(
+        `INSERT INTO lead_manager.extranet_lead (tenant_id, extranet_id, lead_id, situacao)
+         VALUES ($1,$2,$3,$4)`, [T1, `itest-rot-${lead.id}`, lead.id, rotulo]);
+      const n = (await c.query(
+        `SELECT count(*)::int n FROM leads WHERE id=$1 AND (${funilBucketSql('convertido')})`,
+        [lead.id])).rows[0].n;
+      assert.equal(n, 1, `"${rotulo}" tem de contar como matrícula`);
+    }
+    // e o contrário: rótulo que NÃO é matrícula não pode virar matrícula por parecer.
+    await c.query(`DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1`, [lead.id]);
+    await c.query(
+      `INSERT INTO lead_manager.extranet_lead (tenant_id, extranet_id, lead_id, situacao)
+       VALUES ($1,$2,$3,'Perdeu')`, [T1, `itest-rot-${lead.id}`, lead.id]);
+    const n = (await c.query(
+      `SELECT count(*)::int n FROM leads WHERE id=$1 AND (${funilBucketSql('convertido')})`,
+      [lead.id])).rows[0].n;
+    assert.equal(n, 0, '"Perdeu" não é matrícula');
+  } finally {
+    await c.query('DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1', [lead.id]);
+    await c.query('DELETE FROM leads WHERE id=$1', [lead.id]);
+  }
+});
+
+test('(3f) temFatoExtranetSql: é a EXCEÇÃO ao descarte do classificador', async () => {
+  // O funil exclui NOT_LEAD/REVIEW_QUEUE. Certo para quem o gate descartou de verdade, ERRADO para
+  // quem ele descartou por engano: em produção, dos 44 leads marcados NOT_LEAD com linha no
+  // espelho, 20 marcaram aula, 8 fizeram a aula e 6 estão em 'Ganhou'. Fato vence classificação.
+  const { rows: [lead] } = await c.query(
+    `INSERT INTO leads (tenant_id, status) VALUES ($1,'NOT_LEAD') RETURNING id`, [T1]);
+  const passaNoFunil = async () => (await c.query(
+    `SELECT count(*)::int n FROM leads
+      WHERE id=$1 AND (status NOT IN ('NOT_LEAD','REVIEW_QUEUE') OR ${temFatoExtranetSql()})`,
+    [lead.id])).rows[0].n;
+  try {
+    assert.equal(await passaNoFunil(), 0, 'NOT_LEAD sem rastro segue fora do funil');
+    await c.query(
+      `INSERT INTO lead_manager.extranet_lead (tenant_id, extranet_id, lead_id, situacao, exp_agendada_em)
+       VALUES ($1,$2,$3,'Exp. Agendada', now())`, [T1, `itest-fp-${lead.id}`, lead.id]);
+    assert.equal(await passaNoFunil(), 1, 'marcou aula na Extranet → é lead, mesmo marcado NOT_LEAD');
   } finally {
     await c.query('DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1', [lead.id]);
     await c.query('DELETE FROM leads WHERE id=$1', [lead.id]);
