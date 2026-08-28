@@ -8,6 +8,7 @@
 //
 const { withTenant } = require('./db');
 const { retomadaCtes, identLateral } = require('./reativacao');   // #8 Fatia B: fonte única da retomada (forma em janela)
+const { temFatoExtranetSql } = require('./stages');               // prova externa de que o descartado ERA lead
 
 // ------------------------------------------------------------------------------------------------
 // VOCABULÁRIO DE ESTADO (auditoria de indicadores 2026-08-26). O card existe pra dizer se o sistema
@@ -74,7 +75,19 @@ async function resumoPlantao(tenantId) {
       const cfg = (await c.query(
         `SELECT gate_suppression_mode FROM lead_manager.tenant_lead_config WHERE tenant_id=$1`, [tenantId])).rows[0];
       const modo = ['off', 'shadow', 'on'].includes(cfg && cfg.gate_suppression_mode) ? cfg.gate_suppression_mode : 'off';
-      return { total: g.total, fp: g.fp, descartes: desc, rev, modo };
+      // FALSO-POSITIVO VERIFICADO POR FATO EXTERNO (auditoria 2026-08-28). O comentário abaixo
+      // declarava o falso-positivo "não verificável com o gate ligado" — verdade para o crivo de
+      // IA, que de fato nunca roda nas mensagens realmente descartadas. Mas existe uma prova que
+      // não custa chamada nenhuma: a Extranet. Se a pessoa que o gate marcou como NÃO-LEAD depois
+      // marcou aula experimental ou matriculou, o gate errou, e isso é fato, não opinião.
+      // Medido na primeira execução: 20 descartados marcaram aula, 8 fizeram, 6 matricularam.
+      // NÃO é do dia: é passivo acumulado. Quem foi descartado semana passada e matriculou ontem
+      // conta — restringir a hoje esconderia justamente o caso que demora a aparecer.
+      const fpReal = (await c.query(
+        `SELECT count(*)::int n FROM lead_manager.leads l
+          WHERE l.tenant_id = $1 AND l.status IN ('NOT_LEAD','REVIEW_QUEUE')
+            AND ${temFatoExtranetSql('l')}`, [tenantId])).rows[0].n;
+      return { total: g.total, fp: g.fp, descartes: desc, rev, modo, fpReal };
     }, FALHOU);
     if (filtro === FALHOU) push(_indisponivel('filtro', 'Filtro'));
     else if (filtro) {
@@ -90,7 +103,13 @@ async function resumoPlantao(tenantId) {
         ? `${filtro.total} decisões (gate ligado)`   // não são "sombra": viraram ação
         : `${filtro.total} decisões-sombra`;
       let status, detalhe;
-      if (filtro.rev > 0) {
+      if (filtro.fpReal > 0) {
+        // Vem PRIMEIRO: é a prova mais forte que existe aqui. O revert é opinião humana sobre uma
+        // mensagem; este é fato registrado na Extranet — a pessoa que o gate disse não ser lead
+        // marcou aula ou matriculou. Enquanto houver um caso desses, o Filtro não pode estar verde.
+        status = 'amarelo';
+        detalhe = `⚠ ${filtro.fpReal} descartado(s) marcaram aula ou matricularam na Extranet`;
+      } else if (filtro.rev > 0) {
         status = 'amarelo';
         detalhe = `⚠ ${filtro.rev} revertido(s) hoje — o filtro tirou lead do funil`;
       } else if (filtro.fp > 0) {
@@ -100,8 +119,10 @@ async function resumoPlantao(tenantId) {
         status = 'cinza';
         detalhe = filtro.modo === 'off' ? 'desligado' : 'nenhuma decisão hoje';
       } else if (filtro.modo === 'on' && filtro.descartes > 0) {
+        // Sem nenhum falso-positivo comprovado pela Extranet, o silêncio aqui já significa algo —
+        // não é mais "não dá para saber", é "ninguém que o gate descartou apareceu na Extranet".
         status = 'cinza';
-        detalhe = `${rotuloDecisoes} · falso-positivo não verificável com o gate ligado`;
+        detalhe = `${rotuloDecisoes} · nenhum descartado apareceu na Extranet`;
       } else {
         status = 'verde';
         detalhe = rotuloDecisoes;
