@@ -305,6 +305,12 @@ function _horasDesdeUltimoTurno(history) {
 // bullet formatado ("\n- ..."); generateReply os intercala com suas regras ESPECÍFICAS de
 // geração (responder à última msg, saudação/retomada) preservando a ordem original.
 const REGRAS_REDACAO = {
+  // FATOS — trava anti-invenção e ISOLAMENTO entre conversas. A recepção relatou a Janis afirmando a
+  // disponibilidade de uma professora onde não devia. O histórico já é escopado por contato (não há
+  // cruzamento estrutural), mas a regra em prosa do prompt escorregava; aqui ela vira uma regra DURA e
+  // uniforme para TODOS os caminhos de geração (sugestão, rascunho, funil e fora do horário).
+  fatos:
+    '\n- FATOS (regra inquebrável, acima de qualquer outra): você só pode AFIRMAR algo que esteja escrito EXPLICITAMENTE nesta conversa (no histórico acima) ou nas informações da escola deste prompt. É TERMINANTEMENTE PROIBIDO inventar, deduzir, supor, "lembrar" ou completar qualquer dado que não esteja à sua frente — em ESPECIAL nome, agenda, horário ou DISPONIBILIDADE de professor(a), datas de turma/evento, promoções, valores e condições. CADA CONVERSA É ISOLADA: nunca use informação vinda de outro atendimento ou de outro cliente; vale somente o que está escrito NESTA conversa. Se a pessoa perguntar algo que não está escrito aqui, NÃO confirme, NÃO detalhe e NÃO chute — diga com naturalidade que vai confirmar com a equipe e retorna (ex.: "vou confirmar essa informação com a equipe e já te aviso"). É sempre melhor dizer que vai verificar do que arriscar um dado errado.',
   // Fluidez/brevidade: espelhar o tamanho, responder curto quando cabe, sem virar frieza.
   fluidez:
     '\n- ESPELHE o tamanho das mensagens recentes e responda como no WhatsApp: quando a conversa é de mensagens curtas ou a pergunta tem resposta direta (horário, valor, "tem vaga?"), responda em UMA ou DUAS frases — natural, como a recepcionista digitaria no celular. Não faça parágrafo quando cabe uma linha; não repita o que já foi dito nem encha de formalidade. MAS não seja seca: mantenha o tom cordial e humano — brevidade não é frieza. Escreva mais só quando o assunto realmente exigir (cliente indeciso, várias perguntas juntas).',
@@ -354,6 +360,7 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
   // e compridas, o oposto do que a recepção precisa.
   sys +=
     '\n\nCOMO ESCREVER A RESPOSTA (você é a própria recepcionista continuando a conversa no WhatsApp):' +
+    REGRAS_REDACAO.fatos +
     REGRAS_REDACAO.fluidez +
     '\n- Responda direto ao que a última mensagem pede. Sem rodeios, sem resumir o que já foi dito, sem repetir informação que a pessoa já tem.' +
     REGRAS_REDACAO.nome +
