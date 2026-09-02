@@ -39,9 +39,27 @@ function retomadaCtes(dorm, { schema = '' } = {}) {
       FROM (SELECT ident, received_at, kind,
                    max(CASE WHEN kind = 'in' THEN received_at END)
                      OVER (PARTITION BY ident ORDER BY received_at
-                           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_in
+                           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_in,
+                   -- 1º evento QUALQUER do contato (entrada ou saída). Serve de âncora para quem
+                   -- nunca escreveu — ver o OR abaixo.
+                   min(received_at) OVER (PARTITION BY ident) AS primeiro_ev
               FROM rt_ev) e
-     WHERE kind = 'out' AND prev_in <= received_at - make_interval(days => (${dorm})::int)
+     WHERE kind = 'out' AND (
+       prev_in <= received_at - make_interval(days => (${dorm})::int)
+       -- ⚠ QUEM NUNCA ESCREVEU TAMBÉM É RETOMADO (2026-09-02). A regra acima exige um inbound
+       -- ANTERIOR, e isso é certo para proteger o 1º atendimento de virar "retomada". Mas o lead que
+       -- veio da EXTRANET nunca escreveu no WhatsApp: prev_in é NULL para sempre, a condição nunca
+       -- é satisfeita, e ele fica preso em "candidato" mesmo depois de a recepção falar com ele
+       -- várias vezes. Foi a reclamação das recepcionistas: "muitos desses já foram reativados".
+       --
+       -- Medido em produção: os 7 candidatos da tela tinham de 1 a 6 saídas nossas, a última NO DIA
+       -- ANTERIOR, e o sistema os mostrava como "ainda não tocado" — a mesma lista reaberta todo dia.
+       --
+       -- Sem inbound, a âncora passa a ser o PRIMEIRO evento do contato: a 1ª saída é o primeiro
+       -- atendimento (não conta), e outra saída >= dormancy_days depois É uma retomada. Um contato
+       -- com uma saída só continua fora, que é o comportamento correto.
+       OR (prev_in IS NULL AND primeiro_ev <= received_at - make_interval(days => (${dorm})::int))
+     )
      GROUP BY ident
   ),
   rt_in AS (

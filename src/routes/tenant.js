@@ -770,11 +770,38 @@ router.get(
                            OR (l.conversation_state = 'AGUARDANDO_RECEPCAO' AND l.state_computed_at IS NULL)) AND
                           mg.last_in_turno > COALESCE(ob.last_out, 'epoch'::timestamptz))
                     )) AS awaiting_reply,
+                    -- FATO DA EXTRANET (2026-09-02). O que a Extranet sabe sobre o lead precisa
+                    -- chegar às telas: sem isso, o Regente classifica por conta própria e discorda
+                    -- da realidade. Foi a reclamação das recepcionistas sobre a Reativação — leads
+                    -- com aula MARCADA apareciam como "esfriou, vale reabordar".
+                    -- A coluna origem viaja junto porque o Leo pediu que o lead vindo da Extranet seja
+                    -- identificável em TODA tela onde aparece.
+                    l.origem,
+                    el.situacao AS extranet_situacao,
+                    (el.exp_agendada_em IS NOT NULL) AS extranet_marcou_aula,
+                    (el.exp_realizada_em IS NOT NULL) AS extranet_fez_aula,
                     -- P5: sequências de msgs p/ classificar o engajamento do cliente.
                     mg.ts_in,
                     ob.ts_out
                FROM leads l
                LEFT JOIN lead_qualifications q ON q.lead_id = l.id
+               -- Espelho da Extranet. ⚠ LATERAL COM LIMIT 1, e não um LEFT JOIN simples: 20 leads
+               -- têm MAIS DE UMA linha em extranet_lead (o mesmo aluno cadastrado duas vezes lá).
+               -- Um join simples DUPLICARIA esses leads no payload — a tela mostraria o mesmo nome
+               -- duas vezes e toda contagem inflaria, sem erro nenhum. Peguei isso conferindo a
+               -- cardinalidade antes de subir; o sintoma seria "os números aumentaram sozinhos".
+               --
+               -- Ordem de desempate: quem PROVA mais vence — aula realizada, depois marcada, depois
+               -- a observação mais recente.
+               LEFT JOIN LATERAL (
+                 SELECT e.situacao, e.exp_agendada_em, e.exp_realizada_em
+                   FROM extranet_lead e
+                  WHERE e.lead_id = l.id
+                  ORDER BY e.exp_realizada_em DESC NULLS LAST,
+                           e.exp_agendada_em DESC NULLS LAST,
+                           e.last_seen_at DESC NULLS LAST
+                  LIMIT 1
+               ) el ON true
                ${identLateral('l')}
                LEFT JOIN msg   mg  ON li.ident <> '' AND mg.ident  = li.ident
                LEFT JOIN outb  ob  ON li.ident <> '' AND ob.ident  = li.ident
