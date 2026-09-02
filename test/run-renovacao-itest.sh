@@ -65,6 +65,9 @@ SQL
 echo "[itest] migration 092 (renovacao_touchpoint + toggles) …"
 docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest < "$ROOT/db/migrations/092_renovacao_touchpoint.sql" >/dev/null
 
+echo "[itest] migration 109 (amplia marcos D-45→D-2) …"
+docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest < "$ROOT/db/migrations/109_renovacao_touchpoint_marcos.sql" >/dev/null
+
 echo "[itest] rodando node --test…"
 cd "$ROOT"
 DATABASE_URL="postgres://lead_manager_user:itest@127.0.0.1:${PORT}/lm_itest" \

@@ -494,7 +494,7 @@ async function sugestaoRetomada({ history = [], leadName, schoolContext, engajam
   });
 }
 
-// Renovação (Fase 1) — a Janis SUGERE o toque antecipado de renovação (D-10 / D-2), ancorado no
+// Renovação — a Janis SUGERE o toque antecipado de renovação (régua D-45→D-2), ancorado no
 // FIM DO CONTRATO (nunca em "última aula": fim_vigencia é o fim administrativo do contrato e pode
 // não coincidir com a última aula real). Retorna {estrategia, rascunho} no molde do sugestaoRetomada.
 // NÃO inventa preço/horário/valores — isso é papel da recepção.
@@ -508,11 +508,23 @@ async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, d
   const quem = paraAluno
     ? `o próprio aluno (${alunoNome || 'aluno'})`
     : `${responsavelNome} (responsável pelo aluno ${alunoNome || 'aluno'})`;
-  const timing = marco === 'D-2'
+  // Tom escalonado pelo marco (dias corridos até o fim): quanto mais longe, mais leve e sem pressão.
+  // Ancora sempre na DATA de encerramento (dataFim) — nunca em "faltam N dias" chumbado no texto.
+  const diasMarco = parseInt(String(marco).replace(/^D-/, ''), 10) || 0;
+  const timing = diasMarco <= 2
     ? 'Faltam POUCOS dias para o contrato encerrar (reforço final): tom gentil de urgência, ' +
       'convidando a confirmar a renovação a tempo para não haver interrupção nas aulas.'
-    : 'O contrato encerra em cerca de 10 dias (aviso antecipado): tom acolhedor e sem pressão, ' +
-      'convidando a renovar com antecedência para garantir a continuidade e o mesmo horário.';
+    : diasMarco <= 7
+    ? 'O contrato encerra em poucos dias (últimos dias): tom gentil e atencioso, convidando a ' +
+      'confirmar a renovação para garantir a continuidade sem interrupção.'
+    : diasMarco <= 15
+    ? 'O contrato encerra em cerca de duas semanas (lembrete): tom acolhedor, convidando a confirmar ' +
+      'a renovação com tranquilidade e a manter o mesmo horário.'
+    : diasMarco <= 30
+    ? 'O contrato encerra em cerca de um mês (aviso antecipado): tom acolhedor e sem pressão, sondando ' +
+      'o interesse em continuar e antecipando dúvidas.'
+    : 'O contrato encerra em mais de um mês (aviso bem antecipado): tom leve e sem qualquer pressão, ' +
+      'apenas avisando com carinho que o ciclo vai terminar e que a escola quer manter a continuidade.';
   const sys =
     'Você é a assistente de uma escola de música e vai escrever uma mensagem PROATIVA de WhatsApp ' +
     'convidando à RENOVAÇÃO do contrato de um aluno. A mensagem é enviada para ' + quem + '. ' +

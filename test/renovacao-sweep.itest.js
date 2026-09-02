@@ -137,19 +137,41 @@ test('R5 contrato em D-10 sem telefone → não enfileira, conta em sem_telefone
 });
 
 // ---------- fora dos marcos é ignorado ----------
-test('R6 contrato em D-5 (fora de {10,2}) não gera touchpoint', async () => {
+test('R6 contrato em D-5 (entre 7 e 2, fora dos marcos) não gera touchpoint', async () => {
   await setCfg(A);
   const acc = await seedContract(A, { finDias: 5, aluno: 'Meio', alunoPhone: '5519990006006' });
   await sweep.processarTenant(A, { gemini: fakeGemini() });
   assert.equal((await tpsOf(A, acc)).length, 0);
 });
 
-// ---------- contrato cancelado é ignorado ----------
-test('R7 contrato cancelado em D-10 não gera touchpoint', async () => {
+// ---------- status de saída (canônico TitleCase) é ignorado ----------
+// Produção grava status TitleCase ('Cancelado','Inativo','Não Renovado'). O filtro do sweep usa esse
+// conjunto canônico — não rascunha renovação de quem já saiu.
+test('R7 contrato Cancelado em D-10 não gera touchpoint', async () => {
   await setCfg(A);
-  const acc = await seedContract(A, { finDias: 10, status: 'cancelado', aluno: 'Cancelado', alunoPhone: '5519990007007' });
+  const acc = await seedContract(A, { finDias: 10, status: 'Cancelado', aluno: 'Cancelado', alunoPhone: '5519990007007' });
   await sweep.processarTenant(A, { gemini: fakeGemini() });
   assert.equal((await tpsOf(A, acc)).length, 0);
+});
+test('R7b contrato Inativo em D-30 não gera touchpoint', async () => {
+  await setCfg(A);
+  const acc = await seedContract(A, { finDias: 30, status: 'Inativo', aluno: 'Inativo', alunoPhone: '5519990007030' });
+  await sweep.processarTenant(A, { gemini: fakeGemini() });
+  assert.equal((await tpsOf(A, acc)).length, 0);
+});
+
+// ---------- marcos novos da régua (D-45/D-30/D-15/D-7) enfileiram ----------
+test('R7c contrato em D-45 → 1 touchpoint D-45 com a data/tom certos', async () => {
+  await setCfg(A);
+  const acc = await seedContract(A, { finDias: 45, servico: 'Piano', aluno: 'Antecipado', alunoPhone: '5519990007045' });
+  const g = fakeGemini();
+  const r = await sweep.processarTenant(A, { gemini: g });
+  assert.equal(r['D-45'], 1);
+  const tps = await tpsOf(A, acc);
+  assert.equal(tps.length, 1);
+  assert.equal(tps[0].marco, 'D-45');
+  assert.equal(tps[0].status, 'pendente');
+  assert.equal(g.calls.find((x) => x.dataFimISO === tps[0].fim).marco, 'D-45');
 });
 
 // ---------- previsão agrupa por faixa (não envia nada) ----------

@@ -19,7 +19,11 @@ const { pool, withTenant } = require('../db');
 const geminiDefault = require('../gemini');
 const logger = require('../logger');
 
-const MARCO_DE = { 10: 'D-10', 2: 'D-2' };
+// Marcos da régua (dias corridos até o fim do contrato). Régua completa D-45→D-2. Rascunho idempotente
+// por (contrato, marco, âncora): mais marcos = mais SUGESTÕES pra recepção, não mais mensagem ao cliente
+// (envio é gated por renovacao_auto_envio, DESLIGADO por padrão — a gestão escolhe qual toque enviar).
+const MARCO_DE = { 45: 'D-45', 30: 'D-30', 15: 'D-15', 10: 'D-10', 7: 'D-7', 2: 'D-2' };
+const MARCOS_DIAS = Object.keys(MARCO_DE).map(Number);   // [45,30,15,10,7,2]
 // Fase 2 — trava anti-ban do envio AUTOMÁTICO (conservador por padrão; ajustável por env).
 const AUTO_CAP_DIA = Number(process.env.RENOVACAO_AUTO_CAP_DIA || 40);        // teto de auto-envios/dia/tenant
 const AUTO_THROTTLE_MS = Number(process.env.RENOVACAO_AUTO_THROTTLE_MS || 4000); // respiro entre envios
@@ -54,8 +58,8 @@ async function contratosNoMarco(c, tenantId) {
          FROM lead_manager.service_account sa
         WHERE sa.tenant_id = $1
           AND sa.fonte_ausente_em IS NULL
-          AND sa.status IS DISTINCT FROM 'cancelado'
-          AND (sa.fim_vigencia - current_date) IN (10, 2)
+          AND (sa.status IS NULL OR sa.status NOT IN ('Cancelado','Inativo','Não Renovado'))
+          AND (sa.fim_vigencia - current_date) = ANY($2::int[])
      ),
      aluno AS (
        SELECT am.account_id, min(p.display_name) AS aluno_nome
@@ -89,7 +93,7 @@ async function contratosNoMarco(c, tenantId) {
               SELECT 1 FROM lead_manager.renovacao_touchpoint rt
                WHERE rt.tenant_id = $1 AND rt.account_id = a.account_id
                  AND rt.fim_vigencia = a.fim_vigencia
-                 AND rt.marco = (CASE WHEN a.dias = 2 THEN 'D-2' ELSE 'D-10' END)
+                 AND rt.marco = ('D-' || a.dias::text)
             )
         -- Contato INTERNO (equipe/dono) nunca recebe toque de renovação, mesmo com contrato próprio.
         AND NOT EXISTS (
@@ -97,7 +101,7 @@ async function contratosNoMarco(c, tenantId) {
                WHERE ic.tenant_id = $1
                  AND lead_manager.br_phone_key(ic.phone) = lead_manager.br_phone_key(r.phone)
             )`,
-    [tenantId]
+    [tenantId, MARCOS_DIAS]
   )).rows;
 }
 
@@ -107,19 +111,20 @@ async function semDestinatario(c, tenantId) {
     `SELECT count(*)::int AS n
        FROM lead_manager.service_account sa
       WHERE sa.tenant_id = $1 AND sa.fonte_ausente_em IS NULL
-        AND sa.status IS DISTINCT FROM 'cancelado'
-        AND (sa.fim_vigencia - current_date) IN (10, 2)
+        AND (sa.status IS NULL OR sa.status NOT IN ('Cancelado','Inativo','Não Renovado'))
+        AND (sa.fim_vigencia - current_date) = ANY($2::int[])
         AND NOT EXISTS (
               SELECT 1 FROM lead_manager.account_member am
                JOIN lead_manager.contact_point cp
                  ON cp.person_id = am.person_id AND cp.kind = 'phone' AND cp.tenant_id = $1
               WHERE am.account_id = sa.id AND am.bond IN ('pagador','beneficiario')
-            )`, [tenantId])).rows[0].n;
+            )`, [tenantId, MARCOS_DIAS])).rows[0].n;
 }
 
 async function processarTenant(tenantId, deps = {}) {
   const gemini = deps.gemini || geminiDefault;
-  const resumo = { tenant_id: tenantId, marcos: 0, enfileirados: 0, sem_telefone: 0, 'D-10': 0, 'D-2': 0 };
+  const resumo = { tenant_id: tenantId, marcos: 0, enfileirados: 0, sem_telefone: 0 };
+  for (const m of Object.values(MARCO_DE)) resumo[m] = 0;   // um contador por marco (D-45…D-2)
 
   const cfg = await withTenant(tenantId, (c) => loadRenovacaoConfig(c, tenantId));
   if (!cfg.habilitada) { resumo.skipped = 'desabilitada'; return resumo; }
