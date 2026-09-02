@@ -65,6 +65,9 @@ SQL
 echo "[itest] migration 092 (renovacao_touchpoint + toggles) …"
 docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest < "$ROOT/db/migrations/092_renovacao_touchpoint.sql" >/dev/null
 
+echo "[itest] migration 098 (renovacao_orientacao — Fase C2) …"
+docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest < "$ROOT/db/migrations/098_renovacao_orientacao.sql" >/dev/null
+
 echo "[itest] migration 109 (amplia marcos D-45→D-2) …"
 docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest < "$ROOT/db/migrations/109_renovacao_touchpoint_marcos.sql" >/dev/null
 
