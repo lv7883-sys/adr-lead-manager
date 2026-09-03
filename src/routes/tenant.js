@@ -751,7 +751,9 @@ router.get(
                     mg.last_any AS last_contact_at,
                     -- item B: última mensagem recebida DO lead (role USER).
                     mg.last_in AS ultimo_contato_lead,
-                    -- DE QUEM É A BOLA (2026-09-03). `ob.last_out` já era calculado aqui, mas só
+                    -- ⚠ SEM CRASES NESTE COMENTÁRIO: ele vive dentro de um template literal, e uma
+                    -- crase aqui encerra a string SQL. Já quebrei este arquivo assim.
+                    -- DE QUEM É A BOLA (2026-09-03). O ob.last_out já era calculado aqui, mas só
                     -- vivia dentro da expressão de awaiting_reply — o dashboard nunca o recebia.
                     -- Sem ele é IMPOSSÍVEL a tela saber se o silêncio é do cliente ou nosso, e a
                     -- tentativa de deduzir por last_any falha: a resposta REAL da escola mora em
