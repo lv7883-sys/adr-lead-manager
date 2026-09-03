@@ -8,8 +8,8 @@
 // chave de cifra próprios, sem require cross-repo.
 //
 // FRONTEIRA (ADR-026 §2.6): isto é camada de ADAPTER (conhece a Extranet). O core
-// (sync.js) não importa nada daqui. _assertValinhos fica: scraping é Valinhos-only por
-// desenho (momento 0); outras fontes entram por adapters API/NATIVE.
+// (sync.js) não importa nada daqui. As unidades habilitadas p/ scrape são deliberadas por
+// env (UNIDADES_PERMITIDAS, default Valinhos); outras fontes entram por adapters API/NATIVE.
 //
 // SERIALIZAÇÃO entre apps (429): NÃO é responsabilidade deste módulo — quem segura o
 // pg_advisory_lock (extranet-lock.js) é o RUNNER, em volta de todo o acesso do binding.
@@ -20,7 +20,12 @@ const path = require('path');
 const EXTRANET = 'https://dash.academiadorock.com.br';
 // UA da receita ADR-BI (Windows Chrome 147): a forma que volta 200; o UA antigo tomava 429.
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/147.0.0.0 Safari/537.36';
-const VALINHOS_ID_UNIDADE = 13;
+// Unidades da Extranet HABILITADAS (rollout deliberado por unidade). Default '13' (Valinhos) —
+// retrocompatível: sem env, o comportamento é o de antes. Para ligar outra unidade, setar
+// EXTRANET_UNIDADES_PERMITIDAS='13,14' (env), SEM tocar em código. A unidade é server-side pela
+// CONTA (email/senha); este guard evita usar credenciais de uma unidade ainda não validada.
+const UNIDADES_PERMITIDAS = String(process.env.EXTRANET_UNIDADES_PERMITIDAS || '13')
+  .split(',').map((s) => Number(String(s).trim())).filter((n) => Number.isInteger(n) && n > 0);
 // A extranet migrou o login p/ SSO/Keycloak (OIDC): dois hosts distintos, cada um com
 // cookies próprios → o login usa cookie jar POR HOST (ver login() abaixo).
 const DASH_HOST = new URL(EXTRANET).host;         // dash.academiadorock.com.br
@@ -123,10 +128,10 @@ async function _request(url, opts = {}, { expectCap = false, noGap = false } = {
   return r;
 }
 
-// ---- LOCK-DOWN Valinhos-only (momento 0) ----
-function _assertValinhos(unidade, ctx) {
-  if (Number(unidade) !== VALINHOS_ID_UNIDADE) {
-    throw new Error(`extranet[LOCK]: só Valinhos (id_unidade=${VALINHOS_ID_UNIDADE}) permitido; recebido ${JSON.stringify(unidade)}${ctx ? ' (' + ctx + ')' : ''}`);
+// ---- Guard de unidade habilitada (parametrizável por env; ver UNIDADES_PERMITIDAS) ----
+function _assertUnidadePermitida(unidade, ctx) {
+  if (!UNIDADES_PERMITIDAS.includes(Number(unidade))) {
+    throw new Error(`extranet[LOCK]: unidade id_unidade=${JSON.stringify(unidade)} não habilitada${ctx ? ' (' + ctx + ')' : ''}. Habilite em EXTRANET_UNIDADES_PERMITIDAS (atuais: ${UNIDADES_PERMITIDAS.join(',') || 'nenhuma'}).`);
   }
 }
 
@@ -163,7 +168,7 @@ async function _walk(jars, method, url, { body, headers = {} } = {}, maxHops = 8
 // A senha decifrada chega só aqui, vai no corpo do POST ao Keycloak e nunca toca log/disco.
 async function login(creds) {
   if (!creds || !creds.email || !creds.senha) throw tag(new Error('login: email/senha obrigatórios'), 'CREDENTIAL');
-  _assertValinhos(creds.unidade, 'login');
+  _assertUnidadePermitida(creds.unidade, 'login');
   const jars = {};
 
   // 1) GET / → segue até o form do Keycloak.
@@ -209,7 +214,7 @@ const _mem = new Map();
 const _key = (c) => `${c.email || ''}|${c.unidade ?? ''}|${c.perfil ?? ''}`;
 
 async function getSession(creds, { force = false } = {}) {
-  _assertValinhos(creds && creds.unidade, 'getSession');
+  _assertUnidadePermitida(creds && creds.unidade, 'getSession');
   const k = _key(creds);
   if (!force) {
     const mem = _mem.get(k);
@@ -269,5 +274,5 @@ function stats() { return { ..._stats, cooldownSec: emCooldown(), sessionFile: S
 
 module.exports = {
   login, getSession, invalidateSession, fetchAuthed, transportFor, throttleGap,
-  EXTRANET, UA, VALINHOS_ID_UNIDADE, SESSION_FILE, stats,
+  EXTRANET, UA, UNIDADES_PERMITIDAS, SESSION_FILE, stats,
 };
