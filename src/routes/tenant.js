@@ -751,6 +751,14 @@ router.get(
                     mg.last_any AS last_contact_at,
                     -- item B: última mensagem recebida DO lead (role USER).
                     mg.last_in AS ultimo_contato_lead,
+                    -- DE QUEM É A BOLA (2026-09-03). `ob.last_out` já era calculado aqui, mas só
+                    -- vivia dentro da expressão de awaiting_reply — o dashboard nunca o recebia.
+                    -- Sem ele é IMPOSSÍVEL a tela saber se o silêncio é do cliente ou nosso, e a
+                    -- tentativa de deduzir por last_any falha: a resposta REAL da escola mora em
+                    -- staff_outbound_samples (66.686 amostras), não em messages (2.019 linhas
+                    -- ASSISTANT, só o que o próprio Regente disparou). Medido no Valinhos: o
+                    -- dashboard calculava 0 leads em "nós falamos por último"; no banco eram 194.
+                    ob.last_out AS ultimo_contato_nosso,
                     ch.channel AS channel,
                     EXISTS (SELECT 1 FROM pending_approvals pa
                              WHERE pa.lead_id = l.id AND pa.status = 'PENDING') AS pending_approval,
