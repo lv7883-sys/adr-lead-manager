@@ -47,13 +47,19 @@ function mediaDeRaw(raw) {
   return { ...det, rawMessage: m, messageKey: key };
 }
 
+// media_url NULL + o raw contém um nó de mídia. Filtramos pelo PRÓPRIO raw (não por media_type),
+// porque mídia que falhou no recebimento (ex.: chegou durante desconexão do WhatsApp) foi persistida
+// com media_type NULO — o download nem definiu o tipo. O `?|` testa se a mensagem tem alguma das
+// chaves de mídia; o mediaDeRaw() reconfirma depois e pula o que não for mídia de verdade.
+const NOS_MIDIA = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage', 'documentWithCaptionMessage'];
 async function pendentesTabela(tenantId, tabela) {
   return (await pool.query(
     `SELECT id, media_type, raw
        FROM lead_manager.${tabela}
-      WHERE tenant_id = $1 AND media_type IS NOT NULL AND media_url IS NULL AND raw IS NOT NULL
+      WHERE tenant_id = $1 AND media_url IS NULL AND raw IS NOT NULL
+        AND jsonb_exists_any(raw->'data'->'message', $3)
         AND received_at >= now() - ($2 || ' days')::interval
-      ORDER BY received_at DESC`, [tenantId, String(DIAS)])
+      ORDER BY received_at DESC`, [tenantId, String(DIAS), NOS_MIDIA])
   ).rows.map((r) => ({ ...r, tabela }));
 }
 
