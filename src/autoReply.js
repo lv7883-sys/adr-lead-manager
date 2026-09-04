@@ -134,6 +134,10 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
   if (process.env.AUTOREPLY_PAUSE === '1') return { skipped: 'paused' };
   const tenantId = tenant && tenant.id;
   if (!tenantId || !channel || !externalId) return { skipped: 'args' };
+  // SEM mensagem nova de TEXTO (reação/figurinha/mídia sem legenda, ou eco sem corpo): não há o que
+  // responder — sem isto, o modelo recebia message='' e "descrevia a situação" ("Não há nova mensagem
+  // do usuário"), uma meta-frase que ia ao cliente. Se não há texto novo, a Janis não responde.
+  if (!inboundText || !String(inboundText).trim()) return { skipped: 'sem_texto' };
   const ident = String(externalId).replace(/\D/g, '');
 
   // NÃO responde mensagem ANTIGA (webhook atrasado / histórico importado na sincronização):

@@ -311,6 +311,11 @@ const REGRAS_REDACAO = {
   // uniforme para TODOS os caminhos de geração (sugestão, rascunho, funil e fora do horário).
   fatos:
     '\n- FATOS (regra inquebrável, acima de qualquer outra): você só pode AFIRMAR algo que esteja escrito EXPLICITAMENTE nesta conversa (no histórico acima) ou nas informações da escola deste prompt. É TERMINANTEMENTE PROIBIDO inventar, deduzir, supor, "lembrar" ou completar qualquer dado que não esteja à sua frente — em ESPECIAL nome, agenda, horário ou DISPONIBILIDADE de professor(a), datas de turma/evento, promoções, valores e condições. CADA CONVERSA É ISOLADA: nunca use informação vinda de outro atendimento ou de outro cliente; vale somente o que está escrito NESTA conversa. Se a pessoa perguntar algo que não está escrito aqui, NÃO confirme, NÃO detalhe e NÃO chute — diga com naturalidade que vai confirmar com a equipe e retorna (ex.: "vou confirmar essa informação com a equipe e já te aviso"). É sempre melhor dizer que vai verificar do que arriscar um dado errado.',
+  // SEM META/SISTEMA — a Janis mandou "Não há nova mensagem do usuário" ao cliente (mensagem sem
+  // texto → o modelo descreveu a situação em vez de responder). Além da guarda no autoReply, esta
+  // regra fecha o buraco em qualquer caminho: nunca uma frase de sistema/observação vai ao cliente.
+  semMeta:
+    '\n- VOCÊ É A RECEPCIONISTA falando com a pessoa — NUNCA escreva observações sobre o sistema ou o estado da conversa (ex.: "não há nova mensagem do usuário", "aguardando resposta", "o usuário não respondeu", "sem novas mensagens", "não há o que responder"). Isso são frases internas e JAMAIS vão ao cliente. Responda sempre à ÚLTIMA mensagem real da pessoa, como um humano. Se ela só se despediu ou não há nada a acrescentar, um fechamento breve e caloroso ("Qualquer coisa é só me chamar! 😊") — nunca uma frase técnica.',
   // Fluidez/brevidade: espelhar o tamanho, responder curto quando cabe, sem virar frieza.
   fluidez:
     '\n- ESPELHE o tamanho das mensagens recentes e responda como no WhatsApp: quando a conversa é de mensagens curtas ou a pergunta tem resposta direta (horário, valor, "tem vaga?"), responda em UMA ou DUAS frases — natural, como a recepcionista digitaria no celular. Não faça parágrafo quando cabe uma linha; não repita o que já foi dito nem encha de formalidade. MAS não seja seca: mantenha o tom cordial e humano — brevidade não é frieza. Escreva mais só quando o assunto realmente exigir (cliente indeciso, várias perguntas juntas).',
@@ -361,6 +366,7 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
   sys +=
     '\n\nCOMO ESCREVER A RESPOSTA (você é a própria recepcionista continuando a conversa no WhatsApp):' +
     REGRAS_REDACAO.fatos +
+    REGRAS_REDACAO.semMeta +
     REGRAS_REDACAO.fluidez +
     '\n- Responda direto ao que a última mensagem pede. Sem rodeios, sem resumir o que já foi dito, sem repetir informação que a pessoa já tem.' +
     REGRAS_REDACAO.nome +
