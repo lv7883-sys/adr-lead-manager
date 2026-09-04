@@ -451,30 +451,32 @@ async function handleZapiWebhook(req, res) {
     // Passo 2 — classificação do estado da bola (shadow). Fire-and-forget: erro aqui nunca
     // afeta o webhook (já respondeu 200) nem o funil.
     const processarSaida = async () => {
-      // Áudio de saída: transcreve ANTES de capturar (reusa o inbound) pra a transcrição já
-      // entrar como body — o usuário do banco não tem UPDATE em staff_outbound_samples.
+      // Mídia de saída (ADR-016+): baixa TODA mídia da recepção — imagem/vídeo/doc/áudio — ANTES
+      // de capturar, pra o media_url já entrar no INSERT (o usuário do banco não tem UPDATE em
+      // staff_outbound_samples). Antes só o áudio era baixado (p/ transcrever) e foto/vídeo/doc da
+      // recepção ficavam invisíveis no Regente ("[mídia]" sem arquivo). Roda em background
+      // (processarSaida é fire-and-forget) — não adiciona latência ao webhook.
       let mediaPendente = false;
       if (msg.media) {
-        if (msg.media.kind === 'audio') {
-          mediaPendente = true;
-          try {
-            const cred = await withTenant(tenant.id, async (c) => (
-              await c.query('SELECT evolution_instance, evolution_token_enc FROM tenants WHERE id = $1', [tenant.id])
-            ).rows[0]);
-            const instance = cred && cred.evolution_instance;
-            const apikey = cred && decrypt(cred.evolution_token_enc);
-            if (instance && apikey) {
-              const saved = await media.salvarMidia({ tenantId: tenant.id, instance, apikey, media: msg.media });
-              if (saved) {
-                msg.media.url = saved.media_url;
+        mediaPendente = true; // mídia de saída: sem texto p/ classificar (até transcrever áudio)
+        try {
+          const cred = await withTenant(tenant.id, async (c) => (
+            await c.query('SELECT evolution_instance, evolution_token_enc FROM tenants WHERE id = $1', [tenant.id])
+          ).rows[0]);
+          const instance = cred && cred.evolution_instance;
+          const apikey = cred && decrypt(cred.evolution_token_enc);
+          if (instance && apikey) {
+            const saved = await media.salvarMidia({ tenantId: tenant.id, instance, apikey, media: msg.media });
+            if (saved) {
+              msg.media.url = saved.media_url;
+              msg.media.filename = saved.media_filename || msg.media.filename;
+              if (msg.media.kind === 'audio') {
                 const t = await gemini.transcribeAudio({ base64: saved.base64, mimetype: saved.mimetype });
                 if (t && t.trim()) { msg.body = t.trim(); mediaPendente = false; }
               }
             }
-          } catch (e) { log.warn('saida.transcribe_failed', { error: e.message }); }
-        } else {
-          mediaPendente = true; // imagem/doc/vídeo de saída: sem texto p/ classificar
-        }
+          }
+        } catch (e) { log.warn('saida.media_failed', { error: e.message }); }
       }
       const cap = await staffSamples.captureOutbound(tenant.id, msg, req.body);
       // Só classifica em linha NOVA (rowCount>0) — nunca no eco duplicado (dedup por msg id).

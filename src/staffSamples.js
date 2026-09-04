@@ -17,10 +17,11 @@ const FONTES_HUMANAS = new Set(['web', 'android', 'ios', 'desktop']);
 async function captureOutbound(tenantId, msg, rawBody) {
   if (!msg) return;
   // Antes só capturava TEXTO. Agora uma saída só-mídia (áudio/imagem/doc) também vira
-  // resposta: o body ganha placeholder legível ('[áudio]'/'[imagem]'/…) e grava media_*
-  // (sem baixar o arquivo nem transcrever aqui — isso fica pro próximo pacote). O que
-  // importa p/ "virar a bola" é ter uma linha com received_at. media_url fica NULL: o
-  // front só renderiza player quando há url, então mostra apenas o placeholder.
+  // resposta: o body ganha placeholder legível ('[áudio]'/'[imagem]'/…) e grava media_*.
+  // ADR-016+: o webhook JÁ baixou a mídia (msg.media.url) ANTES de chamar aqui, então o
+  // media_url entra no próprio INSERT (o usuário do banco não tem UPDATE nesta tabela) e a
+  // foto/vídeo/doc da recepção passa a aparecer no Regente. Se o download falhou, url fica
+  // NULL e a bolha mostra só o placeholder (recuperável depois pelo backfill de mídia).
   const media = msg.media || null;
   const body = msg.body || (media && (media.placeholder || '[mídia]')) || null;
   if (!body && !media) return null; // nada aproveitável (sem texto e sem mídia)
@@ -33,13 +34,14 @@ async function captureOutbound(tenantId, msg, rawBody) {
       const ins = await c.query(
         `INSERT INTO staff_outbound_samples
            (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
-            media_type, media_filename, is_group)
-         VALUES ($1, 'whatsapp', $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            media_type, media_filename, media_url, is_group)
+         VALUES ($1, 'whatsapp', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (tenant_id, external_message_id)
            WHERE external_message_id IS NOT NULL DO NOTHING
          RETURNING id`,
         [tenantId, msg.externalId, msg.externalMessageId, msg.source ?? null, msg.sender ?? null, body, rawBody,
-         media ? (media.kind || null) : null, media ? (media.filename || null) : null, isGroup]
+         media ? (media.kind || null) : null, media ? (media.filename || null) : null,
+         media ? (media.url || null) : null, isGroup]
       );
       // "Responder = ler": saída HUMANA avança o last_read_at até o instante da resposta (roda
       // sempre, mesmo no ON CONFLICT — a resposta aconteceu). Usa o timestamp do eco (não now())
