@@ -11,6 +11,10 @@
 // leadId só é usado no ramo 'ia' (pending_approvals) e no dedup do 'recepcao'. Passando NULL
 // (conversa de NÃO-LEAD), esses ramos ficam vazios e a timeline traz só lead + recepção.
 
+// Nós de mídia possíveis no message da Evolution — p/ marcar media_pendente (tem mídia no raw
+// mas o arquivo não foi baixado → a bolha oferece "Carregar mídia").
+const _NOS_MIDIA_SQL = "ARRAY['imageMessage','videoMessage','audioMessage','documentMessage','stickerMessage','documentWithCaptionMessage']";
+
 const TIMELINE_SQL = `WITH reac AS (
                    -- ADR-031 item 3: reações em escopo, com emoji e id da mensagem-alvo.
                    SELECT m.raw#>>'{data,message,reactionMessage,text}'   AS emoji,
@@ -39,7 +43,7 @@ const TIMELINE_SQL = `WITH reac AS (
                  )
                  SELECT t.id, t.received_at, t.kind, t.sender, t.body,
                         t.media_url, t.media_type, t.media_filename, t.media_transcription, t.reactions, t.ack_status, t.edited_at, t.deleted_at,
-                        t.external_message_id,
+                        t.external_message_id, t.media_pendente,
                         t.reply_to_id, rt.role AS rt_role, rt.body AS rt_body, rt.media_type AS rt_media_type
                    FROM (
                    -- Entrada do LEAD (USER). Rascunhos da IA (ASSISTANT) NAO entram na
@@ -51,7 +55,8 @@ const TIMELINE_SQL = `WITH reac AS (
                           NULL::text AS ack_status,   -- inbound (lead) nao tem check
                           m.edited_at,                -- Fatia 2: marcador "editada"
                           m.deleted_at,               -- Fatia 3: marcador "apagada"
-                          m.external_message_id       -- ADR-042: comment_id (p/ ocultar comentário)
+                          m.external_message_id,       -- ADR-042: comment_id (p/ ocultar comentário)
+                          (m.media_url IS NULL AND jsonb_exists_any(m.raw->'data'->'message', ${_NOS_MIDIA_SQL})) AS media_pendente
                      FROM messages m
                      JOIN conversations cv ON cv.id = m.conversation_id
                     WHERE cv.tenant_id = $1
@@ -72,7 +77,8 @@ const TIMELINE_SQL = `WITH reac AS (
                           s.ack_status,   -- check da recepcao (direto da saida)
                           s.edited_at,   -- ACAO-2: edicao da recepcao (direto da saida)
                           s.deleted_at,  -- ACAO-1: exclusao da recepcao (direto da saida)
-                          s.external_message_id       -- ADR-042: paridade de colunas no UNION
+                          s.external_message_id,       -- ADR-042: paridade de colunas no UNION
+                          (s.media_url IS NULL AND jsonb_exists_any(s.raw->'data'->'message', ${_NOS_MIDIA_SQL})) AS media_pendente
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
                       AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
@@ -118,7 +124,8 @@ const TIMELINE_SQL = `WITH reac AS (
                               AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
                               AND so.body = pa.suggested_response
                             ORDER BY so.received_at DESC LIMIT 1) AS deleted_at,
-                          NULL::text AS external_message_id   -- ADR-042: paridade de colunas no UNION
+                          NULL::text AS external_message_id,   -- ADR-042: paridade de colunas no UNION
+                          false AS media_pendente
                      FROM pending_approvals pa
                     WHERE pa.tenant_id = $1 AND pa.lead_id = $3
                       AND pa.status IN ('APPROVED', 'EDITED')
@@ -139,6 +146,7 @@ function mapTimelineRow(r) {
     edited_at: r.edited_at || null,      // Fatia 2 — marcador "editada" (inbound)
     deleted_at: r.deleted_at || null,    // Fatia 3 — marcador "apagada" (inbound)
     external_message_id: r.external_message_id || null,   // ADR-042 — comment_id (ocultar comentário)
+    media_pendente: r.media_pendente === true,   // tem mídia no raw mas sem arquivo → botão "Carregar"
     reply_to: null,
   };
   if (r.reply_to_id) {

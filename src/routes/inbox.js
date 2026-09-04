@@ -887,6 +887,43 @@ router.post('/:tenantId/inbox/conversations/:conversationId/mensagem/:mid/apagar
   }
 });
 
+// POST /tenant/:tenantId/inbox/conversations/:cid/mensagem/:mid/midia-baixar { origem:'lead'|'staff' }
+// "Clicar para baixar": re-baixa da Evolution a mídia cujo arquivo não existe (media_url NULL),
+// usando o payload cru (raw) já guardado na linha. Idempotente. origem diz a tabela (lead=messages,
+// staff=staff_outbound_samples). Mídia antiga que o WhatsApp já não guarda → 502 (bolha avisa).
+router.post('/:tenantId/inbox/conversations/:conversationId/mensagem/:mid/midia-baixar',
+  authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+    if (!isUuid(req.params.mid)) return res.status(400).json({ error: 'invalid_mid' });
+    const tenantId = req.tenantId;
+    const tabela = (req.body && req.body.origem === 'staff') ? 'staff_outbound_samples' : 'messages';
+    const { detectarMidia } = require('./webhook');   // lazy: evita qualquer ciclo de require no boot
+    const outbound = require('../outbound');
+    try {
+      const row = await withTenant(tenantId, (c) => c.query(
+        `SELECT media_url, media_type, media_filename, raw FROM lead_manager.${tabela} WHERE id = $1`,
+        [req.params.mid]).then((r) => r.rows[0] || null));
+      if (!row) return res.status(404).json({ error: 'not_found' });
+      if (row.media_url) return res.json({ media_url: row.media_url, media_type: row.media_type, media_filename: row.media_filename });
+      const m = row.raw && row.raw.data && row.raw.data.message;
+      const key = row.raw && row.raw.data && row.raw.data.key;
+      const det = m ? detectarMidia(m) : null;
+      if (!det || !key) return res.status(422).json({ error: 'sem_midia' });
+      const creds = await outbound.credsForTenant(tenantId);
+      if (!creds.instance || !creds.apikey) return res.status(400).json({ error: 'tenant_sem_evolution' });
+      const saved = await mediaLib.salvarMidia({ tenantId, instance: creds.instance, apikey: creds.apikey, media: { ...det, rawMessage: m, messageKey: key } });
+      if (!saved) return res.status(502).json({ error: 'indisponivel' });   // WhatsApp não guarda mais
+      await withTenant(tenantId, (c) => c.query(
+        `UPDATE lead_manager.${tabela}
+            SET media_url = $1, media_type = COALESCE(media_type, $2), media_filename = COALESCE(media_filename, $3)
+          WHERE id = $4 AND media_url IS NULL`,
+        [saved.media_url, saved.media_type, saved.media_filename, req.params.mid]));
+      res.json({ media_url: saved.media_url, media_type: saved.media_type, media_filename: saved.media_filename });
+    } catch (err) {
+      logger.error('tenant.inbox.midia_baixar.error', { tenant_id: tenantId, error: err.message });
+      res.status(502).json({ error: 'falha', detail: err.message });
+    }
+  });
+
 // POST /tenant/:tenantId/inbox/conversations/:cid/mensagem/:mid/editar { text } (E12-07)
 router.post('/:tenantId/inbox/conversations/:conversationId/mensagem/:mid/editar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   if (!isUuid(req.params.mid)) return res.status(400).json({ error: 'invalid_mid' });
