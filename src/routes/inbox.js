@@ -77,6 +77,16 @@ function preview(body, mediaType, deletedAt) {
   return t.length > 80 ? `${t.slice(0, 80)}…` : t;
 }
 
+// Dobra de acento em SQL PURO. O ILIKE do Postgres é insensível a MAIÚSCULA mas SENSÍVEL a acento,
+// então "valeria" nunca casava "Valéria" (reclamação real da recepção). A extensão `unaccent` NÃO
+// está instalada no banco — então normalizamos à mão: lower() + troca as acentuadas do PT-BR pela
+// base. As duas strings têm o MESMO comprimento (translate é posição-a-posição); '%' passa intacto.
+const _ACENTO_DE = 'áàâãäçéèêëíìîïñóòôõöúùûü';
+const _ACENTO_PARA = 'aaaaaceeeeiiiinooooouuuu';
+function foldAcentoSql(expr) {
+  return `translate(lower(${expr}), '${_ACENTO_DE}', '${_ACENTO_PARA}')`;
+}
+
 // Monta { sql, params } da listagem (E12-03). `cursor` = objeto decodificado {ts,id} | null.
 // FONTE ÚNICA da query — usada pelo handler (sob withTenant/RLS) e pelo itest (como postgres).
 function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = null, limit = 30, cursor = null } = {}) {
@@ -92,9 +102,10 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     params.push(`%${q}%`); const pNome = params.length;
     if (dig) {
       params.push(`%${dig}%`); const pDig = params.length;   // tem dígito → nome OU telefone
-      extra.push(`(nome ILIKE $${pNome} OR (ident <> '' AND ident LIKE $${pDig}))`);
+      extra.push(`(${foldAcentoSql('nome')} LIKE ${foldAcentoSql('$' + pNome)} OR (ident <> '' AND ident LIKE $${pDig}))`);
     } else {
-      extra.push(`nome ILIKE $${pNome}`);   // sem dígito → só nome (senão '%%' casaria TUDO)
+      // sem dígito → só nome (senão '%%' casaria TUDO). Dobra de acento nos DOIS lados: "monica" acha "Mônica".
+      extra.push(`${foldAcentoSql('nome')} LIKE ${foldAcentoSql('$' + pNome)}`);
     }
   }
   // Renovações (ADR-049 rev.): o que está DE FATO em jogo de renovação, não "vence algum dia".
