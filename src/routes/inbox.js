@@ -1135,9 +1135,11 @@ async function suggestReply(tenantId, conversationId, contexto = 'lead', deps = 
   if (!info) return { notFound: true };
   const history = await loadRealHistory(tenantId, { conversationId: info.convId, ident: info.ident, leadId: info.leadId });
   try {
+    // Modo-venda SÓ para lead/renovação. Fora disso (não-lead), a Janis sugere no tom normal (Késsia).
+    const vendas = contexto === 'lead' || contexto === 'renovacao';
     const suggestion = await generate({
       systemPrompt: resolveSystemPrompt(info.config), history, message: info.lastBody,
-      retomada: history.length > 0, vendas: true, contexto: contexto === 'renovacao' ? 'renovacao' : 'lead',
+      retomada: history.length > 0, vendas, contexto: contexto === 'renovacao' ? 'renovacao' : 'lead',
     });
     return { ok: true, suggestion };
   } catch (e) {
@@ -1147,7 +1149,9 @@ async function suggestReply(tenantId, conversationId, contexto = 'lead', deps = 
 router.post('/:tenantId/inbox/conversations/:conversationId/sugerir', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
   try {
-    const contexto = (req.body && req.body.contexto === 'renovacao') ? 'renovacao' : 'lead';
+    // contexto: 'lead' | 'renovacao' habilitam o modo-venda; qualquer outro (não-lead) → tom normal.
+    const cbody = req.body && req.body.contexto;
+    const contexto = (cbody === 'renovacao' || cbody === 'lead') ? cbody : '';
     const out = await suggestReply(req.tenantId, req.params.conversationId, contexto);
     if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
     if (out.reason) return res.status(502).json({ error: out.reason, detail: out.detail });
