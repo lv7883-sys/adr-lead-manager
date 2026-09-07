@@ -1111,7 +1111,7 @@ router.post('/:tenantId/inbox/conversations/:conversationId/audio', authenticate
 // ---- #4 SUGERIR RESPOSTA DA IA (sob demanda, sem persistir) — Fase 1.5 -----------------------
 // Reusa loadRealHistory + gemini.generateReply + resolveSystemPrompt (compõe como o
 // generateDraftForLead, mas SEM criar pending_approval — só devolve o texto p/ preencher o campo).
-async function suggestReply(tenantId, conversationId, deps = {}) {
+async function suggestReply(tenantId, conversationId, contexto = 'lead', deps = {}) {
   const generate = deps.generate || gemini.generateReply;
   const info = await withTenant(tenantId, async (c) => {
     const cv = (await c.query(
@@ -1135,7 +1135,10 @@ async function suggestReply(tenantId, conversationId, deps = {}) {
   if (!info) return { notFound: true };
   const history = await loadRealHistory(tenantId, { conversationId: info.convId, ident: info.ident, leadId: info.leadId });
   try {
-    const suggestion = await generate({ systemPrompt: resolveSystemPrompt(info.config), history, message: info.lastBody, retomada: history.length > 0 });
+    const suggestion = await generate({
+      systemPrompt: resolveSystemPrompt(info.config), history, message: info.lastBody,
+      retomada: history.length > 0, vendas: true, contexto: contexto === 'renovacao' ? 'renovacao' : 'lead',
+    });
     return { ok: true, suggestion };
   } catch (e) {
     return { reason: 'generate_error', detail: e.message };
@@ -1144,7 +1147,8 @@ async function suggestReply(tenantId, conversationId, deps = {}) {
 router.post('/:tenantId/inbox/conversations/:conversationId/sugerir', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
   try {
-    const out = await suggestReply(req.tenantId, req.params.conversationId);
+    const contexto = (req.body && req.body.contexto === 'renovacao') ? 'renovacao' : 'lead';
+    const out = await suggestReply(req.tenantId, req.params.conversationId, contexto);
     if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
     if (out.reason) return res.status(502).json({ error: out.reason, detail: out.detail });
     res.json(out);
