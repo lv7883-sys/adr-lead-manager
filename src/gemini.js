@@ -325,6 +325,10 @@ const REGRAS_REDACAO = {
   // Uso do nome: proibição por padrão no fluxo; abertura imperativa (gatilho objetivo, não vaza).
   nome:
     '\n- NOME DO CLIENTE: por padrão, responda SEM o nome. NÃO abra a resposta com o nome quando a conversa JÁ está em andamento — nada de "Certo, {Nome}", "Entendi, {Nome}", "{Nome}, ..." como prefixo no meio da conversa; isso soa robótico e repetitivo. No fluxo normal da conversa, NÃO use o nome. As exceções em que o nome aparece: (1) ABERTURA — SEMPRE cumprimente pelo nome na PRIMEIRA resposta da conversa (ex.: "Olá, {Nome}!"). (2) RETOMADA — quando a conversa volta depois de um tempo parada, reancore com o nome logo no começo. Fora desses dois momentos, no fluxo normal da conversa, NÃO use o nome.',
+  // Não assinar com nome de recepcionista específica (multi-tenant: várias atendentes usam o mesmo
+  // sistema; a pessoa citada no histórico pode não ser quem está respondendo agora).
+  semNomeStaff:
+    '\n- NÃO se apresente nem assine com o nome de uma recepcionista/atendente ESPECÍFICA (ex.: NÃO escreva "aqui é a Késsia", "sou a Rafaela"), mesmo que esse nome apareça no histórico — quem envia pode ser outra pessoa da equipe. Se um nome de quem atende for realmente necessário na apresentação, use o espaço reservado "[seu nome]" para a atendente preencher; no fluxo normal, apenas continue sem assinar.',
   // Não re-oferecer o que JÁ foi enviado (apresentação, tabela de valores, documento...).
   naoReoferecer:
     '\n- ANTES de sugerir, confira o histórico: se você JÁ enviou o que o cliente pede (apresentação, tabela de valores, documento, fotos, link — no histórico aparece como "[documento: ...]", "[imagem]", ou você já disse que ia enviar), NÃO ofereça mandar de novo nem diga "posso reenviar". Reconheça que já enviou e siga a conversa: pergunte se recebeu, se ficou claro ou se tem alguma dúvida. Só ofereça enviar o que AINDA não aparece como enviado no histórico.',
@@ -410,6 +414,7 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
     REGRAS_REDACAO.fluidez +
     '\n- Responda direto ao que a última mensagem pede. Sem rodeios, sem resumir o que já foi dito, sem repetir informação que a pessoa já tem.' +
     REGRAS_REDACAO.nome +
+    REGRAS_REDACAO.semNomeStaff +
     REGRAS_REDACAO.tom +
     REGRAS_REDACAO.naoReoferecer +
     // Modo vendas (só sugestão revisada por humano): a alma de vendas completa (método 5 passos,
@@ -462,7 +467,8 @@ async function estrategiaVendas({ systemPrompt, clientHistory = [], chatHistory 
     '- Diga em que pé está a conversa, a provável barreira/objeção e a temperatura do lead.\n' +
     '- Dê uma ESTRATÉGIA específica DESTA conversa (nada de conselho genérico).\n' +
     '- Quando fizer sentido, ofereça uma SUGESTÃO DE FALA pronta pra ela mandar ao cliente, entre aspas, curta e no tom caloroso da escola.' +
-    (vende ? blocoVendas(contexto) : '\n- Aqui NÃO é um lead/renovação de venda: oriente como uma boa recepcionista acolhedora resolveria (tom da Késsia), sem forçar venda.') +
+    (vende ? blocoVendas(contexto) : '\n- Aqui NÃO é um lead/renovação de venda: oriente como uma boa recepcionista acolhedora resolveria (tom caloroso da escola), sem forçar venda.') +
+    REGRAS_REDACAO.semNomeStaff +
     REGRAS_REDACAO.fatos +
     (systemPrompt ? `\n\nINFORMAÇÕES DA ESCOLA (referência de fatos — nunca extrapole):\n${systemPrompt}` : '') +
     (transcript
