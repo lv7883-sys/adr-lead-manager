@@ -712,6 +712,40 @@ router.post('/:tenantId/inbox/iniciar', authenticate, requireTenantAccess(WRITE_
   }
 });
 
+// GET /tenant/:tenantId/inbox/contatos?q= — busca contatos JÁ CONHECIDOS (cadastro + leads) por nome,
+// pra iniciar conversa com quem a escola já tem no sistema mesmo sem thread. Sem acento; dedup por
+// telefone (cadastro tem prioridade sobre lead). Devolve [{ nome, phone, tipo }].
+router.get('/:tenantId/inbox/contatos', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (q.length < 2) return res.json({ items: [] });
+  try {
+    const items = await withTenant(req.tenantId, (c) => c.query(
+      `WITH cad AS (
+         SELECT p.display_name AS nome, cp.value_raw AS phone, 'cadastro' AS tipo, 1 AS pri
+           FROM contact_point cp JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
+          WHERE cp.tenant_id = $1 AND cp.kind = 'phone' AND coalesce(p.display_name, '') <> ''
+            AND ${foldAcentoSql('p.display_name')} LIKE ${foldAcentoSql('$2')}
+       ),
+       lds AS (
+         SELECT l.name AS nome, coalesce(l.phone, l.meta_psid) AS phone, 'lead' AS tipo, 2 AS pri
+           FROM leads l
+          WHERE l.tenant_id = $1 AND coalesce(l.name, '') <> '' AND coalesce(l.phone, l.meta_psid, '') <> ''
+            AND ${foldAcentoSql('l.name')} LIKE ${foldAcentoSql('$2')}
+       ),
+       u AS (SELECT * FROM cad UNION ALL SELECT * FROM lds)
+       SELECT nome, phone, tipo FROM (
+         SELECT DISTINCT ON (br_phone_key(phone)) nome, phone, tipo, pri
+           FROM u WHERE br_phone_key(phone) <> ''
+          ORDER BY br_phone_key(phone), pri
+       ) d ORDER BY nome LIMIT 15`,
+      [req.tenantId, `%${q}%`]).then((r) => r.rows));
+    res.json({ items });
+  } catch (err) {
+    logger.error('tenant.inbox.contatos.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // POST /tenant/:tenantId/inbox/rascunho-renovacao — Fase B: encontra/cria a conversa de um telefone como
 // RASCUNHO de renovação (só na aba Renovação até enviar). Devolve o conversation_id p/ o inbox abrir. { phone }.
 router.post('/:tenantId/inbox/rascunho-renovacao', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
