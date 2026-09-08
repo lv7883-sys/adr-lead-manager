@@ -1162,6 +1162,136 @@ router.post('/:tenantId/inbox/conversations/:conversationId/sugerir', authentica
   }
 });
 
+// ---- CONSULTORIA DA JANIS (quadro vermelho) — chat de estratégia INTERNO (Fase 2) ------------
+// A recepção conversa com a Janis (NÃO com o cliente) pedindo estratégia de abordagem daquela
+// conversa. Texto + mídia (foto/vídeo/áudio). A Janis lê o contexto REAL do cliente (loadRealHistory)
+// + o histórico do chat de estratégia e responde com estratégia de vendas, sem alucinar.
+const _EST_COLS = 'id, role, body, media_url, media_type, media_filename, media_transcription, autor, created_at';
+async function _estrategiaCtx(c, tenantId, conversationId) {
+  const cv = (await c.query(
+    `SELECT id, conversation_kind, regexp_replace(external_id, '[^0-9]', '', 'g') AS ident
+       FROM conversations WHERE id = $1 AND tenant_id = $2`, [conversationId, tenantId])).rows[0];
+  if (!cv) return null;
+  const leadRow = (await c.query(
+    `SELECT id, status FROM leads WHERE tenant_id = $1
+       AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+      ORDER BY created_at ASC LIMIT 1`, [tenantId, cv.ident])).rows[0];
+  const cfg = (await c.query(
+    `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
+       FROM tenant_lead_config WHERE tenant_id = $1`, [tenantId])).rows[0];
+  const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
+  let nomeIa = null;
+  try { nomeIa = (await c.query('SELECT nome_ia FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0]?.nome_ia || null; } catch { /* opcional */ }
+  return {
+    cv, leadId: (leadRow && leadRow.id) || null, status: (leadRow && leadRow.status) || null,
+    cfg: cfg || { school_name: tname || 'Escola', system_prompt_override: null, available_instruments: [], business_hours: {}, notification_whatsapp: null },
+    escola: (cfg && cfg.school_name) || tname || 'Escola', nomeIa: nomeIa || 'Janis',
+  };
+}
+function _ctxDeStatus(status) {
+  return (status && status !== 'NOT_LEAD' && status !== 'REVIEW_QUEUE') ? 'lead' : '';
+}
+
+// GET — histórico do chat de estratégia da conversa.
+router.get('/:tenantId/inbox/conversations/:conversationId/estrategia', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  try {
+    const items = await withTenant(req.tenantId, (c) => c.query(
+      `SELECT ${_EST_COLS} FROM janis_estrategia_chat WHERE tenant_id = $1 AND conversation_id = $2 ORDER BY created_at ASC`,
+      [req.tenantId, req.params.conversationId]).then((r) => r.rows));
+    res.json({ items });
+  } catch (err) {
+    logger.error('tenant.inbox.estrategia.get.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /abrir — estratégia PROATIVA de abertura (só se ainda não há histórico). Idempotente.
+router.post('/:tenantId/inbox/conversations/:conversationId/estrategia/abrir', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const conversationId = req.params.conversationId;
+  if (!isUuid(conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  const cbody = req.body && req.body.contexto;
+  try {
+    const jaTem = await withTenant(req.tenantId, (c) => c.query(
+      'SELECT 1 FROM janis_estrategia_chat WHERE tenant_id = $1 AND conversation_id = $2 LIMIT 1',
+      [req.tenantId, conversationId]).then((r) => r.rowCount));
+    if (jaTem) return res.json({ ja: true });
+    const ctx = await withTenant(req.tenantId, (c) => _estrategiaCtx(c, req.tenantId, conversationId));
+    if (!ctx) return res.status(404).json({ error: 'conversation_not_found' });
+    const clientHistory = await loadRealHistory(req.tenantId, { conversationId, ident: ctx.cv.ident, leadId: ctx.leadId });
+    const contexto = (cbody === 'renovacao' || cbody === 'lead') ? cbody : _ctxDeStatus(ctx.status);
+    let reply;
+    try {
+      reply = await gemini.estrategiaVendas({
+        systemPrompt: resolveSystemPrompt(ctx.cfg), clientHistory, chatHistory: [],
+        message: 'Acabei de abrir esta conversa. Me dá uma leitura rápida de onde ela está e a melhor estratégia de abordagem agora.',
+        escola: ctx.escola, nomeIa: ctx.nomeIa, contexto,
+      });
+    } catch (e) { return res.status(502).json({ error: 'generate_error', detail: e.message }); }
+    const row = await withTenant(req.tenantId, (c) => c.query(
+      `INSERT INTO janis_estrategia_chat (tenant_id, conversation_id, role, body) VALUES ($1, $2, 'assistant', $3) RETURNING ${_EST_COLS}`,
+      [req.tenantId, conversationId, String(reply || '').trim()]).then((r) => r.rows[0]));
+    res.json({ ja: false, janis: row });
+  } catch (err) {
+    logger.error('tenant.inbox.estrategia.abrir.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST — a recepção manda uma mensagem (texto e/ou mídia) para a Janis; devolve a resposta dela.
+router.post('/:tenantId/inbox/conversations/:conversationId/estrategia', authenticate, requireTenantAccess(WRITE_ROLES), upload.single('file'), async (req, res) => {
+  const conversationId = req.params.conversationId;
+  if (!isUuid(conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  const texto = typeof req.body?.texto === 'string' ? req.body.texto.trim() : '';
+  const autor = String((req.body && req.body.autor) || (req.query && req.query.autor) || '').slice(0, 120) || null;
+  const cbody = (req.body && req.body.contexto) || (req.query && req.query.contexto);
+  const file = req.file;
+  if (!texto && !(file && file.buffer)) return res.status(400).json({ error: 'vazio' });
+  try {
+    // Mídia: grava em disco (replay no painel) + transcreve áudio + base64 p/ multimodal (foto/vídeo).
+    let media_url = null; let media_type = null; let media_filename = null; let media_transcription = null; let mediaForAI = null;
+    if (file && file.buffer) {
+      const saved = mediaLib.salvarBuffer({ tenantId: req.tenantId, buffer: file.buffer, mimetype: file.mimetype, filename: file.originalname || 'arquivo' });
+      media_url = saved.media_url; media_type = saved.media_type; media_filename = file.originalname || null;
+      if (media_type === 'audio') {
+        try { media_transcription = await gemini.transcribeAudio({ base64: saved.base64, mimetype: file.mimetype }); } catch { /* best-effort */ }
+        // Se não deu pra transcrever, manda o áudio pra Janis OUVIR (multimodal), quando cabe inline.
+        if (!media_transcription && file.buffer.length < 12 * 1024 * 1024) mediaForAI = { base64: saved.base64, mimetype: file.mimetype };
+      } else if ((media_type === 'image' || media_type === 'video') && file.buffer.length < 12 * 1024 * 1024) {
+        mediaForAI = { base64: saved.base64, mimetype: file.mimetype };
+      }
+    }
+    const userBody = texto || media_transcription || (media_type ? `[${media_type}]` : '');
+    const userRow = await withTenant(req.tenantId, (c) => c.query(
+      `INSERT INTO janis_estrategia_chat (tenant_id, conversation_id, role, body, media_url, media_type, media_filename, media_transcription, autor)
+       VALUES ($1, $2, 'user', $3, $4, $5, $6, $7, $8) RETURNING ${_EST_COLS}`,
+      [req.tenantId, conversationId, userBody, media_url, media_type, media_filename, media_transcription, autor]).then((r) => r.rows[0]));
+
+    const ctx = await withTenant(req.tenantId, (c) => _estrategiaCtx(c, req.tenantId, conversationId));
+    if (!ctx) return res.status(404).json({ error: 'conversation_not_found' });
+    const clientHistory = await loadRealHistory(req.tenantId, { conversationId, ident: ctx.cv.ident, leadId: ctx.leadId });
+    const chatHistory = await withTenant(req.tenantId, (c) => c.query(
+      'SELECT role, body FROM janis_estrategia_chat WHERE tenant_id = $1 AND conversation_id = $2 AND id <> $3 ORDER BY created_at ASC',
+      [req.tenantId, conversationId, userRow.id]).then((r) => r.rows));
+    const contexto = (cbody === 'renovacao' || cbody === 'lead') ? cbody : _ctxDeStatus(ctx.status);
+    const msgIA = texto || (media_transcription ? `(áudio da recepção) ${media_transcription}` : '');
+    let reply;
+    try {
+      reply = await gemini.estrategiaVendas({
+        systemPrompt: resolveSystemPrompt(ctx.cfg), clientHistory, chatHistory,
+        message: msgIA, media: mediaForAI, escola: ctx.escola, nomeIa: ctx.nomeIa, contexto,
+      });
+    } catch (e) { return res.status(502).json({ error: 'generate_error', detail: e.message, user: userRow }); }
+    const janisRow = await withTenant(req.tenantId, (c) => c.query(
+      `INSERT INTO janis_estrategia_chat (tenant_id, conversation_id, role, body) VALUES ($1, $2, 'assistant', $3) RETURNING ${_EST_COLS}`,
+      [req.tenantId, conversationId, String(reply || '').trim()]).then((r) => r.rows[0]));
+    res.json({ user: userRow, janis: janisRow });
+  } catch (err) {
+    logger.error('tenant.inbox.estrategia.post.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // ---- #5 MARCAR COMO LEAD — Fase 1.5 (promove lead casável OU cria a partir da conversa) -------
 async function marcarComoLead(tenantId, conversationId, sender) {
   return withTenant(tenantId, async (c) => {

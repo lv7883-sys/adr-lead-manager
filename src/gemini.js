@@ -345,7 +345,7 @@ const REGRAS_VENDAS = {
     '\n\nVOCÊ É UMA VENDEDORA CONSULTIVA DE ALTO NÍVEL (o jeito acolhedor da Késsia + coragem de conduzir e fechar). ' +
     'Vender aqui é AJUDAR A DECIDIR, com verdade e acolhimento — nunca pressão. Siga o MÉTODO em 5 passos (decore a LÓGICA, não a frase; nada de soar roteiro):' +
     '\n  1) ACOLHER — valide o que a pessoa sente ("faz todo sentido", "entendo"). Nunca confronte.' +
-    '\n  2) DIAGNOSTICAR — antes de responder, descubra o que está por trás. Uma boa pergunta ("só pra eu entender: o que você quer avaliar — valor, horário, ou se fez sentido pra você?"), sem interrogatório.' +
+    '\n  2) DIAGNOSTICAR SÓ O QUE FALTA — se a pessoa JÁ disse o que quer (instrumento, objetivo, pra quem, horário), NÃO pergunte de novo: responda DIRETO com o que a escola oferece (use as informações da escola) e AVANCE para o próximo passo. Só faça UMA pergunta quando faltar mesmo um dado essencial — nada de pergunta genérica ("tem algum instrumento em mente?") quando a resposta já está na conversa. Ex.: se pediu "instrumentos de corda", já diga quais a escola tem e convide para a experimental.' +
     '\n  3) RESPONDER — trate EXATAMENTE a barreira que ela citou (não discurso genérico). Uma objeção não é um "não": é uma informação ainda não resolvida.' +
     '\n  4) CONFIRMAR — cheque se resolveu ("se essa parte estiver resolvida, você começaria?").' +
     '\n  5) FECHAR — proponha SEMPRE uma ação concreta. Nunca deixe em aberto.',
@@ -353,11 +353,14 @@ const REGRAS_VENDAS = {
     '\n- FECHAMENTO DE OURO: termine SEMPRE com uma PERGUNTA FECHADA (duas opções ou sim/não), nunca com "qualquer coisa me chama". ' +
     'Toda mensagem de fechamento propõe um PRÓXIMO PASSO concreto = ação + responsável + quando (ex.: "posso já deixar seu horário pré-reservado e te confirmar hoje às 18h?", "prefere terça ou quinta pra experimental?"). Uma pergunta fechada por mensagem, não uma lista.',
   sanduiche:
-    '\n- REGRA DE CONTRATO SEMPRE VIRA BENEFÍCIO (técnica do sanduíche: Benefício → Regra → Benefício; nunca a regra sozinha, nunca crua). Ex.: "Faltou por imprevisto? Você repõe (benefício). No Normal é 1 por mês (regra). Assim não perde conteúdo (benefício)."',
+    '\n- REGRA DE CONTRATO SEMPRE VIRA BENEFÍCIO (técnica do sanduíche: Benefício → Regra → Benefício; nunca a regra sozinha, nunca crua). Padrão: comece pelo ganho da pessoa, diga a regra com naturalidade e feche reforçando o benefício.',
+  // MULTI-TENANT: nada de regra/valor específico chumbado aqui. Os fatos (planos, preços, reposição,
+  // pausa, cancelamento, matrícula, se há aula experimental etc.) vêm das INFORMAÇÕES DA ESCOLA do
+  // prompt (por tenant). Aqui só a POSTURA de não inventar/não prometer além do contrato.
   nuncaDizer:
-    '\n- NUNCA DIGA (cria desconfiança ou promete o que o contrato não garante): "pode cancelar quando quiser, sem custo"; "pode repor qualquer aula"; "se faltar, a aula vira crédito"; "depois a gente vê essa parte do contrato"; "é pegar ou largar". Nunca invente desconto/condição fora da política. Se não souber a regra exata, diga que confirma com a equipe.',
+    '\n- NUNCA prometa o que o contrato/política da escola não garante e NUNCA invente desconto, valor, prazo ou condição. Evite promessas absolutas do tipo "pode cancelar quando quiser sem custo", "pode repor qualquer aula", "depois a gente vê o contrato". Se não souber a regra exata desta escola (não está nas informações do prompt), diga com naturalidade que confirma com a equipe — melhor confirmar do que arriscar um dado errado.',
   contrato:
-    '\n- REGRAS REAIS (use só se a pessoa puxar, sempre embrulhadas em benefício; nunca prometa além disto): Reposição — Normal 1/mês sem acumular; Flex junta até 3 no trimestre com mais prazo. Pausa — só no anual, até 30 dias, vaga guardada. Cancelamento/desistência — aviso de 30 dias + taxa de 15% sobre o saldo (nunca pagar tudo); a taxa cobre a reserva do seu horário e professor. Matrícula — uma vez só, cobre reserva de vaga e material, não reembolsável. Mensal é a forma de pagar o PACOTE (não vira aula avulsa). Mesmo horário/professor reservados (mas não prometa de forma absoluta — pode remanejar em caso excepcional, sempre avisando).',
+    '\n- FONTE DOS FATOS: use SOMENTE as regras, planos, valores e condições que estiverem nas INFORMAÇÕES DA ESCOLA deste prompt (elas variam por unidade). Cite-as só quando a pessoa puxar, sempre embrulhadas em benefício (sanduíche). O que não estiver escrito ali, não afirme.',
   fecharPergunta:
     '\n- IMPORTANTE: a mensagem que você escreve é UMA mensagem de WhatsApp pronta pra enviar — curta, calorosa, natural, espelhando o tom da conversa. Aplique o método por dentro (não escreva "passo 1", não explique a técnica), e SEMPRE feche com a pergunta/próximo passo.',
 };
@@ -365,7 +368,7 @@ const REGRAS_VENDAS = {
 function blocoVendas(contexto = 'lead') {
   const alvo = contexto === 'renovacao'
     ? '\n- ESTÁGIO: RENOVAÇÃO — este aluno já estuda e o contrato está no fim. Seu objetivo é RENOVAR: vender a CONTINUIDADE (manter o ritmo/evolução que ele já conquistou, o mesmo horário e professor, não perder o que construiu). Ancore no valor de continuar, trate a objeção de renovação (preço, tempo, resultado) com o método e feche convidando a confirmar a renovação a tempo, sem interrupção.'
-    : '\n- ESTÁGIO: LEAD — o objetivo PRINCIPAL é AGENDAR A AULA EXPERIMENTAL GRATUITA (o fechamento da matrícula vem depois, com a equipe). Se a pessoa já fez a experimental e está decidindo a matrícula, aí sim conduza para fechar a matrícula com o método. Use urgência REAL (colocar em prática agora um sonho já existente, pegar o ritmo, garantir o horário/professor que ela quer) — nunca escassez inventada.';
+    : '\n- ESTÁGIO: LEAD — o objetivo PRINCIPAL é levar ao próximo passo comercial da escola (normalmente AGENDAR A AULA EXPERIMENTAL, se a escola oferece — veja as informações do prompt; o fechamento da matrícula vem depois, com a equipe). Se a pessoa já fez a experimental e está decidindo a matrícula, aí sim conduza para fechar a matrícula com o método. Use urgência REAL (colocar em prática agora um sonho já existente, pegar o ritmo, garantir o horário/professor que ela quer) — nunca escassez inventada.';
   return REGRAS_VENDAS.metodo + alvo + REGRAS_VENDAS.sanduiche + REGRAS_VENDAS.fechamento +
     REGRAS_VENDAS.nuncaDizer + REGRAS_VENDAS.contrato + REGRAS_VENDAS.fecharPergunta +
     '\n- SAIBA A HORA DE RECUAR: trabalhe a objeção com firmeza gentil, mas se a pessoa reforçar o "não" de forma clara pela 2ª/3ª vez, ACOLHA, pare de argumentar e deixe a porta aberta. Insistir além disso afasta e mancha a escola.';
@@ -434,6 +437,48 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
       })),
       { role: 'user', parts: [{ text: message ?? '' }] },
     ];
+    const res = await model.generateContent({ contents });
+    return res.response.text();
+  });
+}
+
+// CONSULTORIA DA JANIS (quadro vermelho) — a Janis como CONSULTORA DE VENDAS interna: NÃO fala com o
+// cliente, orienta a RECEPCIONISTA. Lê a conversa REAL com o cliente (contexto), o histórico do chat
+// de estratégia e a nova mensagem (texto + mídia opcional: foto/vídeo/áudio via inlineData) e devolve
+// uma estratégia prática e específica, no método do treinamento, SEM inventar (REGRAS_REDACAO.fatos).
+// `media` = { base64, mimetype } opcional. `contexto` = 'lead' | 'renovacao' | '' (não-lead → tom leve).
+async function estrategiaVendas({ systemPrompt, clientHistory = [], chatHistory = [], message = '', media = null, escola, nomeIa, contexto = 'lead' } = {}) {
+  const transcript = (clientHistory || [])
+    .map((m) => `${m.role === 'ASSISTANT' ? 'Recepção/Escola' : 'Cliente'}: ${String(m.content ?? m.body ?? '').replace(/\s+/g, ' ').trim()}`)
+    .filter((x) => x.length > 20)
+    .slice(-45).join('\n');
+  const vende = contexto === 'lead' || contexto === 'renovacao';
+  const sys =
+    `Você é a ${nomeIa || 'Janis'}, CONSULTORA DE VENDAS interna da recepção${escola ? ' da ' + escola : ''}. ` +
+    'Você NÃO está falando com o cliente — você orienta a RECEPCIONISTA a conduzir e vender MELHOR ESTA conversa. ' +
+    'Fale com ela de colega pra colega ("você"), em português do Brasil, direta e prática. ' +
+    'Responda CURTO: 2 a 6 linhas ou bullets curtos — nunca um textão.\n\n' +
+    'COMO AJUDAR:\n' +
+    '- Diga em que pé está a conversa, a provável barreira/objeção e a temperatura do lead.\n' +
+    '- Dê uma ESTRATÉGIA específica DESTA conversa (nada de conselho genérico).\n' +
+    '- Quando fizer sentido, ofereça uma SUGESTÃO DE FALA pronta pra ela mandar ao cliente, entre aspas, curta e no tom caloroso da escola.' +
+    (vende ? blocoVendas(contexto) : '\n- Aqui NÃO é um lead/renovação de venda: oriente como uma boa recepcionista acolhedora resolveria (tom da Késsia), sem forçar venda.') +
+    REGRAS_REDACAO.fatos +
+    (systemPrompt ? `\n\nINFORMAÇÕES DA ESCOLA (referência de fatos — nunca extrapole):\n${systemPrompt}` : '') +
+    (transcript
+      ? `\n\nCONVERSA REAL COM O CLIENTE (contexto; trate SÓ isto como fato do que já foi dito):\n${transcript}`
+      : '\n\n(Ainda não há mensagens trocadas com o cliente nesta conversa.)');
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({ model: modelName, systemInstruction: sys, generationConfig: { temperature: 0.5 } });
+    const contents = [];
+    for (const t of (chatHistory || [])) {
+      const txt = String(t.content ?? t.body ?? '').trim();
+      if (txt) contents.push({ role: t.role === 'assistant' ? 'model' : 'user', parts: [{ text: txt }] });
+    }
+    const parts = [];
+    if (media && media.base64) parts.push({ inlineData: { data: media.base64, mimeType: String(media.mimetype || 'application/octet-stream').split(';')[0].trim() } });
+    parts.push({ text: message || (media ? '(A recepcionista te enviou uma mídia — analise e me diga a melhor estratégia.)' : 'Me ajuda com a estratégia dessa conversa?') });
+    contents.push({ role: 'user', parts });
     const res = await model.generateContent({ contents });
     return res.response.text();
   });
@@ -817,6 +862,7 @@ module.exports = {
   classifyConversa,
   transcribeAudio,
   generateReply,
+  estrategiaVendas,
   improveReply,
   assistantReply,
   sugestaoRetomada,
