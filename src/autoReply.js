@@ -18,7 +18,21 @@ const outbound = require('./outbound');
 const evolutionDefault = require('./evolution');
 const metaDefault = require('./meta');
 const horario = require('./horario');   // FONTE ÚNICA do horário de atendimento (aba "Horário de atendimento")
+const { PREFIXO_REACAO } = require('./reacao');   // marcador canônico de reação ([reação])
 const logger = require('./logger');
+
+// A Janis só responde a uma mensagem com CONTEÚDO de verdade. Reação (emoji), figurinha, mídia sem
+// legenda ou "balão" só de emoji NÃO são um turno do cliente — são um aceno (ADR-031 / reacao.js).
+// A recepção reclamou da IA "respondendo" a reações/emojis. Critério: tira o marcador de reação, os
+// placeholders de mídia ([imagem]/[figurinha]/[documento: ...]/[áudio]/[vídeo]/visualização única) e
+// vê se sobra alguma LETRA ou NÚMERO. Só emoji/pontuação → não há o que responder.
+function _semConteudoParaResponder(text) {
+  let t = String(text || '').trim();
+  if (!t) return true;
+  if (t.startsWith(PREFIXO_REACAO)) return true;
+  t = t.replace(/\[(imagem|v[íi]deo|[áa]udio|figurinha|documento[^\]]*|mensagem de visualiza[çc][ãa]o [úu]nica)\]/gi, ' ');
+  return !/[\p{L}\p{N}]/u.test(t);
+}
 
 // tenants.horario_comercial (jsonb ISO 1=seg..7=dom) → formato do businessState ({mon..sun}).
 // Fonte ÚNICA = a aba "Horário de atendimento" (o que o resto do sistema usa). businessState usa
@@ -134,10 +148,11 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
   if (process.env.AUTOREPLY_PAUSE === '1') return { skipped: 'paused' };
   const tenantId = tenant && tenant.id;
   if (!tenantId || !channel || !externalId) return { skipped: 'args' };
-  // SEM mensagem nova de TEXTO (reação/figurinha/mídia sem legenda, ou eco sem corpo): não há o que
-  // responder — sem isto, o modelo recebia message='' e "descrevia a situação" ("Não há nova mensagem
-  // do usuário"), uma meta-frase que ia ao cliente. Se não há texto novo, a Janis não responde.
-  if (!inboundText || !String(inboundText).trim()) return { skipped: 'sem_texto' };
+  // SEM conteúdo para responder: reação (emoji), figurinha, mídia sem legenda, eco sem corpo, ou
+  // "balão" só de emoji. Não há pergunta a responder — sem isto, além de a IA "responder" emojis
+  // (reclamação da recepção), o modelo recebia message='' e descrevia a situação ("Não há nova
+  // mensagem do usuário"), uma meta-frase que ia ao cliente. Reação NÃO é turno do cliente (ADR-031).
+  if (_semConteudoParaResponder(inboundText)) return { skipped: 'sem_conteudo' };
   const ident = String(externalId).replace(/\D/g, '');
 
   // NÃO responde mensagem ANTIGA (webhook atrasado / histórico importado na sincronização):
