@@ -144,6 +144,13 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   const pLimit = params.length;
   const where = extra.length ? `WHERE ${extra.join(' AND ')}` : '';
   // Corte de cima do caminho rápido (vai DENTRO do CTE conv, logo após o WHERE do tenant).
+  // No caminho rápido `conv` já são só ~50 conversas — então os CTEs de enriquecimento (que hoje
+  // agregam o TENANT INTEIRO: ult_recep varria 58k saídas, renov agregava todos os contratos) passam
+  // a olhar só as chaves dessas 50. Fora do caminho rápido ficam EXATAMENTE como estavam — o plano
+  // deles foi calibrado para as ~2.000 conversas e não se mexe.
+  const soDoCorteIdent = fastPath
+    ? "AND regexp_replace(s.external_id, '[^0-9]', '', 'g') IN (SELECT ident FROM conv WHERE ident <> '')" : '';
+  const soDoCorteRk = (expr) => (fastPath ? `AND ${expr} IN (SELECT rkey FROM conv WHERE rkey <> '')` : '');
   const cortaCedo = fastPath
     ? `         AND cv.renovacao_draft IS NOT TRUE
 ${cursor ? `         AND (cv.last_activity_at, cv.id) < ($${pTs}::timestamptz, $${pId}::uuid)\n` : ''}       ORDER BY cv.last_activity_at DESC NULLS LAST, cv.id DESC
@@ -205,6 +212,7 @@ ${cortaCedo}
        WHERE s.tenant_id = $1
          AND NOT s.is_group
          AND regexp_replace(s.external_id, '[^0-9]', '', 'g') <> ''
+         ${soDoCorteIdent}
        ORDER BY regexp_replace(s.external_id, '[^0-9]', '', 'g'), s.received_at DESC
     ),
     -- Combina: por conversa, a fonte (lead|recepcao) MAIS RECENTE carrega prévia/checks.
@@ -239,6 +247,7 @@ ${cortaCedo}
        WHERE sa.tenant_id = $1
          AND sa.fonte_ausente_em IS NULL
          AND br_phone_key(cp.value_raw) <> ''
+         ${soDoCorteRk('br_phone_key(cp.value_raw)')}
        GROUP BY 1
     ),
     -- Toque de renovação PENDENTE da Janis (migr. 092): marca a conversa cujo responsável tem um
@@ -249,6 +258,7 @@ ${cortaCedo}
              (array_agg(marco ORDER BY (marco = 'D-2') DESC))[1] AS marco
         FROM renovacao_touchpoint
        WHERE tenant_id = $1 AND status = 'pendente' AND br_phone_key(phone) <> ''
+         ${soDoCorteRk('br_phone_key(phone)')}
        GROUP BY 1
     ),
     -- CONTEXTO de renovação (ADR-049 rev.): telefone que TEM/TEVE toque de renovação nosso
@@ -257,6 +267,7 @@ ${cortaCedo}
       SELECT DISTINCT br_phone_key(phone) AS rk
         FROM renovacao_touchpoint
        WHERE tenant_id = $1 AND status IN ('pendente','enviado') AND br_phone_key(phone) <> ''
+         ${soDoCorteRk('br_phone_key(phone)')}
     ),
     -- CONTATOS INTERNOS (equipe/dono/parceiro — internal_contacts, ADR-018): NUNCA são alvo de
     -- renovação, mesmo tendo contrato próprio (ex.: dono que foi aluno). Excluídos da aba Renovações.
@@ -264,6 +275,7 @@ ${cortaCedo}
       SELECT DISTINCT br_phone_key(phone) AS rk
         FROM internal_contacts
        WHERE tenant_id = $1 AND br_phone_key(phone) <> ''
+         ${soDoCorteRk('br_phone_key(phone)')}
     ),
     -- Nome do CADASTRO (canônico): telefone → person.display_name pela MESMA chave br_phone_key.
     -- O aluno não vira lead, então sem isto a lista mostra o número. min() = 1 nome por telefone.
@@ -274,6 +286,7 @@ ${cortaCedo}
        WHERE cp.tenant_id = $1 AND cp.kind = 'phone'
          AND coalesce(p.display_name, '') <> ''
          AND br_phone_key(cp.value_raw) <> ''
+         ${soDoCorteRk('br_phone_key(cp.value_raw)')}
        GROUP BY 1
     ),
     projected AS (
