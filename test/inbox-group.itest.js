@@ -55,3 +55,20 @@ test('(3) jid que não é grupo (@s.whatsapp.net) é ignorado', async () => {
   const r = await c.query(`SELECT count(*)::int n FROM conversations WHERE external_id LIKE '%@s.whatsapp.net'`);
   assert.equal(r.rows[0].n, 0, 'não cria conversa p/ jid não-grupo');
 });
+
+// Paridade de mídia com o 1:1 (pedido do Leo, 09/09/2026): a bolha de grupo tem de guardar o
+// arquivo baixado e a transcrição do áudio, igual à conversa individual — antes o webhook saía do
+// caminho antes de baixar, e a mídia do grupo só existia como botão "Carregar mídia".
+test('(4) mensagem de grupo com mídia guarda arquivo, tipo e transcrição', async () => {
+  await engine.captureGroupInbound(T1, JID, {
+    externalMessageId: 'G3', sender: 'Val', body: '[áudio]',
+    media: { url: '/media/t1/abc.ogg', type: 'audio', filename: 'abc.ogg', transcription: 'chego às 17h' },
+  }, { data: { message: { audioMessage: {} } } });
+  const cv = await conv();
+  const m = (await msgs(cv.id)).find((x) => x.body === '[áudio]');
+  assert.ok(m, 'bolha do áudio existe');
+  assert.equal(m.media_url, '/media/t1/abc.ogg', 'arquivo baixado fica na linha');
+  assert.equal(m.media_type, 'audio');
+  assert.equal(m.media_filename, 'abc.ogg');
+  assert.equal(m.media_transcription, 'chego às 17h', 'áudio de grupo também é transcrito');
+});

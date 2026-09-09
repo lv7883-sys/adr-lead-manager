@@ -432,17 +432,76 @@ async function handleZapiWebhook(req, res) {
     log.info('webhook.no_message', { reason: 'unparseable_payload' });
     return;
   }
+  // ADR-016 — baixa a mídia da ENTRADA (grava em disco e, se áudio, transcreve) antes de persistir.
+  // Vale para 1:1 E para grupo: era função só do caminho 1:1, e o ramo de grupo (abaixo) sai antes
+  // — resultado: mídia de grupo nunca baixava e a bolha ficava só com o botão "Carregar mídia".
+  async function baixarMidiaInbound(tenantRow, m, logger_) {
+    if (!m.media) return;
+    try {
+      const cred = await withTenant(tenantRow.id, async (c) => (
+        await c.query('SELECT evolution_instance, evolution_token_enc FROM tenants WHERE id = $1', [tenantRow.id])
+      ).rows[0]);
+      const instance = cred && cred.evolution_instance;
+      const apikey = cred && decrypt(cred.evolution_token_enc);
+      if (!instance || !apikey) { logger_.warn('media.no_evolution_cred', {}); return; }
+      const saved = await media.salvarMidia({ tenantId: tenantRow.id, instance, apikey, media: m.media });
+      if (!saved) return;
+      m.media.url = saved.media_url;
+      m.media.type = saved.media_type;
+      m.media.filename = saved.media_filename;
+      if (saved.media_type === 'audio') {
+        try {
+          m.media.transcription = await gemini.transcribeAudio({ base64: saved.base64, mimetype: saved.mimetype });
+        } catch (e) { logger_.warn('media.transcribe_failed', { error: e.message }); }
+      }
+      logger_.info('media.captured', { kind: saved.media_type, transcrito: !!m.media.transcription });
+    } catch (e) { logger_.warn('media.capture_error', { error: e.message }); }
+  }
+
+  // CURA (ADR-016): garante que a mídia baixada pouse na linha persistida. Sob carga (Gemini
+  // lento) ou entrega duplicada, o insert pode gravar a mensagem ANTES/sem a mídia (dedup
+  // ON CONFLICT DO NOTHING) — deixando bolha vazia. COALESCE só preenche o que está nulo;
+  // idempotente e barato. Casa por (tenant, external_message_id).
+  async function curarMidia(tenantRow, m, logger_) {
+    if (!(m.media && (m.media.url || m.media.transcription) && m.externalMessageId)) return;
+    try {
+      await withTenant(tenantRow.id, (c) => c.query(
+        `UPDATE messages
+            SET media_url            = COALESCE(media_url, $3),
+                media_type           = COALESCE(media_type, $4),
+                media_filename       = COALESCE(media_filename, $5),
+                media_transcription  = COALESCE(media_transcription, $6)
+          WHERE tenant_id = $1 AND external_message_id = $2
+            AND (media_url IS NULL OR (media_type = 'audio' AND media_transcription IS NULL))`,
+        [tenantRow.id, m.externalMessageId, m.media.url || null, m.media.type || null,
+         m.media.filename || null, m.media.transcription || null]));
+    } catch (e) { logger_.warn('media.heal_failed', { error: e.message }); }
+  }
   // Grupo (@g.us) NUNCA vira lead. ADR-042 E14/B1: em vez de descartar, INGERE a mensagem
   // (kind='GROUP') p/ aparecer na Caixa de Entrada — SEM funil de lead, isolado do 1:1.
-  // Só inbound (mensagem de participante); fromMe (nosso envio no grupo) fica p/ o B3.
+  // A partir daqui o grupo tem a MESMA régua de mídia do 1:1 (pedido do Leo, 09/09/2026):
+  //   • ENTRADA baixa sozinha (foto/vídeo/doc/áudio) e áudio é transcrito;
+  //   • SAÍDA da recepção é capturada (staff_outbound_samples, is_group=true) — antes era
+  //     descartada aqui, então tudo que elas respondiam no grupo pelo celular sumia do Regente;
+  //     igual ao 1:1, só o áudio de saída baixa na hora e o resto fica no "Carregar mídia".
+  // O que NÃO vale para grupo: funil de lead e classificação da bola (grupo não é lead).
   if (msg.isGroup) {
     const jid = (req.body && req.body.data && req.body.data.key && req.body.data.key.remoteJid)
       || (req.body && req.body.phone) || null;
     if (!msg.fromMe && jid) {
-      engine.captureGroupInbound(tenant.id, String(jid), msg, req.body)
-        .catch((e) => log.warn('group.capture_unhandled', { error: e.message }));
+      (async () => {
+        await baixarMidiaInbound(tenant, msg, log);
+        await engine.captureGroupInbound(tenant.id, String(jid), msg, req.body);
+        await curarMidia(tenant, msg, log);
+      })().catch((e) => log.warn('group.capture_unhandled', { error: e.message }));
+    } else if (msg.fromMe) {
+      (async () => {
+        if (msg.media && msg.media.kind === 'audio') await baixarMidiaInbound(tenant, msg, log);
+        if (msg.media && msg.media.transcription) msg.body = msg.media.transcription;
+        await staffSamples.captureOutbound(tenant.id, msg, req.body);
+      })().catch((e) => log.warn('group.saida_unhandled', { error: e.message }));
     }
-    log.info('webhook.group', { captured: !msg.fromMe, from_me: msg.fromMe });
+    log.info('webhook.group', { captured: true, from_me: msg.fromMe });
     return;
   }
   if (msg.fromMe) {
@@ -493,50 +552,9 @@ async function handleZapiWebhook(req, res) {
   // ADR-016 — mídia recebida: baixa, grava em disco e (áudio) transcreve ANTES do
   // funil, pra a mensagem ser persistida já com a mídia. Best-effort, não trava.
   const processar = async () => {
-    if (msg.media) {
-      try {
-        const cred = await withTenant(tenant.id, async (c) => (
-          await c.query('SELECT evolution_instance, evolution_token_enc FROM tenants WHERE id = $1', [tenant.id])
-        ).rows[0]);
-        const instance = cred && cred.evolution_instance;
-        const apikey = cred && decrypt(cred.evolution_token_enc);
-        if (instance && apikey) {
-          const saved = await media.salvarMidia({ tenantId: tenant.id, instance, apikey, media: msg.media });
-          if (saved) {
-            msg.media.url = saved.media_url;
-            msg.media.type = saved.media_type;
-            msg.media.filename = saved.media_filename;
-            if (saved.media_type === 'audio') {
-              try {
-                msg.media.transcription = await gemini.transcribeAudio({ base64: saved.base64, mimetype: saved.mimetype });
-              } catch (e) { log.warn('media.transcribe_failed', { error: e.message }); }
-            }
-            log.info('media.captured', { kind: saved.media_type, transcrito: !!msg.media.transcription });
-          }
-        } else {
-          log.warn('media.no_evolution_cred', {});
-        }
-      } catch (e) { log.warn('media.capture_error', { error: e.message }); }
-    }
+    await baixarMidiaInbound(tenant, msg, log);
     await engine.processInbound(tenant, msg, req.body);
-    // CURA (ADR-016): garante que a mídia baixada pouse na linha persistida. Sob carga (Gemini
-    // lento) ou entrega duplicada, o insert do funil pode gravar a mensagem ANTES/sem a mídia
-    // (dedup ON CONFLICT DO NOTHING) — deixando bolha vazia. COALESCE só preenche o que está
-    // nulo; idempotente e barato. Casa por (tenant, external_message_id).
-    if (msg.media && (msg.media.url || msg.media.transcription) && msg.externalMessageId) {
-      try {
-        await withTenant(tenant.id, (c) => c.query(
-          `UPDATE messages
-              SET media_url            = COALESCE(media_url, $3),
-                  media_type           = COALESCE(media_type, $4),
-                  media_filename       = COALESCE(media_filename, $5),
-                  media_transcription  = COALESCE(media_transcription, $6)
-            WHERE tenant_id = $1 AND external_message_id = $2
-              AND (media_url IS NULL OR (media_type = 'audio' AND media_transcription IS NULL))`,
-          [tenant.id, msg.externalMessageId, msg.media.url || null, msg.media.type || null,
-           msg.media.filename || null, msg.media.transcription || null]));
-      } catch (e) { log.warn('media.heal_failed', { error: e.message }); }
-    }
+    await curarMidia(tenant, msg, log);
     // ADR-006+ — resposta automática FORA DO HORÁRIO (a "Janis"). Best-effort: roda DEPOIS de
     // persistir o inbound; nunca bloqueia/derruba a ingestão. Só 1:1 (inbound já filtrado acima).
     autoReply.maybeAutoReply(tenant, { channel: 'whatsapp', externalId: msg.externalId, inboundText: msg.body, contactName: msg.sender,
