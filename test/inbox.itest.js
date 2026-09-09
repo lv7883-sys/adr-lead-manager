@@ -22,10 +22,21 @@ before(async () => {
   c = new Client({ connectionString: process.env.DATABASE_URL });
   await c.connect();
   await c.query(`
+    -- Espelho da migr. 085 (a query usa br_phone_key sem schema; aqui vive em public). Vem ANTES das
+    -- tabelas: as colunas GERADAS da migr. 112 dependem dela.
+    CREATE OR REPLACE FUNCTION br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
+      WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
+           loc AS (SELECT CASE WHEN length(v) IN (12,13) AND left(v,2)='55' THEN substr(v,3) ELSE v END AS v FROM d)
+      SELECT CASE WHEN length(v)=11 AND substr(v,3,1)='9' THEN left(v,2)||substr(v,4) ELSE v END FROM loc
+    $fn$;
     CREATE TABLE conversations (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, conversation_kind text DEFAULT 'DIRECT', updated_at timestamptz DEFAULT now(), last_read_at timestamptz,
       renovacao_draft boolean DEFAULT false,   -- migr. 097 (Fase B)
+      -- migr. 111 (atividade materializada, mantida por gatilho) + 112 (DEFAULT p/ conversa sem mensagem)
+      last_activity_at timestamptz DEFAULT now(),
+      -- migr. 112: chave de telefone materializada (a query casa contrato/cadastro por ela)
+      br_key text GENERATED ALWAYS AS (br_phone_key(external_id)) STORED,
       UNIQUE (tenant_id, channel, external_id));   -- prod tem (engine.js/ensureConversation dependem)
     CREATE TABLE messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), conversation_id uuid, role text,
@@ -51,7 +62,8 @@ before(async () => {
       account_id uuid, person_id uuid, bond text);
     CREATE TABLE contact_point (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid,
-      person_id uuid, kind text, value_raw text);
+      person_id uuid, kind text, value_raw text,
+      br_key text GENERATED ALWAYS AS (br_phone_key(value_raw)) STORED);   -- migr. 112
     CREATE TABLE person (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, display_name text);
     -- Fila de toques da Janis (migr. 092) — a projeção do inbox marca renovacao.toque a partir daqui.
@@ -65,12 +77,33 @@ before(async () => {
     CREATE TABLE renovacao_dismiss (
       tenant_id uuid, br_key text, venc date, situacao text, por text, em timestamptz DEFAULT now(),
       PRIMARY KEY (tenant_id, br_key));
-    -- Espelho da migr. 085 (a query usa br_phone_key sem schema; aqui vive em public).
-    CREATE OR REPLACE FUNCTION br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
-      WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
-           loc AS (SELECT CASE WHEN length(v) IN (12,13) AND left(v,2)='55' THEN substr(v,3) ELSE v END AS v FROM d)
-      SELECT CASE WHEN length(v)=11 AND substr(v,3,1)='9' THEN left(v,2)||substr(v,4) ELSE v END FROM loc
-    $fn$;
+    -- Gatilhos da migr. 111: mantêm conversations.last_activity_at (entrada do cliente + saída da
+    -- recepção). O corte cedo da listagem ordena por essa coluna, então o itest tem de tê-los.
+    CREATE FUNCTION tg_conv_last_activity_msg() RETURNS trigger AS $t$
+    BEGIN
+      IF NEW.role = 'USER' AND NEW.conversation_id IS NOT NULL AND NEW.received_at IS NOT NULL THEN
+        UPDATE conversations SET last_activity_at = NEW.received_at
+         WHERE id = NEW.conversation_id
+           AND (last_activity_at IS NULL OR last_activity_at < NEW.received_at);
+      END IF;
+      RETURN NULL;
+    END; $t$ LANGUAGE plpgsql;
+    CREATE TRIGGER trg_conv_last_activity_msg AFTER INSERT ON messages
+      FOR EACH ROW EXECUTE FUNCTION tg_conv_last_activity_msg();
+    CREATE FUNCTION tg_conv_last_activity_staff() RETURNS trigger AS $t$
+    BEGIN
+      IF NEW.is_group IS NOT TRUE AND NEW.received_at IS NOT NULL
+         AND regexp_replace(COALESCE(NEW.external_id, ''), '[^0-9]', '', 'g') <> '' THEN
+        UPDATE conversations c SET last_activity_at = NEW.received_at
+         WHERE c.tenant_id = NEW.tenant_id
+           AND regexp_replace(c.external_id, '[^0-9]', '', 'g')
+               = regexp_replace(NEW.external_id, '[^0-9]', '', 'g')
+           AND (c.last_activity_at IS NULL OR c.last_activity_at < NEW.received_at);
+      END IF;
+      RETURN NULL;
+    END; $t$ LANGUAGE plpgsql;
+    CREATE TRIGGER trg_conv_last_activity_staff AFTER INSERT ON staff_outbound_samples
+      FOR EACH ROW EXECUTE FUNCTION tg_conv_last_activity_staff();
   `);
 });
 after(async () => { await c.end(); });

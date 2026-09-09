@@ -97,9 +97,10 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   const extra = [];
 
   if (fonte) { params.push(fonte); extra.push(`fonte = $${params.length}`); }
-  // Corte cedo possível quando TODO o filtro cabe em conversations (aba Todas, sem `fonte`). A busca
-  // entra aqui também: o CTE `busca` resolve o nome ANTES e devolve os ids que casam (mesma régua).
-  const cortaAgora = v === 'todas' && !fonte;
+  // Corte cedo possível quando TODO o filtro da aba cabe em conversations — hoje: todas as abas,
+  // menos o filtro por `fonte` (raro). O que a aba filtra por campo DERIVADO (nome na busca, is_lead,
+  // régua de renovação) é resolvido ANTES por um CTE de pré-filtro que devolve só os ids que casam.
+  const cortaAgora = !fonte;
   let condBusca = '';
   if (q) {
     const dig = String(q).replace(/\D/g, '');
@@ -140,11 +141,16 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   // enriquecimento das ~2.000 do tenant e só então ordenava/cortava — ~415ms, e isso rodava no load,
   // na busca e no auto-refresh. Com conversations.last_activity_at materializada (indexada, mantida
   // por trigger) dá pra CORTAR CEDO e enriquecer só as 50.
-  // Só vale quando TODO o filtro cabe em conversations: aba "Todas" sem `fonte` (o filtro é
-  // renovacao_draft) — e, na BUSCA, o CTE `busca` resolve o nome antes e devolve os ids que casam.
-  // Abas leads/nao_lead/renovacoes filtram por campo DERIVADO (is_lead, venc) que só existe depois
-  // do enriquecimento; nesses casos seguimos pelo caminho completo (correto).
+  // Cada aba entra com o SEU pré-filtro (CTE antes de `conv`, devolvendo ids): `busca` (nome),
+  // `leadsel` (is_lead) e `renovsel` (régua de renovação). O WHERE de fora continua aplicando o
+  // filtro REAL sobre o projected — o pré-filtro é atalho, não é a fonte da verdade; se um dia sair
+  // do lugar, ele só pode ser MAIS LARGO que o filtro real (mais estreito = conversa sumindo).
   const fastPath = cortaAgora;
+  // Na aba Renovações o pré-filtro precisa de renov/renovtp/interno do TENANT INTEIRO — eles vêm
+  // ANTES de `conv`, então não dá p/ escopá-los ao corte. Nesse caso são definidos lá em cima e o
+  // projected reusa os MESMOS (calculados uma vez só). Nas demais abas continuam depois, escopados.
+  const renovAntes = fastPath && v === 'renovacoes';
+  const leadselAntes = fastPath && (v === 'leads' || v === 'nao_lead');
   let pTs = null; let pId = null;
   // Keyset entra como MAIS UM predicado do WHERE (não como cláusula solta — senão vira
   // "FROM projected AND ..." quando não há filtros). No caminho rápido ele vai no corte de cima.
@@ -165,48 +171,13 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   const soDoCorteIdent = fastPath
     ? "AND regexp_replace(s.external_id, '[^0-9]', '', 'g') IN (SELECT ident FROM conv WHERE ident <> '')" : '';
   const soDoCorteRk = (expr) => (fastPath ? `AND ${expr} IN (SELECT rkey FROM conv WHERE rkey <> '')` : '');
-  // BUSCA rápida: resolve o nome (mesma régua do projected) e devolve só os ids que casam, ANTES do
-  // enriquecimento — assim o corte de cima também vale na busca. Os dois LEFT JOIN aqui são versões
-  // locais de leadk/pess (não dá p/ reusar as CTEs: elas são definidas depois de `conv`).
-  const buscaCte = condBusca ? `
-    busca AS (
-      SELECT cv.id
-        FROM conversations cv
-        LEFT JOIN (SELECT DISTINCT ON (${IDENT_LEAD}) ${IDENT_LEAD} AS ident, l.name
-                     FROM leads l WHERE l.tenant_id = $1 AND ${IDENT_LEAD} <> ''
-                    ORDER BY ${IDENT_LEAD}, l.created_at ASC) lk ON lk.ident = ${IDENT_CONV}
-        LEFT JOIN (SELECT br_phone_key(cp.value_raw) AS rk, min(p.display_name) AS display_name
-                     FROM contact_point cp JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
-                    WHERE cp.tenant_id = $1 AND cp.kind = 'phone'
-                      AND coalesce(p.display_name, '') <> '' AND br_phone_key(cp.value_raw) <> ''
-                    GROUP BY 1) pe ON pe.rk = br_phone_key(cv.external_id)
-       WHERE cv.tenant_id = $1
-         AND ${condBusca}
-    ),` : '';
-  const cortaCedo = fastPath
-    ? `         AND cv.renovacao_draft IS NOT TRUE
-${condBusca ? '         AND cv.id IN (SELECT id FROM busca)\n' : ''}${cursor ? `         AND (cv.last_activity_at, cv.id) < ($${pTs}::timestamptz, $${pId}::uuid)\n` : ''}       ORDER BY cv.last_activity_at DESC NULLS LAST, cv.id DESC
-       LIMIT $${pLimit}`
-    : '';
-
-  const sql = `
-    WITH cfg AS (
-      SELECT COALESCE(MAX(dormancy_days), 7) AS dormancy_days
-        FROM tenant_lead_config WHERE tenant_id = $1
-    ),${buscaCte}
-    conv AS (
-      SELECT cv.id AS conversation_id, cv.channel, cv.external_id, cv.last_read_at,
-             cv.updated_at, cv.conversation_kind, cv.renovacao_draft, ${IDENT_CONV} AS ident,
-             br_phone_key(cv.external_id) AS rkey   -- chave canônica p/ casar contrato (migr. 085)
-        FROM conversations cv
-       WHERE cv.tenant_id = $1
-${cortaCedo}
-    ),
-    -- Lead por telefone (dígitos): pré-agregado UMA vez, não por-conversa. O LATERAL antigo virava
-    -- Seq Scan em leads por linha (1 por conversa) porque, sob RLS, o filtro de tenant (segurança) é
-    -- avaliado ANTES do regexp_replace(phone)=ident → nenhum índice em phone é usável. Como CTE, leads
-    -- é varrido só uma vez e casado por hash. DISTINCT ON (ident) ORDER BY created_at ASC = o lead MAIS
-    -- ANTIGO por telefone (idêntico ao ORDER BY created_at ASC LIMIT 1 do LATERAL original).
+  // Lead por telefone (dígitos): pré-agregado UMA vez, não por-conversa. O LATERAL antigo virava
+  // Seq Scan em leads por linha (1 por conversa) porque, sob RLS, o filtro de tenant (segurança) é
+  // avaliado ANTES do regexp_replace(phone)=ident → nenhum índice em phone é usável. Como CTE, leads
+  // é varrido só uma vez e casado por hash. DISTINCT ON (ident) ORDER BY created_at ASC = o lead MAIS
+  // ANTIGO por telefone (idêntico ao ORDER BY created_at ASC LIMIT 1 do LATERAL original).
+  // Fica ANTES de `conv` (não depende dele) p/ os pré-filtros busca/leadsel/renovsel reusarem.
+  const leadkCte = `
     leadk AS (
       SELECT DISTINCT ON (${IDENT_LEAD})
              ${IDENT_LEAD} AS ident,
@@ -214,6 +185,124 @@ ${cortaCedo}
         FROM leads l
        WHERE l.tenant_id = $1 AND ${IDENT_LEAD} <> ''
        ORDER BY ${IDENT_LEAD}, l.created_at ASC
+    ),`;
+  // renov/renovtp/interno: MESMO texto, duas posições possíveis (ver renovAntes acima).
+  const ctesRenovacao = (escopo) => `
+    -- Renovações (ADR-049): vencimento do contrato MAIS RECENTE por telefone (dígitos), lendo o
+    -- canônico service_account via account_member→person→contact_point (mesma ponte do
+    -- contractConvert.js). MAX(fim_vigencia): se renovou (novo contrato futuro), o vencimento vai
+    -- pra frente → a conversa sai da janela sozinha (saída automática). fonte_ausente_em IS NULL =
+    -- contrato ainda presente na fonte (o cancelado/substituído é marcado ausente pela sync).
+    renov AS (
+      SELECT cp.br_key AS rk,
+             MAX(sa.fim_vigencia) AS venc
+        FROM service_account sa
+        JOIN account_member am ON am.account_id = sa.id AND am.tenant_id = $1
+        JOIN contact_point cp  ON cp.person_id = am.person_id AND cp.tenant_id = $1
+                              AND cp.kind = 'phone'
+       WHERE sa.tenant_id = $1
+         AND sa.fonte_ausente_em IS NULL
+         AND cp.br_key <> ''
+         ${escopo('cp.br_key')}
+       GROUP BY 1
+    ),
+    -- CONTEXTO de renovação (ADR-049 rev.): telefone que TEM/TEVE toque de renovação nosso
+    -- (pendente OU já enviado). Independe do vencimento — é sinal de que a renovação está EM JOGO.
+    renovtp AS (
+      SELECT DISTINCT br_phone_key(phone) AS rk
+        FROM renovacao_touchpoint
+       WHERE tenant_id = $1 AND status IN ('pendente','enviado') AND br_phone_key(phone) <> ''
+         ${escopo('br_phone_key(phone)')}
+    ),
+    -- CONTATOS INTERNOS (equipe/dono/parceiro — internal_contacts, ADR-018): NUNCA são alvo de
+    -- renovação, mesmo tendo contrato próprio (ex.: dono que foi aluno). Excluídos da aba Renovações.
+    interno AS (
+      SELECT DISTINCT br_phone_key(phone) AS rk
+        FROM internal_contacts
+       WHERE tenant_id = $1 AND br_phone_key(phone) <> ''
+         ${escopo('br_phone_key(phone)')}
+    ),`;
+  const semEscopo = () => '';
+  const renovCtesAntes = renovAntes ? ctesRenovacao(semEscopo) : '';
+  const renovCtesDepois = renovAntes ? '' : ctesRenovacao(soDoCorteRk);
+  // BUSCA rápida: resolve o nome (mesma régua do projected) e devolve só os ids que casam, ANTES do
+  // enriquecimento — assim o corte de cima também vale na busca. O `pe` aqui é uma versão local do
+  // CTE pess (esse continua depois de `conv`, escopado ao corte).
+  const buscaCte = condBusca ? `
+    busca AS (
+      SELECT cv.id
+        FROM conversations cv
+        LEFT JOIN leadk lk ON lk.ident = ${IDENT_CONV}
+        LEFT JOIN (SELECT cp.br_key AS rk, min(p.display_name) AS display_name
+                     FROM contact_point cp JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
+                    WHERE cp.tenant_id = $1 AND cp.kind = 'phone'
+                      AND coalesce(p.display_name, '') <> '' AND cp.br_key <> ''
+                    GROUP BY 1) pe ON pe.rk = cv.br_key
+       WHERE cv.tenant_id = $1
+         AND ${condBusca}
+    ),` : '';
+  // PRÉ-FILTRO das abas Leads/Outras: conversas cujo telefone casa um lead DE VERDADE — a MESMA
+  // régua do is_lead do projected (leadk = lead mais antigo do telefone; NOT_LEAD/REVIEW_QUEUE não).
+  const leadselCte = leadselAntes ? `
+    leadsel AS (
+      SELECT cv.id
+        FROM conversations cv
+        JOIN leadk lk ON lk.ident = ${IDENT_CONV} AND ${IDENT_CONV} <> ''
+       WHERE cv.tenant_id = $1
+         AND lk.status IS DISTINCT FROM 'NOT_LEAD'
+         AND lk.status IS DISTINCT FROM 'REVIEW_QUEUE'
+    ),` : '';
+  // PRÉ-FILTRO da aba Renovações: a MESMA régua do WHERE de fora (janela do vencimento OU contexto
+  // OU rascunho; nunca interno; fora o que a recepção resolveu), só que resolvida em conversations.
+  // Os 3 JOIN casam por cv.br_key, que é COLUNA GERADA (migr. 112) — quando era br_phone_key(...)
+  // por join, só a função custava ~200ms nas 2.014 conversas do tenant.
+  // ⚠ Se a régua da aba mudar lá embaixo, tem de mudar aqui também.
+  const renovselCte = renovAntes ? `
+    renovsel AS (
+      SELECT cv.id
+        FROM conversations cv
+        LEFT JOIN renov   rn ON rn.rk = cv.br_key AND cv.br_key <> ''
+        LEFT JOIN renovtp rc ON rc.rk = cv.br_key AND cv.br_key <> ''
+        LEFT JOIN interno ic ON ic.rk = cv.br_key AND cv.br_key <> ''
+        LEFT JOIN leadk   lk ON lk.ident = ${IDENT_CONV} AND ${IDENT_CONV} <> ''
+       WHERE cv.tenant_id = $1
+         AND ic.rk IS NULL
+         AND ((rn.venc IS NOT NULL AND rn.venc <= current_date + interval '15 days'
+                                  AND rn.venc >= current_date - interval '60 days')
+              OR rc.rk IS NOT NULL OR lk.aborda_renovacao IS TRUE OR cv.renovacao_draft IS TRUE)
+         AND NOT EXISTS (SELECT 1 FROM renovacao_dismiss rd
+                          WHERE rd.tenant_id = $1 AND rd.br_key = cv.br_key
+                            AND rd.venc IS NOT DISTINCT FROM rn.venc)
+    ),` : '';
+  // Condições do corte de cima: pré-filtro da aba + busca + keyset da paginação.
+  const cortePre = [];
+  if (fastPath) {
+    if (v === 'renovacoes') cortePre.push('cv.id IN (SELECT id FROM renovsel)');
+    else {
+      cortePre.push('cv.renovacao_draft IS NOT TRUE');   // rascunho só aparece na aba Renovação
+      if (v === 'leads') cortePre.push('cv.id IN (SELECT id FROM leadsel)');
+      else if (v === 'nao_lead') cortePre.push('NOT EXISTS (SELECT 1 FROM leadsel ls WHERE ls.id = cv.id)');
+    }
+    if (condBusca) cortePre.push('cv.id IN (SELECT id FROM busca)');
+    if (cursor) cortePre.push(`(cv.last_activity_at, cv.id) < ($${pTs}::timestamptz, $${pId}::uuid)`);
+  }
+  const cortaCedo = fastPath
+    ? `${cortePre.map((c) => `         AND ${c}\n`).join('')}       ORDER BY cv.last_activity_at DESC NULLS LAST, cv.id DESC
+       LIMIT $${pLimit}`
+    : '';
+
+  const sql = `
+    WITH cfg AS (
+      SELECT COALESCE(MAX(dormancy_days), 7) AS dormancy_days
+        FROM tenant_lead_config WHERE tenant_id = $1
+    ),${leadkCte}${renovCtesAntes}${leadselCte}${renovselCte}${buscaCte}
+    conv AS (
+      SELECT cv.id AS conversation_id, cv.channel, cv.external_id, cv.last_read_at,
+             cv.updated_at, cv.conversation_kind, cv.renovacao_draft, ${IDENT_CONV} AS ident,
+             cv.br_key AS rkey   -- chave canônica p/ casar contrato (migr. 085)
+        FROM conversations cv
+       WHERE cv.tenant_id = $1
+${cortaCedo}
     ),
     matched AS (
       SELECT c.*, lk.id AS lead_id, lk.name AS lead_name, lk.phone AS lead_phone,
@@ -264,24 +353,7 @@ ${cortaCedo}
           LIMIT 1
         ) a
     ),
-    -- Renovações (ADR-049): vencimento do contrato MAIS RECENTE por telefone (dígitos), lendo o
-    -- canônico service_account via account_member→person→contact_point (mesma ponte do
-    -- contractConvert.js). MAX(fim_vigencia): se renovou (novo contrato futuro), o vencimento vai
-    -- pra frente → a conversa sai da janela sozinha (saída automática). fonte_ausente_em IS NULL =
-    -- contrato ainda presente na fonte (o cancelado/substituído é marcado ausente pela sync).
-    renov AS (
-      SELECT br_phone_key(cp.value_raw) AS rk,
-             MAX(sa.fim_vigencia) AS venc
-        FROM service_account sa
-        JOIN account_member am ON am.account_id = sa.id AND am.tenant_id = $1
-        JOIN contact_point cp  ON cp.person_id = am.person_id AND cp.tenant_id = $1
-                              AND cp.kind = 'phone'
-       WHERE sa.tenant_id = $1
-         AND sa.fonte_ausente_em IS NULL
-         AND br_phone_key(cp.value_raw) <> ''
-         ${soDoCorteRk('br_phone_key(cp.value_raw)')}
-       GROUP BY 1
-    ),
+${renovCtesDepois}
     -- Toque de renovação PENDENTE da Janis (migr. 092): marca a conversa cujo responsável tem um
     -- rascunho D-10/D-2 na fila. É ADITIVO (não muda o filtro da aba) — o dashboard usa p/ badgear
     -- "toque pronto" e subir ao topo. Prefere D-2 (mais urgente) quando há os dois.
@@ -293,32 +365,16 @@ ${cortaCedo}
          ${soDoCorteRk('br_phone_key(phone)')}
        GROUP BY 1
     ),
-    -- CONTEXTO de renovação (ADR-049 rev.): telefone que TEM/TEVE toque de renovação nosso
-    -- (pendente OU já enviado). Independe do vencimento — é sinal de que a renovação está EM JOGO.
-    renovtp AS (
-      SELECT DISTINCT br_phone_key(phone) AS rk
-        FROM renovacao_touchpoint
-       WHERE tenant_id = $1 AND status IN ('pendente','enviado') AND br_phone_key(phone) <> ''
-         ${soDoCorteRk('br_phone_key(phone)')}
-    ),
-    -- CONTATOS INTERNOS (equipe/dono/parceiro — internal_contacts, ADR-018): NUNCA são alvo de
-    -- renovação, mesmo tendo contrato próprio (ex.: dono que foi aluno). Excluídos da aba Renovações.
-    interno AS (
-      SELECT DISTINCT br_phone_key(phone) AS rk
-        FROM internal_contacts
-       WHERE tenant_id = $1 AND br_phone_key(phone) <> ''
-         ${soDoCorteRk('br_phone_key(phone)')}
-    ),
     -- Nome do CADASTRO (canônico): telefone → person.display_name pela MESMA chave br_phone_key.
     -- O aluno não vira lead, então sem isto a lista mostra o número. min() = 1 nome por telefone.
     pess AS (
-      SELECT br_phone_key(cp.value_raw) AS rk, min(p.display_name) AS display_name
+      SELECT cp.br_key AS rk, min(p.display_name) AS display_name
         FROM contact_point cp
         JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
        WHERE cp.tenant_id = $1 AND cp.kind = 'phone'
          AND coalesce(p.display_name, '') <> ''
-         AND br_phone_key(cp.value_raw) <> ''
-         ${soDoCorteRk('br_phone_key(cp.value_raw)')}
+         AND cp.br_key <> ''
+         ${soDoCorteRk('cp.br_key')}
        GROUP BY 1
     ),
     projected AS (
@@ -511,7 +567,7 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
     `SELECT min(p.display_name) AS nome
        FROM contact_point cp JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
       WHERE cp.tenant_id = $1 AND cp.kind = 'phone'
-        AND coalesce(p.display_name, '') <> '' AND br_phone_key(cp.value_raw) = br_phone_key($2)`,
+        AND coalesce(p.display_name, '') <> '' AND cp.br_key = br_phone_key($2)`,
     [tenantId, cv.external_id])).rows[0]?.nome || null;
   const pushNome = (await client.query(
     `SELECT sender FROM messages WHERE conversation_id = $1 AND role = 'USER'
@@ -1516,3 +1572,5 @@ module.exports.markUnread = markUnread;
 module.exports.encodeCursor = encodeCursor;
 module.exports.decodeCursor = decodeCursor;
 module.exports.preview = preview;
+
+module.exports.__buildConversationsSql = buildConversationsSql; // bench/testes de plano (EXPLAIN sob RLS)
