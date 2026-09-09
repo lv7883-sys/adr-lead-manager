@@ -148,9 +148,50 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   // agregam o TENANT INTEIRO: ult_recep varria 58k saídas, renov agregava todos os contratos) passam
   // a olhar só as chaves dessas 50. Fora do caminho rápido ficam EXATAMENTE como estavam — o plano
   // deles foi calibrado para as ~2.000 conversas e não se mexe.
-  const soDoCorteIdent = fastPath
-    ? "AND regexp_replace(s.external_id, '[^0-9]', '', 'g') IN (SELECT ident FROM conv WHERE ident <> '')" : '';
   const soDoCorteRk = (expr) => (fastPath ? `AND ${expr} IN (SELECT rkey FROM conv WHERE rkey <> '')` : '');
+  // Última entrada/saída. No caminho rápido são ~50 chaves: LATERAL faz 50 buscas PONTUAIS pelos
+  // índices (idx_messages_conv_role_recv / idx_staff_notgroup_ident_recv) em vez de varrer as 51k
+  // mensagens e 58k saídas. Fora dele, mantém o DISTINCT ON (calibrado p/ as ~2.000 conversas).
+  const ultLeadCte = fastPath
+    ? `ult_lead AS (
+      SELECT c.conversation_id, u.received_at, u.body, u.media_type, u.edited_at, u.deleted_at
+        FROM conv c
+        CROSS JOIN LATERAL (
+          SELECT m.received_at, m.body, m.media_type, m.edited_at, m.deleted_at
+            FROM messages m
+           WHERE m.conversation_id = c.conversation_id AND m.role = 'USER'
+           ORDER BY m.received_at DESC LIMIT 1
+        ) u
+    )`
+    : `ult_lead AS (
+      SELECT DISTINCT ON (m.conversation_id)
+             m.conversation_id, m.received_at, m.body, m.media_type, m.edited_at, m.deleted_at
+        FROM conv c
+        JOIN messages m ON m.conversation_id = c.conversation_id AND m.role = 'USER'
+       ORDER BY m.conversation_id, m.received_at DESC
+    )`;
+  const ultRecepCte = fastPath
+    ? `ult_recep AS (
+      SELECT i.ident, u.received_at, u.body, u.media_type, u.edited_at, u.deleted_at
+        FROM (SELECT DISTINCT ident FROM conv WHERE ident <> '') i
+        CROSS JOIN LATERAL (
+          SELECT s.received_at, s.body, s.media_type, s.edited_at, s.deleted_at
+            FROM staff_outbound_samples s
+           WHERE s.tenant_id = $1 AND NOT s.is_group
+             AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = i.ident
+           ORDER BY s.received_at DESC LIMIT 1
+        ) u
+    )`
+    : `ult_recep AS (
+      SELECT DISTINCT ON (regexp_replace(s.external_id, '[^0-9]', '', 'g'))
+             regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident,
+             s.received_at, s.body, s.media_type, s.edited_at, s.deleted_at
+        FROM staff_outbound_samples s
+       WHERE s.tenant_id = $1
+         AND NOT s.is_group
+         AND regexp_replace(s.external_id, '[^0-9]', '', 'g') <> ''
+       ORDER BY regexp_replace(s.external_id, '[^0-9]', '', 'g'), s.received_at DESC
+    )`;
   const cortaCedo = fastPath
     ? `         AND cv.renovacao_draft IS NOT TRUE
 ${cursor ? `         AND (cv.last_activity_at, cv.id) < ($${pTs}::timestamptz, $${pId}::uuid)\n` : ''}       ORDER BY cv.last_activity_at DESC NULLS LAST, cv.id DESC
@@ -197,24 +238,8 @@ ${cortaCedo}
     -- ~630ms. Agora pega so a ULTIMA de cada fonte VIA INDICE e combina. O filtro de grupo virou
     -- a coluna is_group (migr. 103) — sem reabrir o raw. idx_messages_conv_role_recv (entradas)
     -- e idx_staff_notgroup_ident_recv (saidas) dao a ordem (conv/ident, received_at DESC) sem sort.
-    ult_lead AS (
-      SELECT DISTINCT ON (m.conversation_id)
-             m.conversation_id, m.received_at, m.body, m.media_type, m.edited_at, m.deleted_at
-        FROM conv c
-        JOIN messages m ON m.conversation_id = c.conversation_id AND m.role = 'USER'
-       ORDER BY m.conversation_id, m.received_at DESC
-    ),
-    ult_recep AS (
-      SELECT DISTINCT ON (regexp_replace(s.external_id, '[^0-9]', '', 'g'))
-             regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident,
-             s.received_at, s.body, s.media_type, s.edited_at, s.deleted_at
-        FROM staff_outbound_samples s
-       WHERE s.tenant_id = $1
-         AND NOT s.is_group
-         AND regexp_replace(s.external_id, '[^0-9]', '', 'g') <> ''
-         ${soDoCorteIdent}
-       ORDER BY regexp_replace(s.external_id, '[^0-9]', '', 'g'), s.received_at DESC
-    ),
+    ${ultLeadCte},
+    ${ultRecepCte},
     -- Combina: por conversa, a fonte (lead|recepcao) MAIS RECENTE carrega prévia/checks.
     last_act AS (
       SELECT c.conversation_id, a.received_at, a.kind, a.body,
