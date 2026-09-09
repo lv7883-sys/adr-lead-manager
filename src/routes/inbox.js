@@ -97,15 +97,28 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   const extra = [];
 
   if (fonte) { params.push(fonte); extra.push(`fonte = $${params.length}`); }
+  // Corte cedo possível quando TODO o filtro cabe em conversations (aba Todas, sem `fonte`). A busca
+  // entra aqui também: o CTE `busca` resolve o nome ANTES e devolve os ids que casam (mesma régua).
+  const cortaAgora = v === 'todas' && !fonte;
+  let condBusca = '';
   if (q) {
     const dig = String(q).replace(/\D/g, '');
     params.push(`%${q}%`); const pNome = params.length;
-    if (dig) {
-      params.push(`%${dig}%`); const pDig = params.length;   // tem dígito → nome OU telefone
-      extra.push(`(${foldAcentoSql('nome')} LIKE ${foldAcentoSql('$' + pNome)} OR (ident <> '' AND ident LIKE $${pDig}))`);
+    let pDig = null;
+    if (dig) { params.push(`%${dig}%`); pDig = params.length; }   // tem dígito → nome OU telefone
+    // sem dígito → só nome (senão '%%' casaria TUDO). Dobra de acento nos DOIS lados: "monica" acha "Mônica".
+    const cond = (alvoNome, alvoIdent) => (dig
+      ? `(${foldAcentoSql(alvoNome)} LIKE ${foldAcentoSql('$' + pNome)} OR (${alvoIdent} <> '' AND ${alvoIdent} LIKE $${pDig}))`
+      : `${foldAcentoSql(alvoNome)} LIKE ${foldAcentoSql('$' + pNome)}`);
+    if (cortaAgora) {
+      // O MESMO nome do `projected` (mesma ordem do COALESCE) — se um mudar, o outro tem de mudar.
+      condBusca = cond(`COALESCE(
+             (SELECT sm.sender FROM messages sm
+               WHERE sm.conversation_id = cv.id AND sm.role = 'USER'
+                 AND coalesce(sm.sender, '') <> '' ORDER BY sm.received_at DESC LIMIT 1),
+             pe.display_name, lk.name, cv.external_id)`, IDENT_CONV);
     } else {
-      // sem dígito → só nome (senão '%%' casaria TUDO). Dobra de acento nos DOIS lados: "monica" acha "Mônica".
-      extra.push(`${foldAcentoSql('nome')} LIKE ${foldAcentoSql('$' + pNome)}`);
+      extra.push(cond('nome', 'ident'));
     }
   }
   // Renovações (ADR-049 rev.): o que está DE FATO em jogo de renovação, não "vence algum dia".
@@ -127,10 +140,11 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   // enriquecimento das ~2.000 do tenant e só então ordenava/cortava — ~415ms, e isso rodava no load,
   // na busca e no auto-refresh. Com conversations.last_activity_at materializada (indexada, mantida
   // por trigger) dá pra CORTAR CEDO e enriquecer só as 50.
-  // Só vale quando TODO o filtro cabe em conversations: aba "Todas" (o filtro é renovacao_draft),
-  // sem busca e sem `fonte` — os demais filtram por campo DERIVADO (is_lead, venc, nome), que só
-  // existe depois do enriquecimento; nesses casos seguimos pelo caminho completo (correto).
-  const fastPath = v === 'todas' && !q && !fonte;
+  // Só vale quando TODO o filtro cabe em conversations: aba "Todas" sem `fonte` (o filtro é
+  // renovacao_draft) — e, na BUSCA, o CTE `busca` resolve o nome antes e devolve os ids que casam.
+  // Abas leads/nao_lead/renovacoes filtram por campo DERIVADO (is_lead, venc) que só existe depois
+  // do enriquecimento; nesses casos seguimos pelo caminho completo (correto).
+  const fastPath = cortaAgora;
   let pTs = null; let pId = null;
   // Keyset entra como MAIS UM predicado do WHERE (não como cláusula solta — senão vira
   // "FROM projected AND ..." quando não há filtros). No caminho rápido ele vai no corte de cima.
@@ -151,9 +165,27 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   const soDoCorteIdent = fastPath
     ? "AND regexp_replace(s.external_id, '[^0-9]', '', 'g') IN (SELECT ident FROM conv WHERE ident <> '')" : '';
   const soDoCorteRk = (expr) => (fastPath ? `AND ${expr} IN (SELECT rkey FROM conv WHERE rkey <> '')` : '');
+  // BUSCA rápida: resolve o nome (mesma régua do projected) e devolve só os ids que casam, ANTES do
+  // enriquecimento — assim o corte de cima também vale na busca. Os dois LEFT JOIN aqui são versões
+  // locais de leadk/pess (não dá p/ reusar as CTEs: elas são definidas depois de `conv`).
+  const buscaCte = condBusca ? `
+    busca AS (
+      SELECT cv.id
+        FROM conversations cv
+        LEFT JOIN (SELECT DISTINCT ON (${IDENT_LEAD}) ${IDENT_LEAD} AS ident, l.name
+                     FROM leads l WHERE l.tenant_id = $1 AND ${IDENT_LEAD} <> ''
+                    ORDER BY ${IDENT_LEAD}, l.created_at ASC) lk ON lk.ident = ${IDENT_CONV}
+        LEFT JOIN (SELECT br_phone_key(cp.value_raw) AS rk, min(p.display_name) AS display_name
+                     FROM contact_point cp JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
+                    WHERE cp.tenant_id = $1 AND cp.kind = 'phone'
+                      AND coalesce(p.display_name, '') <> '' AND br_phone_key(cp.value_raw) <> ''
+                    GROUP BY 1) pe ON pe.rk = br_phone_key(cv.external_id)
+       WHERE cv.tenant_id = $1
+         AND ${condBusca}
+    ),` : '';
   const cortaCedo = fastPath
     ? `         AND cv.renovacao_draft IS NOT TRUE
-${cursor ? `         AND (cv.last_activity_at, cv.id) < ($${pTs}::timestamptz, $${pId}::uuid)\n` : ''}       ORDER BY cv.last_activity_at DESC NULLS LAST, cv.id DESC
+${condBusca ? '         AND cv.id IN (SELECT id FROM busca)\n' : ''}${cursor ? `         AND (cv.last_activity_at, cv.id) < ($${pTs}::timestamptz, $${pId}::uuid)\n` : ''}       ORDER BY cv.last_activity_at DESC NULLS LAST, cv.id DESC
        LIMIT $${pLimit}`
     : '';
 
@@ -161,7 +193,7 @@ ${cursor ? `         AND (cv.last_activity_at, cv.id) < ($${pTs}::timestamptz, $
     WITH cfg AS (
       SELECT COALESCE(MAX(dormancy_days), 7) AS dormancy_days
         FROM tenant_lead_config WHERE tenant_id = $1
-    ),
+    ),${buscaCte}
     conv AS (
       SELECT cv.id AS conversation_id, cv.channel, cv.external_id, cv.last_read_at,
              cv.updated_at, cv.conversation_kind, cv.renovacao_draft, ${IDENT_CONV} AS ident,
