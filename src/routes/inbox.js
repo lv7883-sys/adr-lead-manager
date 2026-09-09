@@ -123,17 +123,32 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     else if (v === 'nao_lead') extra.push('is_lead = false');
   }
 
+  // CAMINHO RÁPIDO (migr. 111). Antes, para devolver 50 conversas a query calculava atividade +
+  // enriquecimento das ~2.000 do tenant e só então ordenava/cortava — ~415ms, e isso rodava no load,
+  // na busca e no auto-refresh. Com conversations.last_activity_at materializada (indexada, mantida
+  // por trigger) dá pra CORTAR CEDO e enriquecer só as 50.
+  // Só vale quando TODO o filtro cabe em conversations: aba "Todas" (o filtro é renovacao_draft),
+  // sem busca e sem `fonte` — os demais filtram por campo DERIVADO (is_lead, venc, nome), que só
+  // existe depois do enriquecimento; nesses casos seguimos pelo caminho completo (correto).
+  const fastPath = v === 'todas' && !q && !fonte;
+  let pTs = null; let pId = null;
   // Keyset entra como MAIS UM predicado do WHERE (não como cláusula solta — senão vira
-  // "FROM projected AND ..." quando não há filtros).
+  // "FROM projected AND ..." quando não há filtros). No caminho rápido ele vai no corte de cima.
   if (cursor) {
-    params.push(cursor.ts); const pTs = params.length;
-    params.push(cursor.id); const pId = params.length;
-    extra.push(`(last_activity_at, conversation_id) < ($${pTs}::timestamptz, $${pId}::uuid)`);
+    params.push(cursor.ts); pTs = params.length;
+    params.push(cursor.id); pId = params.length;
+    if (!fastPath) extra.push(`(last_activity_at, conversation_id) < ($${pTs}::timestamptz, $${pId}::uuid)`);
   }
 
   params.push(lim + 1); // +1 sonda p/ saber se há próxima página
   const pLimit = params.length;
   const where = extra.length ? `WHERE ${extra.join(' AND ')}` : '';
+  // Corte de cima do caminho rápido (vai DENTRO do CTE conv, logo após o WHERE do tenant).
+  const cortaCedo = fastPath
+    ? `         AND cv.renovacao_draft IS NOT TRUE
+${cursor ? `         AND (cv.last_activity_at, cv.id) < ($${pTs}::timestamptz, $${pId}::uuid)\n` : ''}       ORDER BY cv.last_activity_at DESC NULLS LAST, cv.id DESC
+       LIMIT $${pLimit}`
+    : '';
 
   const sql = `
     WITH cfg AS (
@@ -146,6 +161,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
              br_phone_key(cv.external_id) AS rkey   -- chave canônica p/ casar contrato (migr. 085)
         FROM conversations cv
        WHERE cv.tenant_id = $1
+${cortaCedo}
     ),
     -- Lead por telefone (dígitos): pré-agregado UMA vez, não por-conversa. O LATERAL antigo virava
     -- Seq Scan em leads por linha (1 por conversa) porque, sob RLS, o filtro de tenant (segurança) é
