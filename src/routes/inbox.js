@@ -574,7 +574,8 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
         AND coalesce(sender, '') <> '' ORDER BY received_at DESC LIMIT 1`,
     [conversationId])).rows[0]?.sender || null;
 
-  const timeline = await fetchTimeline(client, { tenantId, ident: cv.ident, leadId: lead ? lead.id : null });
+  const timeline = await fetchTimeline(client, { tenantId, ident: cv.ident, leadId: lead ? lead.id : null,
+    ehGrupo: cv.conversation_kind === 'GROUP' });
 
   // ADR-042 — marca as bolhas FAVORITADAS (estrela) DO USUÁRIO (favorited_by). Cada recepcionista
   // vê só as suas. Sem usuario => nenhuma (favorited_by nunca é null nas linhas gravadas).
@@ -637,7 +638,9 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
 // cria quando não há. external_id no formato do webhook (dígitos com DDI 55). Retorna { conversation_id, created }.
 async function ensureConversation(client, tenantId, phoneRaw) {
   const dig = String(phoneRaw || '').replace(/\D/g, '');
-  if (dig.length < 8) return null;
+  // Teto do E.164 = 15 dígitos. Acima disso não é telefone — é id de GRUPO (18 dígitos), e abrir uma
+  // conversa direta com ele cria a "fantasma" que espelha o grupo como se fosse privado (migr. 113).
+  if (dig.length < 8 || dig.length > 15) return null;
   const existing = (await client.query(
     `SELECT id FROM conversations
       WHERE tenant_id = $1 AND channel = 'whatsapp' AND br_phone_key(external_id) = br_phone_key($2)
@@ -675,7 +678,7 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
   const msgCitada = deps.msgCitada || outbound.msgCitada;
 
   const cv = await withTenant(tenantId, (c) =>
-    c.query('SELECT channel, external_id FROM conversations WHERE id = $1 AND tenant_id = $2',
+    c.query('SELECT channel, external_id, conversation_kind FROM conversations WHERE id = $1 AND tenant_id = $2',
       [conversationId, tenantId]).then((r) => r.rows[0] || null));
   if (!cv) return { notFound: true };
 
@@ -694,7 +697,8 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
       return { reason: 'meta_falhou', detail: e.message };
     }
     const messageId = (r && (r.message_id || r.mid)) || null;
-    await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: text, replyToMessageId: null });
+    await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: text,
+      replyToMessageId: null, isGroup: cv.conversation_kind === 'GROUP' });
     return { ok: true, message_id: messageId, channel: cv.channel };
   }
 
@@ -717,7 +721,8 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
       return { reason: 'meta_falhou', detail: e.message };
     }
     const messageId = (r && r.id) || null;
-    await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: text, replyToMessageId: null });
+    await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: text,
+      replyToMessageId: null, isGroup: cv.conversation_kind === 'GROUP' });
     return { ok: true, message_id: messageId, channel: cv.channel };
   }
 
@@ -737,7 +742,7 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
   const messageId = evolution.pickMessageId(r);
   await registrarSaida(tenantId, {
     phone, externalMessageId: messageId, sender, body: text,
-    replyToMessageId: citada ? citada.id : null,
+    replyToMessageId: citada ? citada.id : null, isGroup: cv.conversation_kind === 'GROUP',
   });
   // 1ª mensagem enviada → a conversa deixa de ser rascunho e passa a aparecer na Caixa normal (migr. 097).
   await withTenant(tenantId, (c) => c.query(
@@ -1168,7 +1173,7 @@ async function sendInboxMedia(tenantId, conversationId, file, caption, sender, d
   const saveBuffer = deps.saveBuffer || mediaLib.salvarBuffer;
 
   const cv = await withTenant(tenantId, (c) =>
-    c.query('SELECT channel, external_id FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, tenantId]).then((r) => r.rows[0] || null));
+    c.query('SELECT channel, external_id, conversation_kind FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, tenantId]).then((r) => r.rows[0] || null));
   if (!cv) return { notFound: true };
   if (cv.channel !== 'whatsapp') return { unsupported: cv.channel };
   const creds = await credsForTenant(tenantId);
@@ -1185,7 +1190,7 @@ async function sendInboxMedia(tenantId, conversationId, file, caption, sender, d
   const messageId = evolution.pickMessageId(r);
   const ph = caption || (saved.media_type === 'document' ? `[documento: ${filename}]` : (_PLACEHOLDER_MIDIA[saved.media_type] || '[mídia]'));
   await registrarSaida(tenantId, {
-    phone: cv.external_id, externalMessageId: messageId, sender, body: ph,
+    phone: cv.external_id, externalMessageId: messageId, sender, body: ph, isGroup: cv.conversation_kind === 'GROUP',
     media: { url: saved.media_url, type: saved.media_type, filename: saved.media_type === 'document' ? filename : null },
   });
   return { ok: true, message_id: messageId, media_url: saved.media_url, media_type: saved.media_type };
@@ -1218,7 +1223,7 @@ async function sendInboxAudio(tenantId, conversationId, file, sender, deps = {})
   const saveBuffer = deps.saveBuffer || mediaLib.salvarBuffer;
 
   const cv = await withTenant(tenantId, (c) =>
-    c.query('SELECT channel, external_id FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, tenantId]).then((r) => r.rows[0] || null));
+    c.query('SELECT channel, external_id, conversation_kind FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, tenantId]).then((r) => r.rows[0] || null));
   if (!cv) return { notFound: true };
   if (cv.channel !== 'whatsapp') return { unsupported: cv.channel };
   const creds = await credsForTenant(tenantId);
@@ -1238,7 +1243,7 @@ async function sendInboxAudio(tenantId, conversationId, file, sender, deps = {})
   }
   const messageId = evolution.pickMessageId(r);
   await registrarSaida(tenantId, {
-    phone: cv.external_id, externalMessageId: messageId, sender, body: '[áudio]',
+    phone: cv.external_id, externalMessageId: messageId, sender, body: '[áudio]', isGroup: cv.conversation_kind === 'GROUP',
     media: { url: saved.media_url, type: 'audio', filename: null },
   });
   return { ok: true, message_id: messageId, media_url: saved.media_url, media_type: 'audio' };

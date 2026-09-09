@@ -19,6 +19,11 @@ before(async () => {
   c = new Client({ connectionString: process.env.DATABASE_URL });
   await c.connect();
   await c.query(`
+    CREATE OR REPLACE FUNCTION br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
+      WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
+           loc AS (SELECT CASE WHEN length(v) IN (12,13) AND left(v,2)='55' THEN substr(v,3) ELSE v END AS v FROM d)
+      SELECT CASE WHEN length(v)=11 AND substr(v,3,1)='9' THEN left(v,2)||substr(v,4) ELSE v END FROM loc
+    $fn$;
     CREATE TABLE conversations (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, conversation_kind text DEFAULT 'DIRECT', updated_at timestamptz DEFAULT now(), last_read_at timestamptz);
@@ -31,7 +36,8 @@ before(async () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, external_id text, sender text,
       body text, media_url text, media_type text, media_filename text,
       edited_at timestamptz, deleted_at timestamptz, received_at timestamptz DEFAULT now(),
-      external_message_id text, reply_to_message_id uuid, ack_status text, raw jsonb);
+      external_message_id text, reply_to_message_id uuid, ack_status text, raw jsonb,
+      is_group boolean NOT NULL DEFAULT false);   -- migr. 103
     CREATE TABLE pending_approvals (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid,
       suggested_response text, status text, reply_to_message_id uuid, created_at timestamptz DEFAULT now());
@@ -42,13 +48,9 @@ before(async () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
       message_kind text, message_id uuid, favorited_by text, favorited_at timestamptz DEFAULT now());
     -- "nome empilhado" (getConversationThread): cadastro canônico via contact_point/person + br_phone_key (migr. 085).
-    CREATE TABLE contact_point (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, person_id uuid, kind text, value_raw text);
+    CREATE TABLE contact_point (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, person_id uuid, kind text, value_raw text,
+      br_key text GENERATED ALWAYS AS (br_phone_key(value_raw)) STORED);   -- migr. 112
     CREATE TABLE person (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, display_name text);
-    CREATE OR REPLACE FUNCTION br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
-      WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
-           loc AS (SELECT CASE WHEN length(v) IN (12,13) AND left(v,2)='55' THEN substr(v,3) ELSE v END AS v FROM d)
-      SELECT CASE WHEN length(v)=11 AND substr(v,3,1)='9' THEN left(v,2)||substr(v,4) ELSE v END FROM loc
-    $fn$;
   `);
 });
 after(async () => { await c.end(); });
@@ -140,4 +142,31 @@ test('(4) 404: conversa inexistente ou de outro tenant', async () => {
   const cv = await conv(T2, H(4)); await msg(cv, { body: 'x' });
   assert.equal(await thread(T1, '00000000-0000-0000-0000-0000000000ff'), null, 'inexistente');
   assert.equal(await thread(T1, cv), null, 'conversa de T2 nao acessivel por T1');
+});
+
+// Regressão da queixa da recepção (09/09/2026): "eu respondo no grupo e ele mostra como se eu
+// tivesse mandado para a pessoa no privado". O casamento da timeline é por DÍGITOS, e o id de um
+// grupo vira dígitos igual a um telefone — havia 11 conversas DIRETAS com id de grupo (migr. 113),
+// e cada uma espelhava a conversa do grupo inteira. Grupo e conversa direta agora não se cruzam.
+test('(6) grupo e conversa direta com os MESMOS digitos nao se misturam', async () => {
+  const idGrupo = '120363224711320694';   // id de grupo: 18 digitos (acima do teto do E.164)
+  const grupo = (await c.query(
+    `INSERT INTO conversations (tenant_id, channel, external_id, conversation_kind)
+     VALUES ($1,'whatsapp',$2,'GROUP') RETURNING id`, [T1, `${idGrupo}@g.us`])).rows[0].id;
+  const direta = await conv(T1, idGrupo);   // a "fantasma" que a migr. 113 removeu
+
+  await msg(grupo, { body: 'papo do grupo', dias: 1, extMsgId: 'G1', sender: 'Daniele' });
+  await msg(direta, { body: 'papo privado', dias: 1, extMsgId: 'P1' });
+  await c.query(
+    `INSERT INTO staff_outbound_samples (tenant_id, external_id, body, external_message_id, is_group)
+     VALUES ($1,$2,'resposta no grupo','SG1',true), ($1,$2,'resposta no privado','SP1',false)`,
+    [T1, idGrupo]);
+
+  const noGrupo = (await thread(T1, grupo)).timeline.map((t) => t.body);
+  const noPrivado = (await thread(T1, direta)).timeline.map((t) => t.body);
+
+  assert.deepEqual(noGrupo.sort(), ['papo do grupo', 'resposta no grupo'].sort(),
+    'thread do grupo nao puxa o que e da conversa direta');
+  assert.deepEqual(noPrivado.sort(), ['papo privado', 'resposta no privado'].sort(),
+    'thread direta nao puxa o que e do grupo');
 });

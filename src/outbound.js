@@ -10,16 +10,24 @@ const { isUuid } = require('./validation');
 
 // Registra a saída REAL (fromMe) em staff_outbound_samples (source='api'). O eco do webhook
 // deduplica por (tenant_id, external_message_id). channel fixo 'whatsapp' (Fase 1).
-async function registrarSaida(tenantId, { phone, externalMessageId, sender, body, media, replyToMessageId }) {
+//
+// is_group (migr. 103): AQUI é obrigatório marcar. O eco do webhook deduz do remoteJid do `raw`, mas
+// esta linha nasce sem raw (source='api') e sempre chega ANTES do eco — que então cai no ON CONFLICT
+// e não corrige nada. Sem a marca, uma resposta mandada no GRUPO pelo Regente ficava indistinguível
+// de uma conversa privada: aparecia na thread de quem tivesse os mesmos dígitos e ressuscitava a
+// conversa na Caixa de Entrada (era a "mensagem duplicada" que a recepção via). O chamador manda
+// `isGroup` (sabe o tipo da conversa); o sufixo @g.us do destino serve de rede.
+async function registrarSaida(tenantId, { phone, externalMessageId, sender, body, media, replyToMessageId, isGroup }) {
+  const ehGrupo = isGroup === true || /@g\.us$/i.test(String(phone || ''));
   await withTenant(tenantId, (c) => c.query(
     `INSERT INTO staff_outbound_samples
        (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
-        media_url, media_type, media_filename, reply_to_message_id)
-     VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, NULL, $6, $7, $8, $9)
+        media_url, media_type, media_filename, reply_to_message_id, is_group)
+     VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, NULL, $6, $7, $8, $9, $10)
      ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
     [tenantId, phone, externalMessageId || null, sender || 'Recepção', body || null,
      (media && media.url) || null, (media && media.type) || null, (media && media.filename) || null,
-     replyToMessageId || null]
+     replyToMessageId || null, ehGrupo]
   ));
 }
 

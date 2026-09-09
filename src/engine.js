@@ -385,7 +385,11 @@ async function loadRealHistory(tenantId, { conversationId, ident, leadId }) {
 async function upsertConversation(c, tenantId, channel, externalId) {
   const raw = String(externalId == null ? '' : externalId);
   const dig = raw.replace(/\D/g, '');
-  const telefonico = channel === 'whatsapp' && !/@g\.us$/i.test(raw) && dig.length >= 10;
+  // dig.length <= 15 = teto do E.164. Um id de GRUPO tem 18 dígitos; chegando aqui SEM o sufixo
+  // @g.us (import de histórico, digitação), ele passava por "telefônico" e virava uma conversa
+  // DIRETA com o id do grupo — a conversa fantasma que mostrava o grupo como se fosse privado
+  // (migr. 113). Nunca é telefone: cai no ramo de baixo, que casa exato e não inventa contato.
+  const telefonico = channel === 'whatsapp' && !/@g\.us$/i.test(raw) && dig.length >= 10 && dig.length <= 15;
   if (telefonico) {
     const existing = (await c.query(
       `SELECT id FROM conversations

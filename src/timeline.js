@@ -7,7 +7,8 @@
 // Casamento por dígitos do external_id (não há FK conversa↔lead). Extraída de tenant.js
 // (/leads/:id) p/ ser reusada pelo inbox conversation-centric (ADR-042 / E12-05) SEM duplicar.
 //
-// Parâmetros da query: $1 = tenantId · $2 = ident (dígitos) · $3 = leadId (uuid | null).
+// Parâmetros da query: $1 = tenantId · $2 = ident (dígitos) · $3 = leadId (uuid | null)
+//                    · $4 = a thread pedida é de GRUPO (separa grupo de conversa direta).
 // leadId só é usado no ramo 'ia' (pending_approvals) e no dedup do 'recepcao'. Passando NULL
 // (conversa de NÃO-LEAD), esses ramos ficam vazios e a timeline traz só lead + recepção.
 
@@ -24,6 +25,7 @@ const TIMELINE_SQL = `WITH reac AS (
                      JOIN conversations cv ON cv.id = m.conversation_id
                     WHERE cv.tenant_id = $1
                       AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                      AND (cv.conversation_kind = 'GROUP') = $4
                       AND m.role = 'USER'
                       AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') <> ''
                  ),
@@ -33,11 +35,13 @@ const TIMELINE_SQL = `WITH reac AS (
                    SELECT s.external_message_id AS k
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1 AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
+                      AND (s.is_group IS TRUE) = $4
                       AND s.external_message_id IS NOT NULL
                    UNION
                    SELECT m.external_message_id
                      FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
                     WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                      AND (cv.conversation_kind = 'GROUP') = $4
                       AND m.role = 'USER' AND m.external_message_id IS NOT NULL
                       AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') = ''
                  )
@@ -61,15 +65,16 @@ const TIMELINE_SQL = `WITH reac AS (
                      JOIN conversations cv ON cv.id = m.conversation_id
                     WHERE cv.tenant_id = $1
                       AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                      AND (cv.conversation_kind = 'GROUP') = $4
                       AND m.role = 'USER'
                       -- ADR-031 item 3: some da lista a reacao QUE GRUDOU num alvo visivel; a
                       -- que nao casou (sem alvo capturado) permanece como bolha "[reacao] X".
                       AND NOT ( coalesce(m.raw#>>'{data,message,reactionMessage,text}','') <> ''
                                 AND m.raw#>>'{data,message,reactionMessage,key,id}' IN (SELECT k FROM bubkeys) )
                    UNION ALL
-                   -- Respostas REAIS da recepcao (fromMe). Exclui GRUPOS (@g.us — nunca
-                   -- sao conversa com o lead) e os textos que a IA ja enviou (mostrados
-                   -- abaixo como 'ia', pra nao duplicar).
+                   -- Respostas REAIS da recepcao (fromMe), da MESMA natureza da thread (grupo x
+                   -- direta) e sem os textos que a IA ja enviou (mostrados abaixo como 'ia',
+                   -- pra nao duplicar).
                    SELECT s.id, s.reply_to_message_id AS reply_to_id, s.received_at, 'recepcao' AS kind, s.sender, s.body,
                           s.media_url, s.media_type, s.media_filename, NULL AS media_transcription,
                           (SELECT array_agg(r.emoji ORDER BY r.received_at) FROM reac r
@@ -82,7 +87,11 @@ const TIMELINE_SQL = `WITH reac AS (
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
                       AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
-                      AND coalesce(s.raw->'data'->'key'->>'remoteJid', '') NOT LIKE '%@g.us'
+                      -- Saída de GRUPO só na thread do grupo, e vice-versa (migr. 113): antes o
+                      -- filtro lia o remoteJid do raw, que é NULO nas saídas pelo próprio Regente
+                      -- (source='api') — então uma resposta mandada no grupo aparecia como se fosse
+                      -- privada. A coluna is_group (migr. 103) vale para as duas origens.
+                      AND (s.is_group IS TRUE) = $4
                       AND s.body NOT IN (
                         SELECT pa.suggested_response FROM pending_approvals pa
                          WHERE pa.tenant_id = $1 AND pa.lead_id = $3
@@ -162,9 +171,12 @@ function mapTimelineRow(r) {
 
 // Roda a timeline dentro de um client já no contexto (RLS no handler; postgres no itest).
 // ident = dígitos do telefone/psid. leadId opcional (null p/ conversa de não-lead).
-async function fetchTimeline(c, { tenantId, ident, leadId = null }) {
+// ehGrupo = a thread pedida é de GRUPO. O casamento aqui é por DÍGITOS (não há FK conversa↔lead), e
+// o id de um grupo vira dígitos igual a um telefone — sem separar os dois, uma conversa direta com
+// os mesmos dígitos mostra a conversa do grupo inteira (era o que a recepção via como "duplicado").
+async function fetchTimeline(c, { tenantId, ident, leadId = null, ehGrupo = false }) {
   if (!ident) return [];
-  const rows = (await c.query(TIMELINE_SQL, [tenantId, ident, leadId])).rows;
+  const rows = (await c.query(TIMELINE_SQL, [tenantId, ident, leadId, ehGrupo === true])).rows;
   return rows.map(mapTimelineRow);
 }
 

@@ -18,11 +18,13 @@ before(async () => {
   await c.connect();
   await c.query(`
     CREATE TABLE conversations (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text, external_id text);
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text, external_id text,
+      conversation_kind text DEFAULT 'DIRECT');   -- a saída marca is_group a partir daqui
     CREATE TABLE staff_outbound_samples (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text, external_id text,
       external_message_id text, source text, sender text, body text, raw jsonb,
-      media_url text, media_type text, media_filename text, reply_to_message_id uuid);
+      media_url text, media_type text, media_filename text, reply_to_message_id uuid,
+      is_group boolean NOT NULL DEFAULT false);   -- migr. 103
     CREATE UNIQUE INDEX so_uq ON staff_outbound_samples (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL;
     CREATE TABLE messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
