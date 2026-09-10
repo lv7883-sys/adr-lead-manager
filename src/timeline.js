@@ -17,26 +17,47 @@
 const _NOS_MIDIA_SQL = "ARRAY['imageMessage','videoMessage','audioMessage','documentMessage','stickerMessage','documentWithCaptionMessage']";
 
 const TIMELINE_SQL = `WITH reac AS (
-                   -- ADR-031 item 3: reações em escopo, com emoji e id da mensagem-alvo.
-                   SELECT m.raw#>>'{data,message,reactionMessage,text}'   AS emoji,
-                          m.raw#>>'{data,message,reactionMessage,key,id}'  AS target_key,
-                          m.received_at
-                     FROM messages m
-                     JOIN conversations cv ON cv.id = m.conversation_id
-                    WHERE cv.tenant_id = $1
-                      AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
-                      AND (cv.conversation_kind = 'GROUP') = $4
-                      AND m.role = 'USER'
-                      AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') <> ''
+                   -- ADR-031 item 3 (rev. 10/09/2026): reações em escopo, p/ GRUDAREM na bolha-alvo.
+                   -- Os DOIS lados: a do cliente (entrada) e a que a recepção mandou (saída) — esta
+                   -- vinha como uma bolha de texto solta "[reação] 👍" no meio da conversa.
+                   -- DISTINCT ON (alvo, autor): trocar a reação SUBSTITUI a anterior, como no
+                   -- WhatsApp — senão a bolha junta 😂 e ❤️ de quem só mudou de ideia.
+                   -- autor = participante (em grupo) ou o próprio cliente (1:1).
+                   SELECT DISTINCT ON (target_key, autor) target_key, emoji, autor, received_at
+                     FROM (
+                       SELECT m.raw#>>'{data,message,reactionMessage,key,id}'  AS target_key,
+                              m.raw#>>'{data,message,reactionMessage,text}'    AS emoji,
+                              COALESCE(m.raw#>>'{data,key,participant}', 'cliente') AS autor,
+                              m.received_at
+                         FROM messages m
+                         JOIN conversations cv ON cv.id = m.conversation_id
+                        WHERE cv.tenant_id = $1
+                          AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                          AND (cv.conversation_kind = 'GROUP') = $4
+                          AND m.role = 'USER'
+                          AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') <> ''
+                       UNION ALL
+                       SELECT s.raw#>>'{data,message,reactionMessage,key,id}',
+                              s.raw#>>'{data,message,reactionMessage,text}',
+                              'recepcao', s.received_at
+                         FROM staff_outbound_samples s
+                        WHERE s.tenant_id = $1
+                          AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
+                          AND (s.is_group IS TRUE) = $4
+                          AND coalesce(s.raw#>>'{data,message,reactionMessage,text}','') <> ''
+                     ) r
+                    WHERE r.target_key IS NOT NULL
+                    ORDER BY target_key, autor, received_at DESC
                  ),
                  bubkeys AS (
                    -- external_message_ids das bolhas que podem RECEBER reação
-                   -- (recepcao + mensagem do lead que NAO e reacao).
+                   -- (recepcao + mensagem do lead que NAO e reacao — reação não recebe reação).
                    SELECT s.external_message_id AS k
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1 AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
                       AND (s.is_group IS TRUE) = $4
                       AND s.external_message_id IS NOT NULL
+                      AND coalesce(s.raw#>>'{data,message,reactionMessage,text}','') = ''
                    UNION
                    SELECT m.external_message_id
                      FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
@@ -69,8 +90,10 @@ const TIMELINE_SQL = `WITH reac AS (
                       AND m.role = 'USER'
                       -- ADR-031 item 3: some da lista a reacao QUE GRUDOU num alvo visivel; a
                       -- que nao casou (sem alvo capturado) permanece como bolha "[reacao] X".
+                      -- coalesce: sem alvo, o IN devolve NULL e o NOT sumiria com a BOLHA INTEIRA.
                       AND NOT ( coalesce(m.raw#>>'{data,message,reactionMessage,text}','') <> ''
-                                AND m.raw#>>'{data,message,reactionMessage,key,id}' IN (SELECT k FROM bubkeys) )
+                                AND coalesce(m.raw#>>'{data,message,reactionMessage,key,id}'
+                                             IN (SELECT k FROM bubkeys), false) )
                    UNION ALL
                    -- Respostas REAIS da recepcao (fromMe), da MESMA natureza da thread (grupo x
                    -- direta) e sem os textos que a IA ja enviou (mostrados abaixo como 'ia',
@@ -92,6 +115,12 @@ const TIMELINE_SQL = `WITH reac AS (
                       -- (source='api') — então uma resposta mandada no grupo aparecia como se fosse
                       -- privada. A coluna is_group (migr. 103) vale para as duas origens.
                       AND (s.is_group IS TRUE) = $4
+                      -- Mesma régua do lado do cliente: a NOSSA reação que grudou num alvo visível
+                      -- sai da lista (vira o emoji na bolha) em vez de virar uma bolha "[reação] 👍"
+                      -- solta no meio da conversa.
+                      AND NOT ( coalesce(s.raw#>>'{data,message,reactionMessage,text}','') <> ''
+                                AND coalesce(s.raw#>>'{data,message,reactionMessage,key,id}'
+                                             IN (SELECT k FROM bubkeys), false) )
                       AND s.body NOT IN (
                         SELECT pa.suggested_response FROM pending_approvals pa
                          WHERE pa.tenant_id = $1 AND pa.lead_id = $3

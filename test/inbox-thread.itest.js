@@ -170,3 +170,33 @@ test('(6) grupo e conversa direta com os MESMOS digitos nao se misturam', async 
   assert.deepEqual(noPrivado.sort(), ['papo privado', 'resposta no privado'].sort(),
     'thread direta nao puxa o que e do grupo');
 });
+
+// Queixa da recepção (10/09/2026): "não vemos as reações dos clientes". O servidor já grudava a
+// reação na bolha-alvo (e por isso a bolha "[reação] ❤️" some da lista) — quem não desenhava era a
+// tela. Aqui trava o contrato dos dois lados + a troca de reação.
+test('(7) reação gruda na bolha-alvo (cliente e recepção) e a última substitui a anterior', async () => {
+  const cv = await conv(T1, H(7));
+  const reac = (emoji, alvo) => ({ data: { message: { reactionMessage: { text: emoji, key: { id: alvo } } } } });
+  await msg(cv, { body: 'oi, tudo bem?', dias: 3, extMsgId: 'M70' });        // bolha do cliente
+  await outbound(T1, Dg(7), { body: 'ola!', dias: 3, extMsgId: 'S70' });     // bolha nossa
+  await msg(cv, { body: '[reação] 👍', dias: 2, extMsgId: 'M71', raw: reac('👍', 'S70') });
+  await msg(cv, { body: '[reação] ❤️', dias: 1, extMsgId: 'M72', raw: reac('❤️', 'S70') });  // trocou
+  await outbound(T1, Dg(7), { body: '[reação] 🙏', dias: 0, extMsgId: 'S71', raw: reac('🙏', 'M70') });
+
+  const out = await thread(T1, cv);
+  const bodies = out.timeline.map((t) => String(t.body || ''));
+  assert.ok(!bodies.some((b) => b.startsWith('[reação]')), 'reação que grudou não vira bolha solta');
+  assert.deepEqual(out.timeline.find((t) => t.body === 'ola!').reactions, ['❤️'],
+    'reação do cliente na nossa bolha, só a última (trocar substitui)');
+  assert.deepEqual(out.timeline.find((t) => t.body === 'oi, tudo bem?').reactions, ['🙏'],
+    'reação da recepção gruda na bolha do cliente');
+});
+
+test('(8) reação SEM alvo conhecido continua visível como bolha (não some da conversa)', async () => {
+  const cv = await conv(T1, H(8));
+  await msg(cv, { body: 'bom dia', dias: 1, extMsgId: 'M80' });
+  await msg(cv, { body: '[reação] 🥴', dias: 0, extMsgId: 'M81',
+    raw: { data: { message: { reactionMessage: { text: '🥴', key: { id: 'ALVO-QUE-NAO-TEMOS' } } } } } });
+  const bodies = (await thread(T1, cv)).timeline.map((t) => t.body);
+  assert.ok(bodies.includes('[reação] 🥴'), 'sem alvo capturado, a reação permanece como bolha');
+});
