@@ -61,10 +61,15 @@ async function pendentes(tenantId, tabela) {
   ).rows.map((r) => ({ ...r, tabela })));
 }
 
-async function gravarUrl(tenantId, tabela, id, url, filename) {
+// media_type JUNTO (não só a url): é ele que decide a bolha — sem tipo, a foto recuperada não
+// renderiza como imagem, vira um "📎 abrir mídia" genérico. O endpoint /midia-baixar (botão da
+// bolha) já gravava os três; aqui faltava.
+async function gravarUrl(tenantId, tabela, id, url, filename, tipo) {
   return withTenant(tenantId, (c) => c.query(
-    `UPDATE lead_manager.${tabela} SET media_url = $1, media_filename = COALESCE(media_filename, $2)
-      WHERE id = $3 AND media_url IS NULL`, [url, filename || null, id]));
+    `UPDATE lead_manager.${tabela}
+        SET media_url = $1, media_filename = COALESCE(media_filename, $2),
+            media_type = COALESCE(media_type, $3)
+      WHERE id = $4 AND media_url IS NULL`, [url, filename || null, tipo || null, id]));
 }
 
 async function healTabela(tenantId, tabela, cred) {
@@ -78,7 +83,7 @@ async function healTabela(tenantId, tabela, cred) {
     try {
       const saved = await media.salvarMidia({ tenantId, instance: cred.instance, apikey: cred.apikey, media: md });
       if (!saved) { fail++; }
-      else { await gravarUrl(tenantId, tabela, r.id, saved.media_url, saved.media_filename); ok++; }
+      else { await gravarUrl(tenantId, tabela, r.id, saved.media_url, saved.media_filename, saved.media_type); ok++; }
     } catch (e) { fail++; if (fail <= 3) console.log(`  [ERRO] ${tabela}/${r.id} — ${e.message}`); }
     await sleep(THROTTLE);
   }
