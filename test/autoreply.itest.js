@@ -253,3 +253,36 @@ test('(17) multi-tenant: unidade que DESLIGOU a trava de agenda volta à respost
     await c.query('UPDATE automacao_config SET agendamento_sempre_manual = true WHERE tenant_id = $1', [T1]);
   }
 });
+
+// ---- VOZ DA RECEPÇÃO (11/09/2026) --------------------------------------------------------------------
+// A Janis respondia como se fosse a recepcionista ("o contrato que enviei", respondendo a "Bom dia,
+// Kessia"): no histórico, toda saída da recepção entrava como fala DELA. Agora vai legendado — e o
+// que ela escrever como recepcionista não sai.
+test('(18) a IA recebe o histórico com LEGENDA — mensagem da recepção não é fala dela', async () => {
+  await conv(); await setModo('auto');
+  const deps = mkDeps(NOITE);
+  deps.loadRealHistory = async () => [
+    { role: 'USER', content: 'Bom dia, Kessia!', at: new Date() },
+    { role: 'ASSISTANT', content: '*Késsia*\nOi Regina! Te enviei o contrato por e-mail.', at: new Date() },
+    { role: 'ASSISTANT', content: '*Janis Joplin*\nOi! A equipe retorna amanhã às 9h.', at: new Date() },
+  ];
+  let args = null;
+  deps.generate = async (a) => { args = a; deps.spy.systemPrompt = a.systemPrompt; return 'Oi, Regina! A equipe retorna amanhã às 9h.'; };
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'Tudo bem?' }, deps);
+  assert.equal(out.ok, true);
+  assert.equal(args.persona, 'assistente', 'fala como a assistente virtual, não como a recepcionista');
+  assert.match(args.transcript, /\[RECEPÇÃO\] Oi Regina! Te enviei o contrato por e-mail\./);
+  assert.match(args.transcript, /\[VOCÊ\] Oi! A equipe retorna amanhã às 9h\./, 'só o que ela mesma mandou é "você"');
+  assert.doesNotMatch(args.transcript, /Késsia/, 'a assinatura de quem atende sai da transcrição');
+  assert.match(args.systemPrompt, /ASSISTENTE VIRTUAL/);
+});
+
+test('(19) a IA escreve como a recepcionista ("enviei") -> o texto não sai; vai o aviso', async () => {
+  await conv(); await setModo('auto');
+  const deps = mkDeps(NOITE);
+  deps.generate = async () => 'Bom dia, Regina! Só para confirmar, você viu o material que enviei para o seu e-mail?';
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'Bom dia, Kessia!' }, deps);
+  assert.equal(out.encaminhado, 'identidade');
+  assert.doesNotMatch(deps.spy.texto, /enviei/);
+  assert.match(deps.spy.texto, AVISO);
+});

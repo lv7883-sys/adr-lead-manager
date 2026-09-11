@@ -328,7 +328,9 @@ async function autoEnviarTenant(tenantId, deps = {}) {
     const tp = pend[i];
     // contrato: false — o toque de renovação FALA de renovar o contrato por natureza (é a escola que
     // inicia, com o texto que a unidade aprovou); aqui só pesa afirmar dia/horário de aula ou valor.
-    const barrado = tema.bloqueio(tema.detectarSaida(tp.rascunho), { ...regras, contrato: false });
+    // identidade: false — o toque é a mensagem aprovada da própria unidade (sai em nome da escola), não a
+    // assistente virtual improvisando.
+    const barrado = tema.bloqueio(tema.detectarSaida(tp.rascunho), { ...regras, contrato: false, identidade: false });
     if (barrado) {
       resumo.retidos += 1;
       logger.warn('renovacao.auto.retido_tema', { tenant_id: tenantId, touchpoint: tp.id, tema: barrado.tema, trecho: barrado.trecho });

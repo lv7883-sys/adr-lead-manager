@@ -14,6 +14,8 @@
 //     • JURÍDICO    — advogado, Procon, processo, lei, direitos do consumidor, LGPD…
 //     • RECLAMAÇÃO  — insatisfação, reclamação, "ninguém responde"…
 //     • CRÍTICO     — urgência, acidente, saúde, luto, assédio, violência…
+//   E só na SAÍDA, sempre ligada: • IDENTIDADE — a assistente falando como se fosse uma recepcionista
+//     ("enviei o contrato", "anotei aqui", assinatura de alguém da equipe, "aqui é a …") — ver detectarSaida.
 //
 // POR QUE REGEX E NÃO O PROMPT: o prompt JÁ proibia agenda — e em 30 dias a IA confirmou agenda de
 // aula pelo menos 5 vezes. Em 11/09 confirmou o horário ERRADO para uma mãe ("11h, como combinamos"):
@@ -74,8 +76,18 @@ const RE_STATUS_AULA = /\b(confirmad\w*|agendad\w*|marcad\w*|remarcad\w*|reagend
 const RE_VALORES_SAIDA = /r\$\s?\d|\b\d+\s?reais\b|\b\d{2,4},\d{2}\b|\b(boleto\w*|pix|cartao|parcel\w*|mensalidade\w*|desconto\w*|promoc\w*)\b/;
 // A IA prometendo condição de contrato ("pode cancelar sem multa") — nunca sai sozinho.
 const RE_CONTRATO_SAIDA = /\b(contrato\w*|multa\w*|rescis\w*|fidelidade|cancelament\w*|cancelar sem)\b/;
+// VOZ DA RECEPÇÃO (11/09/2026): a assistente escrevendo como se fosse uma recepcionista. Casos reais:
+// "você viu o contrato de renovação que enviei?", "Anotei aqui que a preferência é sexta", e a mensagem
+// de boleto de uma recepcionista reproduzida com a assinatura dela ("*Késsia*") no meio do texto.
+// Ação humana em 1ª pessoa — a assistente não envia, não anota, não reserva nem liga para ninguém.
+const RE_ACAO_HUMANA = /\b(enviei|mandei|encaminhei|anexei|te passei|combinamos|conversamos|falei com|liguei|reservei|anotei|separei|vou te (enviar|mandar|passar)|ja te (envio|mando|passo)|te envio|te mando)\b/;
+// Assinatura em negrito numa linha só (o jeito como as recepcionistas assinam) — no meio do texto dela.
+const RE_ASSINATURA_NO_MEIO = /(^|\n)\s*\*[^*\n]{2,40}\*\s*(\n|$)/;
+// Apresentando-se com um nome: "aqui é a Rafa", "sou a Késsia", "meu nome é …".
+const RE_APRESENTACAO = /\b(?:aqui (?:e|eh) (?:a|o)|(?:eu )?sou (?:a|o)|meu nome (?:e|eh))\s+([a-z]+)/;
+const _APRESENTACAO_OK = new Set(['assistente', 'atendente', 'atendimento', 'equipe', 'virtual']);
 
-function detectarSaida(texto, { permitidos = [] } = {}) {
+function detectarSaida(texto, { permitidos = [], nomeIa = '' } = {}) {
   let t = _norm(texto);
   for (const p of permitidos) {
     const n = _norm(p).trim();
@@ -83,21 +95,30 @@ function detectarSaida(texto, { permitidos = [] } = {}) {
   }
   let agenda = _achou(RE_HORA, t) || _achou(RE_DATA, t);
   if (!agenda && RE_AULA.test(t)) agenda = _achou(RE_STATUS_AULA, t) || _achou(RE_DIA, t);
-  return { agenda, contrato: _achou(RE_CONTRATO_SAIDA, t), valores: _achou(RE_VALORES_SAIDA, t) };
+  // o cabeçalho com o nome DELA não é assinatura alheia
+  const semProprioCab = nomeIa ? t.split(_norm('*' + nomeIa + '*')).join(' ') : t;
+  let identidade = _achou(RE_ACAO_HUMANA, semProprioCab)
+    || (RE_ASSINATURA_NO_MEIO.test(semProprioCab) ? 'assinatura de alguém da equipe' : null);
+  if (!identidade) {
+    const m = RE_APRESENTACAO.exec(semProprioCab);
+    const meuNome = _norm(nomeIa).split(/[^a-z]+/).filter(Boolean)[0] || '';
+    if (m && m[1] !== meuNome && !_APRESENTACAO_OK.has(m[1])) identidade = m[0];
+  }
+  return { agenda, contrato: _achou(RE_CONTRATO_SAIDA, t), valores: _achou(RE_VALORES_SAIDA, t), identidade };
 }
 
 // Travas da unidade (agenda/valores: nulo/ausente = ligada) + as que valem para todas as unidades.
 function regrasDoTenant(cfg) {
   const c = cfg || {};
   return {
-    critico: true, juridico: true, reclamacao: true, contrato: true,
+    critico: true, juridico: true, reclamacao: true, contrato: true, identidade: true,
     agenda: c.agendamento_sempre_manual !== false,
     valores: c.proposta_sempre_manual !== false,
   };
 }
 
 // Ordem = prioridade do rótulo no log (o efeito é o mesmo: vai para a recepção).
-const _ORDEM = ['critico', 'juridico', 'reclamacao', 'agenda', 'contrato', 'valores'];
+const _ORDEM = ['critico', 'juridico', 'reclamacao', 'agenda', 'contrato', 'valores', 'identidade'];
 
 // Aplica as travas ligadas sobre uma detecção: { tema, trecho } ou null (liberado).
 function bloqueio(det, regras) {

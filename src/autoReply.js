@@ -143,6 +143,30 @@ async function _send(tenantId, channel, externalId, text, deps) {
   return { ok: false, reason: 'canal' };
 }
 
+// QUEM FALOU O QUÊ (11/09/2026). O histórico real (loadRealHistory) marca TODA saída da recepção como
+// ASSISTANT — certo para a sugestão do campo verde (quem envia é a recepcionista), errado aqui: a
+// assistente lia "*Késsia* Segue o boleto" e "o contrato que enviei" como falas DELA e continuava na voz
+// da recepcionista. Para a resposta automática o histórico vira uma transcrição com legenda:
+// [CLIENTE] / [RECEPÇÃO] (pessoa da equipe) / [VOCÊ] (só o que ela mesma mandou, reconhecido pelo
+// cabeçalho com o nome dela). A assinatura em negrito das recepcionistas sai do texto — nome de quem
+// atende não é assunto da assistente (REGRAS_REDACAO.semNomeStaff).
+const _ASSINATURA_TOPO = /^\s*\*[^*\n]{1,60}\*\s*\n/;
+function montarTranscricao(history, nomeIa, { max = 40, maxChars = 600 } = {}) {
+  const cab = nomeIa ? `*${String(nomeIa).trim()}*` : null;
+  const linhas = [];
+  for (const t of (history || []).slice(-max)) {
+    let txt = String(t.content ?? t.body ?? '').trim();
+    if (!txt) continue;
+    let quem;
+    if (t.role !== 'ASSISTANT') quem = 'CLIENTE';
+    else if (cab && txt.startsWith(cab)) { quem = 'VOCÊ'; txt = txt.slice(cab.length).trim(); }
+    else { quem = 'RECEPÇÃO'; txt = txt.replace(_ASSINATURA_TOPO, '').trim(); }
+    if (txt.length > maxChars) txt = txt.slice(0, maxChars) + '…';
+    linhas.push('[' + quem + '] ' + txt.replace(/\s*\n\s*/g, ' / '));
+  }
+  return linhas.join('\n');
+}
+
 // Núcleo. tenant = { id }. Resolve a conversa por (channel, dígitos do external_id). Só DIRECT.
 // deps injeta now/generate/evolution/meta/creds/registrar p/ o teste. Retorna {ok} ou {skipped}.
 async function maybeAutoReply(tenant, { channel, externalId, inboundText, contactName, inboundAt }, deps = {}) {
@@ -295,7 +319,7 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     const retorno = proxima ? `quando a equipe abrir (${proxima})` : 'no próximo horário de atendimento';
     const regraHorario = `REGRA DE HORÁRIO (obrigatória): ao dizer quando a equipe retorna/abre, escreva EXATAMENTE «${proximaFrase}» — NÃO troque o dia da semana nem a hora, NÃO invente outro dia (ex.: não diga "segunda-feira" se a frase for "hoje às 9h"). `;
     const systemPrompt =
-      `Você é ${nomeIa}, do atendimento de ${escola} — fale como um atendente HUMANO real, caloroso e natural (nada robótico, nada genérico).${instrs} ` +
+      `Você é ${nomeIa}, a ASSISTENTE VIRTUAL do atendimento de ${escola} — você NÃO é nenhuma das recepcionistas. Escreva de forma calorosa e natural (nada robótico, nada genérico).${instrs} ` +
       blocoNome + blocoContexto +
       `AGORA é FORA do horário de atendimento. LEIA o histórico da conversa e responda de forma PERSONALIZADA e curta (1 a 3 frases), em português do Brasil, reconhecendo o assunto. ` +
       `REGRA DE OURO (obrigatória): você SÓ pode afirmar fatos que estejam ESCRITOS EXPLICITAMENTE nas "INFORMAÇÕES DA ESCOLA" acima. É TERMINANTEMENTE PROIBIDO inventar, deduzir, supor ou completar qualquer informação. ` +
@@ -311,16 +335,17 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     const generate = deps.generate || gemini.generateReply;
     let corpo;
     try {
-      corpo = await generate({ systemPrompt, history, message: inboundText || '', retomada: history.length > 0 });
+      corpo = await generate({ systemPrompt, history, message: inboundText || '', retomada: history.length > 0,
+        persona: 'assistente', transcript: montarTranscricao(history, nomeIa) });
     } catch (e) {
       logger.warn('autoreply.generate_failed', { tenant_id: tenantId, error: e.message });
-      corpo = `Oi! Recebemos sua mensagem 🙌 No momento estamos fora do horário de atendimento; a equipe humana retorna ${proxima || 'assim que abrirmos'}. Já anotei por aqui!`;
+      corpo = `Oi! Recebemos sua mensagem 🙌 No momento estamos fora do horário de atendimento; a equipe humana retorna ${proxima || 'assim que abrirmos'}.`;
     }
     if (!corpo || !String(corpo).trim()) return { skipped: 'vazio' };
     // Segunda trava, na SAÍDA: com a entrada limpa a IA ainda pode puxar um horário, valor ou condição
     // de contrato do histórico por conta própria ("até amanhã às 11h!"). A frase de retorno calculada
     // pelo sistema é a ÚNICA hora permitida. Barrou → o texto da IA NÃO sai; vai o aviso fixo no lugar.
-    const barradoSaida = tema.bloqueio(tema.detectarSaida(corpo, { permitidos: [proximaFrase] }), regras);
+    const barradoSaida = tema.bloqueio(tema.detectarSaida(corpo, { permitidos: [proximaFrase], nomeIa }), regras);
     if (barradoSaida) {
       logger.warn('autoreply.saida_barrada', { tenant_id: tenantId, tema: barradoSaida.tema, trecho: barradoSaida.trecho });
       return entregar(avisoFixo(), { encaminhado: barradoSaida.tema, fase: 'saida', trecho: barradoSaida.trecho });
@@ -332,4 +357,4 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
   }
 }
 
-module.exports = { maybeAutoReply, businessState, formatNextOpen };
+module.exports = { maybeAutoReply, businessState, formatNextOpen, montarTranscricao };

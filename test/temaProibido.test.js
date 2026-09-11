@@ -106,3 +106,29 @@ test('aviso fixo: nome da escola da unidade + hora de retorno, sem afirmar nada'
   // o próprio aviso nunca pode tropeçar na trava de saída
   assert.equal(bloqueio(detectarSaida(m, { permitidos: ['hoje às 9h'] }), ligado), null);
 });
+
+// ---- IDENTIDADE (11/09/2026): a assistente falando como se fosse a recepcionista ------------------
+const NOME_IA = 'Janis J. (assistente virtual)';
+
+test('saída: a assistente escrevendo como RECEPCIONISTA é barrada (casos reais)', () => {
+  for (const r of [
+    'Bom dia, Regina! Tudo bem por aqui também! 😊 Só para confirmar, você conseguiu dar uma olhadinha no contrato de renovação da Malu que enviei para o seu e-mail?',
+    'Entendi, Cris! Anotei aqui que a preferência do Andreas é sexta-feira.',
+    'Obrigada, Marcio! 😊\n*Késsia*\nOii Marcio! Boa tarde, tudo bem?',
+    'Oi! Aqui é a Rafa, tudo bem?',
+    'Pode deixar que eu te envio o link amanhã!',
+  ]) assert.ok(detectarSaida(r, { nomeIa: NOME_IA }).identidade, r);
+  assert.equal(bloqueio(detectarSaida('Anotei aqui a sua preferência!', { nomeIa: NOME_IA }), ligado).tema, 'identidade');
+});
+
+test('saída: a assistente se apresentando como ELA MESMA passa', () => {
+  for (const r of [
+    'Oi! Aqui é a Janis, assistente virtual da escola 😊 A equipe retorna amanhã às 9h.',
+    'Oi, Regina! Sou a assistente virtual da escola — a equipe volta hoje às 9h.',
+    'Que legal! A aula experimental é *gratuita* e sem compromisso.',   // negrito no meio da frase não é assinatura
+    '*Janis J. (assistente virtual)*\nOi! Tudo bem?',                   // o cabeçalho dela mesma
+  ]) assert.equal(detectarSaida(r, { nomeIa: NOME_IA, permitidos: ['amanhã às 9h', 'hoje às 9h'] }).identidade, null, r);
+  // o aviso fixo nunca tropeça na trava de identidade
+  const aviso = mensagemEncaminhamento({ nome: 'Regina', escola: 'Escola Exemplo', proxima: 'hoje às 9h' });
+  assert.equal(detectarSaida(aviso, { nomeIa: NOME_IA, permitidos: ['hoje às 9h'] }).identidade, null);
+});

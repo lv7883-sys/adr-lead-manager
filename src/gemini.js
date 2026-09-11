@@ -327,6 +327,9 @@ const REGRAS_REDACAO = {
     '\n- NOME DO CLIENTE: por padrão, responda SEM o nome. NÃO abra a resposta com o nome quando a conversa JÁ está em andamento — nada de "Certo, {Nome}", "Entendi, {Nome}", "{Nome}, ..." como prefixo no meio da conversa; isso soa robótico e repetitivo. No fluxo normal da conversa, NÃO use o nome. As exceções em que o nome aparece: (1) ABERTURA — SEMPRE cumprimente pelo nome na PRIMEIRA resposta da conversa (ex.: "Olá, {Nome}!"). (2) RETOMADA — quando a conversa volta depois de um tempo parada, reancore com o nome logo no começo. Fora desses dois momentos, no fluxo normal da conversa, NÃO use o nome.',
   // Não assinar com nome de recepcionista específica (multi-tenant: várias atendentes usam o mesmo
   // sistema; a pessoa citada no histórico pode não ser quem está respondendo agora).
+  // Só no modo assistente (resposta automática). Na sugestão do campo verde quem envia É a recepcionista.
+  identidadeAssistente:
+    '\n- VOCÊ É A ASSISTENTE VIRTUAL, não uma pessoa da equipe. As mensagens marcadas [RECEPÇÃO] no histórico foram escritas por pessoas da equipe — NÃO por você. Por isso: NUNCA fale em primeira pessoa sobre o que a equipe fez, disse ou vai fazer ("enviei", "mandei", "te passei", "combinamos", "conversamos", "anotei", "vou te enviar"); NUNCA continue uma conversa da recepção como se fosse sua; NUNCA assine nem se apresente com o nome de alguém da equipe. Se o cliente chamar você pelo nome de outra pessoa, não assuma essa identidade: responda como a assistente virtual, sem citar o nome da pessoa da equipe. Você não envia arquivos, não anota, não reserva e não resolve nada — só acolhe e avisa que a equipe retorna.',
   semNomeStaff:
     '\n- NÃO se apresente nem assine com o nome de uma recepcionista/atendente ESPECÍFICA (ex.: NÃO escreva "aqui é a Késsia", "sou a Rafaela"), mesmo que esse nome apareça no histórico — quem envia pode ser outra pessoa da equipe. Se um nome de quem atende for realmente necessário na apresentação, use o espaço reservado "[seu nome]" para a atendente preencher; no fluxo normal, apenas continue sem assinar.',
   // Não re-oferecer o que JÁ foi enviado (apresentação, tabela de valores, documento...).
@@ -378,7 +381,13 @@ function blocoVendas(contexto = 'lead') {
     '\n- SAIBA A HORA DE RECUAR: trabalhe a objeção com firmeza gentil, mas se a pessoa reforçar o "não" de forma clara pela 2ª/3ª vez, ACOLHA, pare de argumentar e deixe a porta aberta. Insistir além disso afasta e mancha a escola.';
 }
 
-async function generateReply({ systemPrompt, history = [], message, clarification, retomada, vendas = false, contexto = 'lead' }) {
+// persona: 'recepcao' (padrão — a sugestão do campo verde, que a recepcionista revisa e envia como ela) |
+// 'assistente' (a resposta automática: quem fala é a assistente virtual, NÃO uma recepcionista).
+// transcript: histórico já legendado ([CLIENTE]/[RECEPÇÃO]/[VOCÊ]) — no modo assistente substitui os turnos
+// user/model, porque neles TODA saída da recepção vira fala "da própria IA" (e ela passava a falar como a Késsia).
+async function generateReply({ systemPrompt, history = [], message, clarification, retomada, vendas = false, contexto = 'lead', persona = 'recepcao', transcript = null }) {
+  const assistente = persona === 'assistente';
+  const usarTranscricao = assistente && typeof transcript === 'string';
   let sys = systemPrompt;
   const primeiroContato = history.length === 0;
   const horas = _horasDesdeUltimoTurno(history);
@@ -393,7 +402,8 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
       '\n\nRETOMADA — JÁ EXISTE conversa anterior com esta pessoa (veja o histórico acima). ' +
       'NÃO se apresente de novo (não repita seu nome/função nem a "REFERÊNCIA DE VOZ"). ' +
       'Identifique onde a conversa parou e qual foi o último assunto, referencie isso de forma ' +
-      'natural e calorosa, e reconecte avançando para o agendamento da aula experimental. ' +
+      // a assistente NÃO conduz agendamento (só a recepção — temaProibido.js); a sugestão do campo verde sim
+      (assistente ? 'natural e calorosa. ' : 'natural e calorosa, e reconecte avançando para o agendamento da aula experimental. ') +
       'Não invente nada que não foi discutido.' +
       (permitirSaudacao
         ? ' Como faz tempo desde a última mensagem (mais de um dia), você PODE reabrir com um ' +
@@ -408,7 +418,9 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
   // propósito — frameworks de "análise" longos empurram o modelo para respostas formais
   // e compridas, o oposto do que a recepção precisa.
   sys +=
-    '\n\nCOMO ESCREVER A RESPOSTA (você é a própria recepcionista continuando a conversa no WhatsApp):' +
+    (assistente
+      ? '\n\nCOMO ESCREVER A RESPOSTA (você é a ASSISTENTE VIRTUAL da escola, respondendo sozinha fora do horário — você NÃO é nenhuma das recepcionistas):' + REGRAS_REDACAO.identidadeAssistente
+      : '\n\nCOMO ESCREVER A RESPOSTA (você é a própria recepcionista continuando a conversa no WhatsApp):') +
     REGRAS_REDACAO.fatos +
     REGRAS_REDACAO.semMeta +
     REGRAS_REDACAO.fluidez +
@@ -426,6 +438,11 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
           ? '\n- É a PRIMEIRA mensagem: pode cumprimentar e se apresentar brevemente (uma linha), conforme a referência de voz da escola.'
           : '\n- O lead ficou em silêncio por mais de um dia: um cumprimento leve de reabertura é bem-vindo, sem se reapresentar por completo.')
       : '\n- A conversa está em andamento: NÃO cumprimente ("Olá", "Oi", "Bom dia") nem se apresente de novo, e NUNCA assine com seu nome ou o nome de quem atende ("Atenciosamente", "— Fulana", "Aqui é a Fulana"). A pessoa já está falando com você — apenas continue.');
+  if (usarTranscricao && transcript.trim()) {
+    sys += '\n\nHISTÓRICO DA CONVERSA (do mais antigo ao mais recente). Legenda: [CLIENTE] = a pessoa com quem você fala; ' +
+      '[RECEPÇÃO] = escrita por uma pessoa da equipe, NÃO por você; [VOCÊ] = o que você mesma mandou antes. ' +
+      'Use só para entender o assunto e o tom:\n' + transcript;
+  }
   return withModelFallback(async (modelName) => {
     // temperature baixa (0.3) = respostas mais consistentes e ancoradas no prompt,
     // menos "criativas"/inventadas. Os classificadores já rodam em 0; aqui mantemos um
@@ -436,7 +453,7 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
       generationConfig: { temperature: 0.3 },
     });
     const contents = [
-      ...history.map((m) => ({
+      ...(usarTranscricao ? [] : history).map((m) => ({
         role: m.role === 'ASSISTANT' ? 'model' : 'user',
         parts: [{ text: m.content ?? m.body ?? '' }],
       })),
