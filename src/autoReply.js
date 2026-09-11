@@ -20,6 +20,7 @@ const metaDefault = require('./meta');
 const horario = require('./horario');   // FONTE ÚNICA do horário de atendimento (aba "Horário de atendimento")
 const { PREFIXO_REACAO } = require('./reacao');   // marcador canônico de reação ([reação])
 const logger = require('./logger');
+const tema = require('./temaProibido');   // assuntos que só a recepção responde
 
 // A Janis só responde a uma mensagem com CONTEÚDO de verdade. Reação (emoji), figurinha, mídia sem
 // legenda ou "balão" só de emoji NÃO são um turno do cliente — são um aceno (ADR-031 / reacao.js).
@@ -170,7 +171,7 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
           WHERE tenant_id = $1 AND channel = $2
             AND regexp_replace(external_id, '[^0-9]', '', 'g') = regexp_replace($3, '[^0-9]', '', 'g')
           ORDER BY updated_at DESC LIMIT 1`, [tenantId, channel, String(externalId)])).rows[0];
-      const auto = (await c.query('SELECT modo_fora_horario, modo_fds, nome_ia, contexto_ia, ia_fora_leads, ia_fora_nao_leads FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
+      const auto = (await c.query('SELECT modo_fora_horario, modo_fds, nome_ia, contexto_ia, ia_fora_leads, ia_fora_nao_leads, agendamento_sempre_manual, proposta_sempre_manual FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
       const cfg = (await c.query('SELECT school_name, available_instruments FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
       // Horário de atendimento = FONTE ÚNICA tenants.horario_comercial (o que a aba grava) + fallback legado.
       const t = (await c.query(
@@ -228,6 +229,14 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     // Recepção ativa agora (humano respondeu pelo painel recentemente) → não atravessa a recepção.
     if (info.recepAtiva) return { skipped: 'recepcao_ativa' };
 
+    // ASSUNTO DA RECEPÇÃO (temaProibido.js): agenda, valores, contrato/cancelamento, jurídico, reclamação,
+    // crítico. A assistente NÃO responde o assunto nem chama a IA — manda só o aviso FIXO de que a equipe
+    // vai avaliar no horário de atendimento. Qualquer OUTRO assunto segue a resposta normal da IA.
+    // Regra do Leo depois que a Janis confirmou o horário ERRADO de uma aluna (11/09/2026): o prompt já
+    // proibia e não segurou. Agenda/valores são travas da unidade (padrão ligado); as outras, de todas.
+    const regras = tema.regrasDoTenant(info.auto);
+    const barradoEntrada = tema.bloqueio(tema.detectarEntrada(inboundText), regras);
+
     // ANTI-DUPLICADO ATÔMICO: reserva o cooldown ANTES de gerar/enviar. Se outra mensagem quase
     // simultânea já reservou nesta janela fechada, pula (evita 2 respostas — o bug da Michele).
     const cs = st.closedSince || new Date(now.getTime() - 12 * 3600000);
@@ -239,6 +248,30 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     const nomeIa = (info.auto.nome_ia && info.auto.nome_ia.trim()) || 'Atendimento';
     const escola = (info.cfg && info.cfg.school_name) || info.tname || 'a escola';
     const proxima = formatNextOpen(st.nextOpen, now);
+    // Nome do contato: prioriza o que veio do WhatsApp/Meta (pushName), cai p/ o nome do lead.
+    const contato = (contactName && String(contactName).trim()) || (info.leadName && String(info.leadName).trim()) || null;
+    const primeiroNome = contato ? contato.split(/\s+/)[0] : null;
+
+    // Entrega + registro: UM caminho só, p/ a resposta da IA e p/ o aviso fixo.
+    const entregar = async (corpoTxt, extra = {}) => {
+      // Cabeçalho com o nome em NEGRITO (WhatsApp: *nome*), igual às recepcionistas (ex.: *Rafa*).
+      const texto = `*${nomeIa}*\n${String(corpoTxt).trim()}`;
+      const sent = await _send(tenantId, channel, externalId, texto, deps);
+      if (!sent.ok) {
+        // Envio falhou: devolve o cooldown (restaura o valor anterior) p/ permitir retry na próxima msg.
+        await withTenant(tenantId, (c) => c.query('UPDATE conversations SET auto_reply_at = $2 WHERE id = $1', [info.conv.id, info.conv.auto_reply_at || null])).catch(() => {});
+        return { skipped: 'send_' + sent.reason };
+      }
+      // cooldown já reservado ANTES de gerar (anti-duplicado) — não seta de novo aqui.
+      const registrar = deps.registrarSaida || outbound.registrarSaida;
+      await registrar(tenantId, { phone: externalId, externalMessageId: sent.messageId, sender: nomeIa, body: texto });
+      logger.info('autoreply.sent', { tenant_id: tenantId, channel, nome_ia: nomeIa, ...extra });
+      return { ok: true, message_id: sent.messageId, ...(extra.encaminhado ? { encaminhado: extra.encaminhado } : {}) };
+    };
+    const avisoFixo = () => tema.mensagemEncaminhamento({ nome: primeiroNome, escola, proxima });
+    if (barradoEntrada) {
+      return entregar(avisoFixo(), { encaminhado: barradoEntrada.tema, fase: 'entrada', trecho: barradoEntrada.trecho });
+    }
 
     // LÊ a conversa (mesma timeline da "sugestão de resposta") p/ responder no contexto — como
     // um humano faria. Best-effort: sem histórico se falhar.
@@ -249,9 +282,6 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
 
     const instrs = (info.cfg && Array.isArray(info.cfg.available_instruments) && info.cfg.available_instruments.length)
       ? ` A escola oferece aulas de: ${info.cfg.available_instruments.join(', ')}.` : '';
-    // Nome do contato: prioriza o que veio do WhatsApp/Meta (pushName), cai p/ o nome do lead.
-    const contato = (contactName && String(contactName).trim()) || (info.leadName && String(info.leadName).trim()) || null;
-    const primeiroNome = contato ? contato.split(/\s+/)[0] : null;
     // Base de conhecimento que a escola preencheu (endereço, como funcionam as aulas, eventos…).
     const contexto = (info.auto && info.auto.contexto_ia && String(info.auto.contexto_ia).trim()) || '';
 
@@ -272,7 +302,9 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
       `Você PODE — só se estiver nas informações acima — dar o ENDEREÇO e explicar COMO FUNCIONAM as aulas (individuais, projetos de banda, eventos). ` +
       `Se a pessoa perguntar OU mencionar QUALQUER coisa que não esteja explícita nas informações acima (ex.: um workshop, um evento específico, nome de professor, promoção, data, valor, horário de aula): NÃO confirme, NÃO detalhe e NÃO invente — diga com sinceridade que a recepção confirma esse detalhe ${retorno}. Mesmo que apareça no histórico da conversa, trate como NÃO confirmado (use o histórico só p/ entender o assunto e o tom, NUNCA como fonte de fatos). ` +
       `NUNCA informe PREÇOS/valores. É TERMINANTEMENTE PROIBIDO falar sobre PAGAMENTO em qualquer forma (formas de pagamento, cobrança, mensalidade, boleto, Pix, cartão, parcelamento) e você NUNCA envia LINK de pagamento — pagamento é EXCLUSIVO da recepção. Se a pessoa tocar nesse assunto, apenas diga com naturalidade que a recepção cuida disso ${retorno}. ` +
-      `NÃO AGENDE nem confirme HORÁRIO de aula experimental — exclusivo da recepção. ` +
+      (regras.agenda
+        ? `AGENDA É EXCLUSIVA DA RECEPÇÃO: NUNCA escreva dia, data ou horário de NENHUMA aula (experimental ou de aluno) e NUNCA agende, confirme, remarque, reponha, antecipe ou cancele aula — mesmo que um horário apareça no histórico: ele pode ter mudado depois. `
+        : `NÃO AGENDE nem confirme HORÁRIO de aula experimental — exclusivo da recepção. `) +
       regraHorario +
       `NÃO assine nem repita seu nome no final — o nome já aparece no topo.`;
 
@@ -285,20 +317,15 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
       corpo = `Oi! Recebemos sua mensagem 🙌 No momento estamos fora do horário de atendimento; a equipe humana retorna ${proxima || 'assim que abrirmos'}. Já anotei por aqui!`;
     }
     if (!corpo || !String(corpo).trim()) return { skipped: 'vazio' };
-    // Cabeçalho com o nome em NEGRITO (WhatsApp: *nome*), igual às recepcionistas (ex.: *Rafa*).
-    const texto = `*${nomeIa}*\n${String(corpo).trim()}`;
-
-    const sent = await _send(tenantId, channel, externalId, texto, deps);
-    if (!sent.ok) {
-      // Envio falhou: devolve o cooldown (restaura o valor anterior) p/ permitir retry na próxima msg.
-      await withTenant(tenantId, (c) => c.query('UPDATE conversations SET auto_reply_at = $2 WHERE id = $1', [info.conv.id, info.conv.auto_reply_at || null])).catch(() => {});
-      return { skipped: 'send_' + sent.reason };
+    // Segunda trava, na SAÍDA: com a entrada limpa a IA ainda pode puxar um horário, valor ou condição
+    // de contrato do histórico por conta própria ("até amanhã às 11h!"). A frase de retorno calculada
+    // pelo sistema é a ÚNICA hora permitida. Barrou → o texto da IA NÃO sai; vai o aviso fixo no lugar.
+    const barradoSaida = tema.bloqueio(tema.detectarSaida(corpo, { permitidos: [proximaFrase] }), regras);
+    if (barradoSaida) {
+      logger.warn('autoreply.saida_barrada', { tenant_id: tenantId, tema: barradoSaida.tema, trecho: barradoSaida.trecho });
+      return entregar(avisoFixo(), { encaminhado: barradoSaida.tema, fase: 'saida', trecho: barradoSaida.trecho });
     }
-    // cooldown já reservado ANTES de gerar (anti-duplicado) — não seta de novo aqui.
-    const registrar = deps.registrarSaida || outbound.registrarSaida;
-    await registrar(tenantId, { phone: externalId, externalMessageId: sent.messageId, sender: nomeIa, body: texto });
-    logger.info('autoreply.sent', { tenant_id: tenantId, channel, nome_ia: nomeIa });
-    return { ok: true, message_id: sent.messageId };
+    return entregar(corpo);
   } catch (e) {
     logger.warn('autoreply.error', { tenant_id: tenantId, error: e.message });
     return { skipped: 'error' };

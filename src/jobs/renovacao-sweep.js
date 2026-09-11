@@ -18,6 +18,7 @@
 const { pool, withTenant } = require('../db');
 const geminiDefault = require('../gemini');
 const logger = require('../logger');
+const tema = require('../temaProibido');   // toque que afirma horário/valor não sai sozinho
 
 // Marcos da régua (dias corridos até o fim do contrato). Régua completa D-45→D-2. Rascunho idempotente
 // por (contrato, marco, âncora): mais marcos = mais SUGESTÕES pra recepção, não mais mensagem ao cliente
@@ -316,9 +317,23 @@ async function autoEnviarTenant(tenantId, deps = {}) {
       ORDER BY (marco='D-2') DESC, fim_vigencia ASC
       LIMIT $2`, [tenantId, restante])).rows);
 
-  const resumo = { tenant_id: tenantId, elegiveis: pend.length, enviados: 0, falhas: 0 };
+  // Mesma trava da resposta fora do horário (temaProibido.js): AGENDA e VALORES só a recepção trata.
+  // Toque cujo texto afirma dia/horário de aula ou valor NÃO sai sozinho — fica pendente para a recepção
+  // enviar da aba Renovações. Travas por unidade; se a leitura falhar, vale o padrão (ligado).
+  const regras = tema.regrasDoTenant(await withTenant(tenantId, async (c) => (await c.query(
+    'SELECT agendamento_sempre_manual, proposta_sempre_manual FROM lead_manager.automacao_config WHERE tenant_id=$1',
+    [tenantId])).rows[0]).catch(() => null));
+  const resumo = { tenant_id: tenantId, elegiveis: pend.length, enviados: 0, falhas: 0, retidos: 0 };
   for (let i = 0; i < pend.length; i++) {
     const tp = pend[i];
+    // contrato: false — o toque de renovação FALA de renovar o contrato por natureza (é a escola que
+    // inicia, com o texto que a unidade aprovou); aqui só pesa afirmar dia/horário de aula ou valor.
+    const barrado = tema.bloqueio(tema.detectarSaida(tp.rascunho), { ...regras, contrato: false });
+    if (barrado) {
+      resumo.retidos += 1;
+      logger.warn('renovacao.auto.retido_tema', { tenant_id: tenantId, touchpoint: tp.id, tema: barrado.tema, trecho: barrado.trecho });
+      continue;
+    }
     try {
       const r = await send(tenantId, tp);
       if (r && r.ok) {

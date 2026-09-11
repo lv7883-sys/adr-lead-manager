@@ -24,7 +24,8 @@ before(async () => {
     CREATE TABLE conversations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, conversation_kind text DEFAULT 'DIRECT', auto_reply_at timestamptz, updated_at timestamptz DEFAULT now());
     CREATE TABLE automacao_config (tenant_id uuid PRIMARY KEY, modo_fora_horario text, modo_fds text, nome_ia text, contexto_ia text,
-      ia_fora_leads boolean DEFAULT true, ia_fora_nao_leads boolean DEFAULT true);
+      ia_fora_leads boolean DEFAULT true, ia_fora_nao_leads boolean DEFAULT true,
+      agendamento_sempre_manual boolean DEFAULT true, proposta_sempre_manual boolean DEFAULT true);   -- travas de AGENDA/VALORES
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, school_name text,
       available_instruments text[] NOT NULL DEFAULT '{}');
     CREATE TABLE staff_outbound_samples (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
@@ -63,7 +64,7 @@ function mkDeps(now) {
 test('(1) fora do horário + modo=auto -> envia e marca cooldown', async () => {
   const cv = await conv(); await setModo('auto', 'auto', 'Janis Joplin', 'Ficamos na Rua X, 100, Valinhos. Aulas individuais e projetos de banda.');
   const deps = mkDeps(NOITE);
-  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'quanto custa violão?', contactName: 'Maria Silva' }, deps);
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi! vocês têm aula de violão pra adulto?', contactName: 'Maria Silva' }, deps);
   assert.equal(out.ok, true);
   assert.equal(deps.spy.sends, 1);
   assert.equal(deps.spy.histLoaded, true, 'leu o histórico da conversa');
@@ -172,4 +173,83 @@ test('(12) mensagem ANTIGA (webhook atrasado / histórico) -> não responde', as
   const antiga = U(2026, 7, 5, 18);   // 5h antes de NOITE (> 3h default)
   const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi', inboundAt: antiga }, deps);
   assert.equal(out.skipped, 'msg_antiga'); assert.equal(deps.spy.sends, 0);
+});
+
+// ---- ASSUNTOS DA RECEPÇÃO (11/09/2026) ------------------------------------------------------------
+// A Janis confirmou o horário ERRADO de uma aluna ("11h, como combinamos" — a aula tinha ido p/ 12h).
+// Agenda, valores, contrato, jurídico, reclamação e crítico: a assistente não responde o assunto e não
+// chama a IA — manda só o aviso fixo de que a equipe vai avaliar no horário de atendimento. Qualquer
+// outro assunto segue a resposta normal da IA.
+const MSG_AGENDA = 'Bom dia! Tudo bem? Amanhã a aula da Valentina será às 12:00?';
+const AVISO = /Isso vai ser avaliado pela equipe da ADR Valinhos durante o horário de atendimento — voltamos amanhã às 9h\./;
+const autoReplyAt = async (cv) => (await c.query('SELECT auto_reply_at FROM conversations WHERE id=$1', [cv])).rows[0].auto_reply_at;
+
+test('(13) AGENDA -> só o aviso fixo: sem chamar a IA, com o nome da escola e a hora de retorno', async () => {
+  const cv = await conv(); await setModo('auto');
+  const deps = mkDeps(NOITE);
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: MSG_AGENDA, contactName: 'Eliana Souza' }, deps);
+  assert.equal(out.ok, true); assert.equal(out.encaminhado, 'agenda');
+  assert.equal(deps.spy.systemPrompt, undefined, 'a IA nem é chamada');
+  assert.equal(deps.spy.sends, 1);
+  assert.match(deps.spy.texto, /^\*Janis Joplin\*\nOi, Eliana! Recebemos sua mensagem/);
+  assert.match(deps.spy.texto, AVISO);
+  assert.doesNotMatch(deps.spy.texto, /12:00|11h|Valentina/, 'não repete nem afirma nada do assunto');
+  assert.ok(await autoReplyAt(cv), 'cooldown reservado — a 2ª mensagem seguida não gera 2º aviso');
+});
+
+test('(14) VALOR, CONTRATO, JURÍDICO, RECLAMAÇÃO e CRÍTICO -> o mesmo aviso fixo', async () => {
+  const casos = [
+    ['quanto custa violão?', 'valores'],
+    ['quero cancelar o contrato', 'contrato'],
+    ['vou procurar o Procon', 'juridico'],
+    ['estou muito insatisfeita, ninguém me responde', 'reclamacao'],
+    ['meu filho se machucou na aula de ontem', 'critico'],
+  ];
+  for (const [msg, t] of casos) {
+    await conv(); await setModo('auto');
+    const deps = mkDeps(NOITE);
+    const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: msg }, deps);
+    assert.equal(out.encaminhado, t, msg);
+    assert.equal(deps.spy.systemPrompt, undefined, 'sem IA: ' + msg);
+    assert.match(deps.spy.texto, AVISO, msg);
+  }
+});
+
+test('(15) entrada limpa mas a IA ESCREVE horário de aula -> o texto dela não sai; vai o aviso', async () => {
+  await conv(); await setModo('auto');
+  const deps = mkDeps(NOITE);
+  deps.generate = async () => 'Oii, Eliana! A aula da Valentina amanhã está confirmada para às 11h, como combinamos.';
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'Ótimo. Obrigada' }, deps);
+  assert.equal(out.encaminhado, 'agenda');
+  assert.equal(deps.spy.sends, 1);
+  assert.doesNotMatch(deps.spy.texto, /11h|confirmada/, 'o horário da IA não sai');
+  assert.match(deps.spy.texto, AVISO);
+});
+
+test('(16) assunto comum -> resposta NORMAL da IA, e a hora de retorno do sistema pode sair', async () => {
+  await conv(); await setModo('auto');
+  const deps = mkDeps(NOITE);   // 20h local -> reabre amanhã às 9h
+  // a substituta registra o prompt, como a do mkDeps — é assim que o teste sabe que foi pela IA
+  deps.generate = async ({ systemPrompt }) => { deps.spy.systemPrompt = systemPrompt; return 'Oi, Eliana! Recebi sua mensagem 🙌 A equipe retorna amanhã às 9h.'; };
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'Ótimo. Obrigada' }, deps);
+  assert.equal(out.ok, true); assert.equal(out.encaminhado, undefined, 'resposta normal da IA');
+  assert.ok(deps.spy.systemPrompt, 'foi pela IA');
+  assert.match(deps.spy.texto, /A equipe retorna amanhã às 9h/);
+});
+
+test('(17) multi-tenant: unidade que DESLIGOU a trava de agenda volta à resposta normal — as outras seguem valendo', async () => {
+  await c.query('UPDATE automacao_config SET agendamento_sempre_manual = false WHERE tenant_id = $1', [T1]);
+  try {
+    await conv(); await setModo('auto');
+    let deps = mkDeps(NOITE);
+    let out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: MSG_AGENDA }, deps);
+    assert.equal(out.ok, true); assert.equal(out.encaminhado, undefined, 'agenda liberada nesta unidade');
+    assert.ok(deps.spy.systemPrompt, 'foi pela IA');
+    await conv();
+    deps = mkDeps(NOITE);
+    out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'quero cancelar o contrato' }, deps);
+    assert.equal(out.encaminhado, 'contrato', 'contrato não é escolha da unidade');
+  } finally {
+    await c.query('UPDATE automacao_config SET agendamento_sempre_manual = true WHERE tenant_id = $1', [T1]);
+  }
 });
