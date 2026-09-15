@@ -204,17 +204,21 @@ function _collectAckUpdates(body) {
     if (!d || typeof d !== 'object') continue;
     const id = (d.key && d.key.id) || d.keyId || d.id || (d.message && d.message.key && d.message.key.id);
     const ack = _mapAck(d.status || (d.update && d.update.status) || d.messageStatus);
-    if (id && ack) out.push({ id: String(id), ack });
+    const fromMe = d.key && d.key.fromMe != null ? d.key.fromMe : d.fromMe;
+    if (id && ack) out.push({ id: String(id), ack, fromMe: fromMe === true || fromMe === 'true' });
   }
   return out;
 }
 
 // Grava o ack na saída correspondente (staff_outbound_samples) por external_message_id.
 // MONOTÔNICO (nunca regride: read>delivered>sent) e IDEMPOTENTE (mesmo ack = no-op).
-// Ignora se não achar a mensagem (WHERE não casa → 0 linhas; nunca cria linha nova).
+// Se a SAÍDA ainda não existe (o tique chegou antes dela — comum agora que o envio pela API é gravado
+// pelo próprio evento), o tique ESPERA em wa_ack_pendente e o gatilho da migr. 114 aplica quando a
+// mensagem entrar. Só para saída nossa (fromMe): recibo de mensagem do cliente não tem o que esperar.
 async function atualizarAckStatus(tenantId, body, log) {
   const updates = _collectAckUpdates(body);
   if (!updates.length) return;
+  let pendentes = 0;
   const n = await withTenant(tenantId, async (c) => {
     let tot = 0;
     for (const u of updates) {
@@ -228,10 +232,28 @@ async function atualizarAckStatus(tenantId, body, log) {
         [tenantId, u.ack, u.id]
       );
       tot += r.rowCount;
+      if (!r.rowCount && u.fromMe) {
+        const existe = (await c.query(
+          'SELECT 1 FROM staff_outbound_samples WHERE tenant_id = $1 AND external_message_id = $2 LIMIT 1',
+          [tenantId, u.id])).rows[0];
+        if (!existe) {
+          await c.query(
+            `INSERT INTO wa_ack_pendente (tenant_id, external_message_id, ack_status) VALUES ($1, $2, $3)
+             ON CONFLICT (tenant_id, external_message_id) DO UPDATE
+               SET ack_status = CASE WHEN (CASE EXCLUDED.ack_status WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END)
+                                        > (CASE wa_ack_pendente.ack_status WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END)
+                                     THEN EXCLUDED.ack_status ELSE wa_ack_pendente.ack_status END,
+                   recebido_em = now()`,
+            [tenantId, u.id, u.ack]);
+          pendentes += 1;
+        }
+      }
     }
+    // faxina barata: tique que esperou 3 dias e a mensagem nunca veio não vai vir mais
+    if (pendentes) await c.query("DELETE FROM wa_ack_pendente WHERE tenant_id = $1 AND recebido_em < now() - interval '3 days'", [tenantId]);
     return tot;
   });
-  if (log) log.info('ack.updated', { recebidos: updates.length, aplicados: n });
+  if (log) log.info('ack.updated', { recebidos: updates.length, aplicados: n, aguardando_mensagem: pendentes });
 }
 
 // ── Fatia 2 WhatsApp-like: EDIÇÃO de mensagem (cliente edita o que mandou) ──────────
@@ -395,6 +417,17 @@ async function handleZapiWebhook(req, res) {
   const tenant = req.tenant;
   const log = req.log;
   const msg = normalizeMessage(req.body);
+  // SEND_MESSAGE (paridade com o WhatsApp, 15/09/2026): mensagem enviada PELA API por qualquer parte do
+  // Regente — avisos do dashboard (agenda, Rock Hour, NPS, boletim, campanhas), alertas, a própria Caixa
+  // de Entrada. Entra como saída NA HORA; antes só chegava na busca de histórico, até ~6 h depois.
+  // Origem própria ('regente-auto'): não conta como recepção humana (a Janis não se cala por causa de
+  // um aviso automático) e não classifica a bola do lead (um NPS em massa não é resposta de ninguém).
+  const ehEnvioApi = String(req.body?.event || '').toLowerCase() === 'send.message';
+  if (ehEnvioApi && msg) {
+    msg.fromMe = true;
+    msg.envioApi = true;
+    if (!msg.source || String(msg.source).toLowerCase() === 'unknown') msg.source = 'regente-auto';
+  }
 
   // ACK imediato (processamento é assíncrono).
   res.status(200).json({ status: 'ok' });
@@ -540,7 +573,7 @@ async function handleZapiWebhook(req, res) {
       const cap = await staffSamples.captureOutbound(tenant.id, msg, req.body);
       // Só classifica em linha NOVA (rowCount>0) — nunca no eco duplicado (dedup por msg id).
       // ADR-031: reação de saída é capturada (bolha), mas NÃO classifica a bola (meta-sinal).
-      if (cap && cap.rowCount > 0 && !msg.reaction) {
+      if (cap && cap.rowCount > 0 && !msg.reaction && !msg.envioApi) {
         const ident = String(msg.externalId || '').replace(/\D/g, '');
         await engine.classificarSaida(tenant.id, { ident, sampleId: cap.id, body: msg.body, mediaPendente });
       }
@@ -572,4 +605,5 @@ module.exports = router;
 module.exports.normalizeMessage = normalizeMessage;
 module.exports.detectarMidia = detectarMidia;
 module.exports.detectarReacao = detectarReacao;
-module.exports._idsRecibosLeituraInbound = _idsRecibosLeituraInbound;   // ADR-042 Fase 2
+module.exports._idsRecibosLeituraInbound = _idsRecibosLeituraInbound;
+module.exports.atualizarAckStatus = atualizarAckStatus;   // paridade 1: itest do tique pendente   // ADR-042 Fase 2

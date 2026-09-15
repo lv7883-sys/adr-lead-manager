@@ -14,6 +14,32 @@ const logger = require('./logger');
 // (pode ser envio automático — NPS/campanha) p/ nunca esconder uma não-lida genuína.
 const FONTES_HUMANAS = new Set(['web', 'android', 'ios', 'desktop']);
 
+// Todo envio ABRE (ou reaproveita) a conversa, como no WhatsApp: mandar um aviso para quem nunca escreveu
+// já cria o chat. Sem isto a saída ficava gravada e INVISÍVEL na Caixa de Entrada (a lista só mostra
+// conversas). Conversa existente é casada pela chave de telefone (br_key, migr. 112) e NÃO é tocada —
+// updated_at é o último INBOUND e não pode andar por causa de uma saída. Status/canal/@lid sem telefone
+// não viram conversa.
+async function _garantirConversa(c, tenantId, remoteJid, externalId, isGroup) {
+  const jid = String(remoteJid || '');
+  if (isGroup) {
+    await c.query(
+      `INSERT INTO conversations (tenant_id, channel, external_id, conversation_kind) VALUES ($1, 'whatsapp', $2, 'GROUP')
+       ON CONFLICT (tenant_id, channel, external_id) DO NOTHING`, [tenantId, jid]);
+    return;
+  }
+  if (!/@s\.whatsapp\.net$/i.test(jid)) return;
+  const dig = String(externalId || '').replace(/\D/g, '');
+  if (dig.length < 10 || dig.length > 15) return;   // teto do E.164 (migr. 113)
+  const existe = (await c.query(
+    `SELECT 1 FROM conversations WHERE tenant_id = $1 AND channel = 'whatsapp' AND br_key = br_phone_key($2) LIMIT 1`,
+    [tenantId, dig])).rows[0];
+  if (existe) return;
+  const canonico = dig.startsWith('55') ? dig : ((dig.length === 10 || dig.length === 11) ? `55${dig}` : dig);
+  await c.query(
+    `INSERT INTO conversations (tenant_id, channel, external_id) VALUES ($1, 'whatsapp', $2)
+     ON CONFLICT (tenant_id, channel, external_id) DO NOTHING`, [tenantId, canonico]);
+}
+
 async function captureOutbound(tenantId, msg, rawBody) {
   if (!msg) return;
   // Antes só capturava TEXTO. Agora uma saída só-mídia (áudio/imagem/doc) também vira
@@ -29,6 +55,7 @@ async function captureOutbound(tenantId, msg, rawBody) {
   const isGroup = String(remoteJid).endsWith('@g.us');
   try {
     const inserted = await withTenant(tenantId, async (c) => {
+      await _garantirConversa(c, tenantId, remoteJid, msg.externalId, isGroup);
       const ins = await c.query(
         `INSERT INTO staff_outbound_samples
            (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
@@ -100,4 +127,4 @@ async function captureOutbound(tenantId, msg, rawBody) {
   }
 }
 
-module.exports = { captureOutbound };
+module.exports = { captureOutbound, _garantirConversa };

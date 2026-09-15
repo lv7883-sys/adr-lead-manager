@@ -24,7 +24,16 @@ async function registrarSaida(tenantId, { phone, externalMessageId, sender, body
        (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
         media_url, media_type, media_filename, reply_to_message_id, is_group)
      VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, NULL, $6, $7, $8, $9, $10)
-     ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
+     ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO UPDATE
+       -- o evento de envio (SEND_MESSAGE) pode chegar ANTES deste registro: aí a linha já existe, mas sem
+       -- quem enviou (recepção x Janis), sem a citação e sem o arquivo que só o Regente conhece.
+       SET sender = EXCLUDED.sender,
+           source = 'api',
+           reply_to_message_id = COALESCE(staff_outbound_samples.reply_to_message_id, EXCLUDED.reply_to_message_id),
+           media_url = COALESCE(staff_outbound_samples.media_url, EXCLUDED.media_url),
+           media_type = COALESCE(staff_outbound_samples.media_type, EXCLUDED.media_type),
+           media_filename = COALESCE(staff_outbound_samples.media_filename, EXCLUDED.media_filename),
+           is_group = staff_outbound_samples.is_group OR EXCLUDED.is_group`,
     [tenantId, phone, externalMessageId || null, sender || 'Recepção', body || null,
      (media && media.url) || null, (media && media.type) || null, (media && media.filename) || null,
      replyToMessageId || null, ehGrupo]
