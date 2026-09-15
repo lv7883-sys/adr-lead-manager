@@ -24,7 +24,7 @@ before(async () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text, external_id text,
       external_message_id text, source text, sender text, body text, raw jsonb,
       media_url text, media_type text, media_filename text, reply_to_message_id uuid, reply_to_external_id text,
-      is_group boolean NOT NULL DEFAULT false, deleted_at timestamptz);   -- migr. 103
+      is_group boolean NOT NULL DEFAULT false, deleted_at timestamptz, conteudo jsonb);   -- migr. 103 / 116
     CREATE UNIQUE INDEX so_uq ON staff_outbound_samples (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL;
     CREATE TABLE messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
@@ -179,4 +179,63 @@ test('(10) responder a mensagem NOSSA (recepção): cita com a key fromMe e grav
   const row = (await soRows(T1)).find((r) => r.external_message_id === 'MSGID10');
   assert.equal(row.reply_to_message_id, null);
   assert.equal(row.reply_to_external_id, 'NOSSA1');
+});
+
+
+// ---- paridade 5: o menu 📎 do WhatsApp (localização, contato, enquete) e a @menção -------------------------------
+function especiais(deps) {
+  const spy = { chamadas: [] };
+  const resposta = (id) => ({ key: { id, fromMe: true, remoteJid: '5519000000011@s.whatsapp.net' },
+    message: { pollCreationMessageV3: { name: 'x' }, messageContextInfo: { messageSecret: 'U0VHUkVETw==' } } });
+  deps.evolution.sendPoll = async (_c, n, a) => { spy.chamadas.push(['poll', n, a]); return resposta('POLL11'); };
+  deps.evolution.sendLocation = async (_c, n, a) => { spy.chamadas.push(['loc', n, a]); return { key: { id: 'LOC11' } }; };
+  deps.evolution.sendContact = async (_c, n, a) => { spy.chamadas.push(['ctt', n, a]); return { key: { id: 'CTT11' } }; };
+  deps.evolution.pickMessageId = (r) => r && r.key && r.key.id;
+  return spy;
+}
+
+test('(11) enquete: envia, grava o cartão e a mensagem com o segredo (para somar os votos)', async () => {
+  const cv = await conv(T1, H(11));
+  const { deps } = mkDeps(); const spy = especiais(deps);
+  const out = await inbox.sendEspecial(T1, cv, { tipo: 'enquete', dados: { pergunta: 'Melhor dia?', opcoes: ['Sábado', 'Domingo', 'Sábado', ''], multipla: false }, sender: 'RECEPCAO' }, deps);
+  assert.equal(out.ok, true);
+  assert.deepEqual(spy.chamadas[0][2], { pergunta: 'Melhor dia?', opcoes: ['Sábado', 'Domingo'], multipla: false });
+  const row = (await soRows(T1)).find((r) => r.external_message_id === 'POLL11');
+  assert.equal(row.body, '📊 Enquete: Melhor dia?\n• Sábado\n• Domingo');
+  assert.equal(row.conteudo.tipo, 'enquete');
+  assert.equal(row.raw.data.message.messageContextInfo.messageSecret, 'U0VHUkVETw==');
+});
+
+test('(12) localização e contato: cartão igual ao da entrada; dados inválidos não enviam', async () => {
+  const cv = await conv(T1, H(12));
+  const { deps } = mkDeps(); const spy = especiais(deps);
+  const loc = await inbox.sendEspecial(T1, cv, { tipo: 'localizacao', dados: { latitude: '-22.97', longitude: '-46.99', nome: 'Academia do Rock', endereco: 'Av. X, 100' } }, deps);
+  assert.equal(loc.ok, true);
+  const rl = (await soRows(T1)).find((r) => r.external_message_id === 'LOC11');
+  assert.equal(rl.body, '📍 Localização: Academia do Rock — Av. X, 100');
+  assert.equal(rl.conteudo.url, 'https://maps.google.com/?q=-22.97,-46.99');
+  const ctt = await inbox.sendEspecial(T1, cv, { tipo: 'contato', dados: { nome: 'Secretaria', telefone: '(19) 99999-0000' } }, deps);
+  assert.equal(ctt.ok, true);
+  assert.equal((await soRows(T1)).find((r) => r.external_message_id === 'CTT11').body, '👤 Contato: Secretaria');
+  const n = spy.chamadas.length;
+  assert.deepEqual(await inbox.sendEspecial(T1, cv, { tipo: 'localizacao', dados: { latitude: 'abc', longitude: 1 } }, deps), { invalido: 'coordenadas_invalidas' });
+  assert.deepEqual(await inbox.sendEspecial(T1, cv, { tipo: 'enquete', dados: { pergunta: 'x', opcoes: ['só uma'] } }, deps), { invalido: 'enquete_invalida' });
+  assert.equal(spy.chamadas.length, n, 'nada enviado');
+});
+
+test('(13) @menção no grupo: manda os números e grava as menções (a tela troca pelo nome)', async () => {
+  const g = (await c.query("INSERT INTO conversations (tenant_id, channel, external_id, conversation_kind) VALUES ($1,'whatsapp','120363000000000013@g.us','GROUP') RETURNING id", [T1])).rows[0].id;
+  const { deps } = mkDeps();
+  let opts = null;
+  deps.evolution.sendText = async (_c, _n, _t, _q, o) => { opts = o; return { key: { id: 'MEN13' } }; };
+  deps.evolution.pickMessageId = () => 'MEN13';
+  const out = await inbox.sendMessage(T1, g, { text: '@5519999990001 bom dia!', sender: 'RECEPCAO', mentions: ['5519999990001', 'lixo', '5519999990001'] }, deps);
+  assert.equal(out.ok, true);
+  assert.deepEqual(opts.mentioned, ['5519999990001']);
+  const row = (await soRows(T1)).find((r) => r.external_message_id === 'MEN13');
+  assert.deepEqual(row.conteudo.contexto.mencoes, ['5519999990001@s.whatsapp.net']);
+  // conversa direta ignora menção
+  const cv = await conv(T1, H(13));
+  await inbox.sendMessage(T1, cv, { text: 'oi', sender: 'RECEPCAO', mentions: ['5519999990001'] }, deps);
+  assert.deepEqual(opts.mentioned, []);
 });

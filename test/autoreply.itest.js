@@ -30,7 +30,7 @@ before(async () => {
       available_instruments text[] NOT NULL DEFAULT '{}');
     CREATE TABLE staff_outbound_samples (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, external_message_id text, source text, sender text, body text, raw jsonb,
-      media_url text, media_type text, media_filename text, reply_to_message_id uuid, reply_to_external_id text, received_at timestamptz DEFAULT now());
+      media_url text, media_type text, media_filename text, reply_to_message_id uuid, reply_to_external_id text, conteudo jsonb, received_at timestamptz DEFAULT now());
     CREATE TABLE leads (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, phone text,
       meta_psid text, status text, created_at timestamptz DEFAULT now());
   `);

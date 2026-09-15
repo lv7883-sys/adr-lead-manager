@@ -672,7 +672,7 @@ async function ensureRenovacaoDraft(client, tenantId, phoneRaw) {
 // mas ancorado em conversation_id (telefone = conversations.external_id) — serve não-lead também.
 // `deps` injeta evolution/creds/registrar p/ o itest (mock da API externa). Retorna um objeto
 // de resultado que o handler traduz em status HTTP (não lança nos casos de negócio).
-async function sendMessage(tenantId, conversationId, { text, replyToMessageId = null, sender = null }, deps = {}) {
+async function sendMessage(tenantId, conversationId, { text, replyToMessageId = null, sender = null, mentions = null }, deps = {}) {
   const evolution = deps.evolution || evolutionDefault;
   const credsForTenant = deps.credsForTenant || outbound.credsForTenant;
   const registrarSaida = deps.registrarSaida || outbound.registrarSaida;
@@ -739,10 +739,14 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
   // persiste reply_to_message_id p/ a citação visual (mesmo comportamento de /leads/:id).
   const citada = await msgCitada(tenantId, replyToMessageId);
   const quoted = citada && citada.wa_key ? { key: citada.wa_key } : undefined;
-  const r = await evolution.sendText({ instance: creds.instance, apikey: creds.apikey }, phone, text, quoted);
+  // @menção (paridade 5): só em grupo e só números de verdade
+  const mencionados = cv.conversation_kind === 'GROUP' && Array.isArray(mentions)
+    ? [...new Set(mentions.map((m) => String(m || '').replace(/\D/g, '')).filter((d) => d.length >= 10 && d.length <= 15))] : [];
+  const r = await evolution.sendText({ instance: creds.instance, apikey: creds.apikey }, phone, text, quoted, { mentioned: mencionados });
   const messageId = evolution.pickMessageId(r);
   await registrarSaida(tenantId, {
     phone, externalMessageId: messageId, sender, body: text,
+    conteudo: mencionados.length ? { tipo: 'texto', contexto: { mencoes: mencionados.map((d) => d + '@s.whatsapp.net') } } : null,
     replyToMessageId: citada ? citada.id : null, replyToExternalId: citada && !citada.id ? citada.ext_id : null,
     isGroup: cv.conversation_kind === 'GROUP',
   });
@@ -751,6 +755,96 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
     'UPDATE conversations SET renovacao_draft = false WHERE id = $1 AND tenant_id = $2 AND renovacao_draft = true',
     [conversationId, tenantId])).catch(() => {});
   return { ok: true, message_id: messageId, quoted: !!quoted };
+}
+
+// Paridade 5 — o menu 📎 do WhatsApp: LOCALIZAÇÃO, CONTATO e ENQUETE. Grava a saída com o mesmo texto legível e o
+// mesmo cartão (conteudo) que a entrada desses tipos usa (waConteudo), e a mensagem devolvida pela Evolution no raw
+// — a enquete precisa do messageSecret dela para somar os votos que chegarem.
+function _validarEspecial(tipo, d = {}) {
+  const s = (v, max = 300) => String(v == null ? '' : v).trim().slice(0, max);
+  if (tipo === 'localizacao') {
+    const lat = Number(d.latitude), lng = Number(d.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return { erro: 'coordenadas_invalidas' };
+    const nome = s(d.nome, 120), endereco = s(d.endereco, 200);
+    const rotulo = [nome, endereco].filter(Boolean).join(' — ');
+    return { args: { latitude: lat, longitude: lng, name: nome, address: endereco },
+      body: '📍 Localização' + (rotulo ? ': ' + rotulo : ''),
+      conteudo: { tipo: 'localizacao', lat, lng, nome, endereco, url: 'https://maps.google.com/?q=' + lat + ',' + lng } };
+  }
+  if (tipo === 'contato') {
+    const contatos = (Array.isArray(d.contatos) ? d.contatos : [d]).map((k) => ({ nome: s(k.nome, 80), telefone: s(k.telefone, 30) }))
+      .filter((k) => k.nome && k.telefone.replace(/\D/g, '').length >= 10).slice(0, 5);
+    if (!contatos.length) return { erro: 'contato_invalido' };
+    return { args: contatos, body: '👤 Contato' + (contatos.length > 1 ? 's' : '') + ': ' + contatos.map((k) => k.nome).join(', '),
+      conteudo: { tipo: 'contato', contatos: contatos.map((k) => ({ nome: k.nome, telefones: [{ numero: k.telefone, wa: k.telefone.replace(/\D/g, '') }] })) } };
+  }
+  if (tipo === 'enquete') {
+    const pergunta = s(d.pergunta, 255);
+    const opcoes = [...new Set((Array.isArray(d.opcoes) ? d.opcoes : []).map((o) => s(o, 100)).filter(Boolean))].slice(0, 12);
+    if (!pergunta || opcoes.length < 2) return { erro: 'enquete_invalida' };
+    const multipla = d.multipla === true || d.multipla === 'true';
+    return { args: { pergunta, opcoes, multipla }, body: '📊 Enquete: ' + pergunta + '\n' + opcoes.map((o) => '• ' + o).join('\n'),
+      conteudo: { tipo: 'enquete', pergunta, opcoes, multipla, votos: {} } };
+  }
+  return { erro: 'tipo_invalido' };
+}
+async function sendEspecial(tenantId, conversationId, { tipo, dados, sender = null }, deps = {}) {
+  const evolution = deps.evolution || evolutionDefault;
+  const credsForTenant = deps.credsForTenant || outbound.credsForTenant;
+  const registrarSaida = deps.registrarSaida || outbound.registrarSaida;
+  const v = _validarEspecial(tipo, dados);
+  if (v.erro) return { invalido: v.erro };
+  const cv = await withTenant(tenantId, (c) =>
+    c.query('SELECT channel, external_id, conversation_kind FROM conversations WHERE id = $1 AND tenant_id = $2',
+      [conversationId, tenantId]).then((r) => r.rows[0] || null));
+  if (!cv) return { notFound: true };
+  if (cv.channel !== 'whatsapp') return { unsupported: cv.channel };
+  const creds = await credsForTenant(tenantId);
+  if (!creds.instance || !creds.apikey) return { reason: 'tenant_sem_evolution' };
+  const st = await evolution.status({ instance: creds.instance, apikey: creds.apikey });
+  if (st.state !== 'open') return { reason: 'instancia=' + st.state };
+  const cr = { instance: creds.instance, apikey: creds.apikey };
+  const r = tipo === 'localizacao' ? await evolution.sendLocation(cr, cv.external_id, v.args)
+    : tipo === 'contato' ? await evolution.sendContact(cr, cv.external_id, v.args)
+      : await evolution.sendPoll(cr, cv.external_id, v.args);
+  const messageId = evolution.pickMessageId(r);
+  await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: v.body,
+    isGroup: cv.conversation_kind === 'GROUP', conteudo: v.conteudo, raw: r && r.key ? { source: 'api', data: r } : null });
+  return { ok: true, message_id: messageId };
+}
+
+// Paridade 5 — participantes do GRUPO para a @menção: número, nome como a recepção vê, admin. Cache de 5 min.
+const _cacheParticipantes = new Map();
+async function participantesDoGrupo(tenantId, conversationId, deps = {}) {
+  const evolution = deps.evolution || evolutionDefault;
+  const credsForTenant = deps.credsForTenant || outbound.credsForTenant;
+  const cv = await withTenant(tenantId, (c) =>
+    c.query('SELECT external_id, conversation_kind FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, tenantId]).then((r) => r.rows[0] || null));
+  if (!cv) return { notFound: true };
+  if (cv.conversation_kind !== 'GROUP') return { participantes: [] };
+  const ck = tenantId + '|' + cv.external_id; const hit = _cacheParticipantes.get(ck);
+  if (hit && Date.now() - hit.em < 300000) return { participantes: hit.lista };
+  const creds = await credsForTenant(tenantId);
+  if (!creds.instance || !creds.apikey) return { reason: 'tenant_sem_evolution' };
+  const brutos = await evolution.findParticipants({ instance: creds.instance, apikey: creds.apikey }, cv.external_id);
+  const waEventos = require('../waEventos');
+  const lista = await withTenant(tenantId, async (c) => {
+    const out = [];
+    for (const p of brutos) {
+      const pnJid = /@s\.whatsapp\.net$/.test(String(p.phoneNumber || '')) ? p.phoneNumber : (/@s\.whatsapp\.net$/.test(String(p.id || '')) ? p.id : null);
+      const numero = pnJid ? pnJid.split('@')[0] : null;
+      if (numero && /@lid$/.test(String(p.id))) {
+        await c.query('INSERT INTO wa_lid (tenant_id, lid, pn) VALUES ($1, $2, $3) ON CONFLICT (tenant_id, lid) DO UPDATE SET pn = COALESCE(wa_lid.pn, EXCLUDED.pn)',
+          [tenantId, String(p.id), pnJid]).catch(() => {});
+      }
+      const nome = await waEventos.nomeDoJid(c, tenantId, p.id, p.name);
+      if (nome === 'Você') continue;   // a própria escola não se menciona
+      out.push({ numero, nome, admin: !!p.admin });
+    }
+    return out.filter((x) => x.numero).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  });
+  _cacheParticipantes.set(ck, { em: Date.now(), lista });
+  return { participantes: lista };
 }
 
 // ADR-042/Meta — oculta/reexibe um comentário de post (IG/FB). commentId = external_message_id
@@ -792,6 +886,39 @@ router.post('/:tenantId/inbox/conversations/:conversationId/comentario/ocultar',
   }
 });
 
+// POST /tenant/:tenantId/inbox/conversations/:conversationId/especial — localização, contato ou enquete (paridade 5).
+router.post('/:tenantId/inbox/conversations/:conversationId/especial', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { conversationId } = req.params;
+  if (!isUuid(conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  try {
+    const out = await sendEspecial(req.tenantId, conversationId, { tipo: String(req.body?.tipo || ''), dados: req.body?.dados || {}, sender: req.tenantRole });
+    if (out.invalido) return res.status(400).json({ error: out.invalido });
+    if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
+    if (out.unsupported) return res.status(422).json({ error: 'canal_nao_suportado', channel: out.unsupported });
+    if (out.reason === 'tenant_sem_evolution') return res.status(400).json({ error: 'tenant_sem_evolution' });
+    if (out.reason && out.reason.startsWith('instancia=')) return res.status(409).json({ error: out.reason });
+    res.json({ ok: true, message_id: out.message_id });
+  } catch (err) {
+    logger.error('tenant.inbox.especial.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
+
+// GET /tenant/:tenantId/inbox/conversations/:conversationId/participantes — para a @menção no grupo (paridade 5).
+router.get('/:tenantId/inbox/conversations/:conversationId/participantes', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  const { conversationId } = req.params;
+  if (!isUuid(conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  try {
+    const out = await participantesDoGrupo(req.tenantId, conversationId);
+    if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
+    if (out.reason) return res.status(400).json({ error: out.reason });
+    res.json({ participantes: out.participantes });
+  } catch (err) {
+    logger.error('tenant.inbox.participantes.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(502).json({ error: 'participantes_falhou', detail: err.message });
+  }
+});
+
 // POST /tenant/:tenantId/inbox/conversations/:conversationId/mensagem — envio humano (E12-06).
 router.post('/:tenantId/inbox/conversations/:conversationId/mensagem', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   const { conversationId } = req.params;
@@ -799,8 +926,9 @@ router.post('/:tenantId/inbox/conversations/:conversationId/mensagem', authentic
   const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
   if (!text) return res.status(400).json({ error: 'empty_text' });
   const replyTo = typeof req.body?.reply_to_message_id === 'string' ? req.body.reply_to_message_id : null;
+  const mentions = Array.isArray(req.body?.mentions) ? req.body.mentions.slice(0, 50) : null;
   try {
-    const out = await sendMessage(req.tenantId, conversationId, { text, replyToMessageId: replyTo, sender: req.tenantRole });
+    const out = await sendMessage(req.tenantId, conversationId, { text, replyToMessageId: replyTo, sender: req.tenantRole, mentions });
     if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
     if (out.unsupported) return res.status(422).json({ error: 'canal_nao_suportado', channel: out.unsupported });
     if (out.reason === 'tenant_sem_evolution') return res.status(400).json({ error: 'tenant_sem_evolution' });
@@ -1571,6 +1699,8 @@ module.exports.mapConversationRow = mapConversationRow;
 module.exports.listConversations = listConversations;
 module.exports.getConversationThread = getConversationThread;
 module.exports.sendMessage = sendMessage;
+module.exports.sendEspecial = sendEspecial;
+module.exports.participantesDoGrupo = participantesDoGrupo;
 module.exports.ensureConversation = ensureConversation;
 module.exports.ensureRenovacaoDraft = ensureRenovacaoDraft;
 module.exports.ocultarComentario = ocultarComentario;

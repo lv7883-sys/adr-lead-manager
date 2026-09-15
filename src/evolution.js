@@ -69,8 +69,10 @@ async function status({ instance, apikey }) {
 
 // `quoted` (opcional) = citação do WhatsApp: { key: { id, remoteJid, fromMe, ... } }.
 // Incluído no corpo SÓ quando presente — sem `quoted`, o comportamento é idêntico ao anterior.
-async function sendText({ instance, apikey }, number, text, quoted) {
-  const corpo = (num) => ({ number: num, text, ...(quoted ? { quoted } : {}) });
+async function sendText({ instance, apikey }, number, text, quoted, opts = {}) {
+  // paridade 5: `opts.mentioned` = números mencionados (@ no grupo), como no WhatsApp
+  const mentioned = Array.isArray(opts.mentioned) && opts.mentioned.length ? { mentioned: opts.mentioned } : {};
+  const corpo = (num) => ({ number: num, text, ...(quoted ? { quoted } : {}), ...mentioned });
   // ADR-042 B3 — GRUPO/comunidade: o jid @g.us vai INTEIRO no campo `number` (sem strip de
   // dígitos nem toggle-9, que valem só p/ telefone individual). A Evolution roteia pelo jid.
   if (/@g\.us$/i.test(String(number || ''))) {
@@ -258,6 +260,30 @@ async function findMessages({ instance, apikey }, remoteJid, opts = {}) {
   return { records, page: currentPage, pages, total, pageSize };
 }
 
+// Paridade 5 — enviar localização, contato e enquete (o menu 📎 do WhatsApp). number = dígitos ou jid @g.us.
+function _destino(number) { return /@g.us$/i.test(String(number || '')) ? String(number) : String(number || '').replace(/D+/g, ''); }
+async function _enviarEspecial({ instance, apikey }, rota, number, corpo) {
+  const n = _destino(number);
+  try {
+    return await req('POST', `/message/${rota}/${encodeURIComponent(instance)}`, apikey, { number: n, ...corpo });
+  } catch (e) {
+    const alt = !/@g.us$/.test(n) && e && e.status === 400 ? _toggle9BR(n) : null;
+    if (alt && alt !== n) return req('POST', `/message/${rota}/${encodeURIComponent(instance)}`, apikey, { number: alt, ...corpo });
+    throw e;
+  }
+}
+const sendLocation = (creds, number, { latitude, longitude, name, address }) =>
+  _enviarEspecial(creds, 'sendLocation', number, { latitude, longitude, name: name || undefined, address: address || undefined });
+const sendContact = (creds, number, contatos) =>
+  _enviarEspecial(creds, 'sendContact', number, { contact: contatos.map((k) => ({ fullName: k.nome, phoneNumber: k.telefone, wuid: String(k.telefone || '').replace(/D/g, '') })) });
+const sendPoll = (creds, number, { pergunta, opcoes, multipla }) =>
+  _enviarEspecial(creds, 'sendPoll', number, { name: pergunta, values: opcoes, selectableCount: multipla ? 0 : 1 });
+// participantes do grupo (id, phoneNumber, admin, name) — p/ a @menção
+async function findParticipants({ instance, apikey }, groupJid) {
+  const d = await req('GET', `/group/participants/${encodeURIComponent(instance)}?groupJid=${encodeURIComponent(groupJid)}`, apikey);
+  return (d && Array.isArray(d.participants)) ? d.participants : [];
+}
+
 // Paridade 4 — leitura vai para o WhatsApp. readMessages = [{ remoteJid (número ou grupo), fromMe:false, id }].
 // A Evolution descarta jid @lid aqui (só aceita número/grupo) — o chamador converte.
 async function markMessageAsRead({ instance, apikey }, readMessages) {
@@ -269,4 +295,4 @@ async function markChatUnread({ instance, apikey }, body) {
   return req('POST', `/chat/markChatUnread/${encodeURIComponent(instance)}`, apikey, body);
 }
 
-module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, findMessages, markMessageAsRead, markChatUnread, _toggle9BR };
+module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, findMessages, markMessageAsRead, markChatUnread, sendLocation, sendContact, sendPoll, findParticipants, _toggle9BR };
