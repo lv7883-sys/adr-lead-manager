@@ -284,6 +284,19 @@ async function findParticipants({ instance, apikey }, groupJid) {
   return (d && Array.isArray(d.participants)) ? d.participants : [];
 }
 
+// Mensagens com CAIXINHA do WhatsApp (nativeFlow): Pix (copiar chave), botão de link, copiar código, ligar e respostas
+// rápidas. body = { title, description, footer, buttons: [{ type: 'pix'|'url'|'copy'|'call'|'reply', ... }] }.
+async function sendButtons({ instance, apikey }, number, body) {
+  const n = /@g\.us$/i.test(String(number || '')) ? String(number) : String(number || '').replace(/\D+/g, '');
+  try {
+    return await req('POST', '/message/sendButtons/' + encodeURIComponent(instance), apikey, { number: n, ...body });
+  } catch (e) {
+    const alt = !/@g\.us$/.test(n) && e && e.status === 400 ? _toggle9BR(n) : null;
+    if (alt && alt !== n) return req('POST', '/message/sendButtons/' + encodeURIComponent(instance), apikey, { number: alt, ...body });
+    throw e;
+  }
+}
+
 // Arquivar/desarquivar a conversa no celular e no Web (mesmo formato do markChatUnread + archive).
 async function archiveChat({ instance, apikey }, body) {
   return req('POST', `/chat/archiveChat/${encodeURIComponent(instance)}`, apikey, body);
@@ -300,4 +313,4 @@ async function markChatUnread({ instance, apikey }, body) {
   return req('POST', `/chat/markChatUnread/${encodeURIComponent(instance)}`, apikey, body);
 }
 
-module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, findMessages, markMessageAsRead, markChatUnread, sendLocation, sendContact, sendPoll, findParticipants, archiveChat, _toggle9BR };
+module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, findMessages, markMessageAsRead, markChatUnread, sendLocation, sendContact, sendPoll, findParticipants, archiveChat, sendButtons, _toggle9BR };

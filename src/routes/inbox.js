@@ -25,7 +25,8 @@ const { isUuid } = require('../validation');
 const { terminalSql, statusVivoSql } = require('../lifecycle');
 const { fetchTimeline } = require('../timeline');
 const { naoEhReacaoSql } = require('../reacao');
-const leituraWhatsapp = require('../leituraWhatsapp');   // paridade 4: leitura/não lida vão para o WhatsApp
+const leituraWhatsapp = require('../leituraWhatsapp');
+const { comEsquema } = require('../linkPreview');   // link vira caixinha no WhatsApp   // paridade 4: leitura/não lida vão para o WhatsApp
 const outbound = require('../outbound');
 const evolutionDefault = require('../evolution');
 const metaDefault = require('../meta');
@@ -762,6 +763,8 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
   // @menção (paridade 5): só em grupo e só números de verdade
   const mencionados = cv.conversation_kind === 'GROUP' && Array.isArray(mentions)
     ? [...new Set(mentions.map((m) => String(m || '').replace(/\D/g, '')).filter((d) => d.length >= 10 && d.length <= 15))] : [];
+  // link vira caixinha no WhatsApp: o 1º link sem esquema ganha https:// (a prévia só sai com https)
+  text = comEsquema(text);
   const r = await evolution.sendText({ instance: creds.instance, apikey: creds.apikey }, phone, text, quoted, { mentioned: mencionados });
   const messageId = evolution.pickMessageId(r);
   await registrarSaida(tenantId, {
@@ -806,6 +809,33 @@ function _validarEspecial(tipo, d = {}) {
     return { args: { pergunta, opcoes, multipla }, body: '📊 Enquete: ' + pergunta + '\n' + opcoes.map((o) => '• ' + o).join('\n'),
       conteudo: { tipo: 'enquete', pergunta, opcoes, multipla, votos: {} } };
   }
+  if (tipo === 'pix') {
+    const TIPOS = { phone: 'Telefone', email: 'E-mail', cpf: 'CPF', cnpj: 'CNPJ', random: 'Chave aleatória' };
+    const nome = s(d.nome, 100), chave = s(d.chave, 120), tipoChave = String(d.tipo_chave || '');
+    if (!nome || !chave || !TIPOS[tipoChave]) return { erro: 'pix_invalido' };
+    return { args: { buttons: [{ type: 'pix', currency: 'BRL', name: nome, keyType: tipoChave, key: chave }] },
+      body: '💠 Pix · ' + nome + '\nChave (' + TIPOS[tipoChave] + '): ' + chave,
+      conteudo: { tipo: 'pix', nome, chave, tipo_chave: tipoChave, rotulo_tipo: TIPOS[tipoChave] }, evo: 'botoes' };
+  }
+  if (tipo === 'botoes') {
+    const titulo = s(d.titulo, 60), descricao = s(d.descricao, 1000), rodape = s(d.rodape, 60);
+    const bts = (Array.isArray(d.botoes) ? d.botoes : []).slice(0, 3).map((b) => ({ tipo: String(b.tipo || ''), rotulo: s(b.rotulo, 25), valor: s(b.valor, 500) }));
+    if (!titulo || !bts.length || bts.some((b) => !b.rotulo)) return { erro: 'botoes_invalidos' };
+    const temResposta = bts.some((b) => b.tipo === 'resposta');
+    if (temResposta && bts.some((b) => b.tipo !== 'resposta')) return { erro: 'botoes_misturados' };
+    const buttons = [];
+    for (const [i, b] of bts.entries()) {
+      if (b.tipo === 'url') { if (!/^https:\/\/\S+\.\S+/i.test(b.valor)) return { erro: 'link_invalido' }; buttons.push({ type: 'url', displayText: b.rotulo, url: b.valor }); }
+      else if (b.tipo === 'copiar') { if (!b.valor) return { erro: 'codigo_vazio' }; buttons.push({ type: 'copy', displayText: b.rotulo, copyCode: b.valor }); }
+      else if (b.tipo === 'ligar') { if (b.valor.replace(/\D/g, '').length < 10) return { erro: 'telefone_invalido' }; const dg = b.valor.replace(/\D/g, ''); buttons.push({ type: 'call', displayText: b.rotulo, phoneNumber: '+' + (dg.length <= 11 ? '55' + dg : dg) }); }
+      else if (b.tipo === 'resposta') buttons.push({ type: 'reply', displayText: b.rotulo, id: 'r' + (i + 1) });
+      else return { erro: 'botoes_invalidos' };
+    }
+    const ICONE = { url: '🔗', copiar: '📋', ligar: '📞', resposta: '↩️' };
+    return { args: { title: titulo, description: descricao || undefined, footer: rodape || undefined, buttons },
+      body: '*' + titulo + '*' + (descricao ? '\n' + descricao : '') + '\n' + bts.map((b) => '[' + ICONE[b.tipo] + ' ' + b.rotulo + ']').join(' '),
+      conteudo: { tipo: 'botoes', titulo, texto: descricao, rodape, botoes: bts.map((b) => ICONE[b.tipo] + ' ' + b.rotulo), acoes: bts }, evo: 'botoes' };
+  }
   return { erro: 'tipo_invalido' };
 }
 async function sendEspecial(tenantId, conversationId, { tipo, dados, sender = null }, deps = {}) {
@@ -824,9 +854,10 @@ async function sendEspecial(tenantId, conversationId, { tipo, dados, sender = nu
   const st = await evolution.status({ instance: creds.instance, apikey: creds.apikey });
   if (st.state !== 'open') return { reason: 'instancia=' + st.state };
   const cr = { instance: creds.instance, apikey: creds.apikey };
-  const r = tipo === 'localizacao' ? await evolution.sendLocation(cr, cv.external_id, v.args)
-    : tipo === 'contato' ? await evolution.sendContact(cr, cv.external_id, v.args)
-      : await evolution.sendPoll(cr, cv.external_id, v.args);
+  const r = v.evo === 'botoes' ? await evolution.sendButtons(cr, cv.external_id, v.args)
+    : tipo === 'localizacao' ? await evolution.sendLocation(cr, cv.external_id, v.args)
+      : tipo === 'contato' ? await evolution.sendContact(cr, cv.external_id, v.args)
+        : await evolution.sendPoll(cr, cv.external_id, v.args);
   const messageId = evolution.pickMessageId(r);
   await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: v.body,
     isGroup: cv.conversation_kind === 'GROUP', conteudo: v.conteudo, raw: r && r.key ? { source: 'api', data: r } : null });

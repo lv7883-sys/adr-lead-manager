@@ -239,3 +239,37 @@ test('(13) @menção no grupo: manda os números e grava as menções (a tela tr
   await inbox.sendMessage(T1, cv, { text: 'oi', sender: 'RECEPCAO', mentions: ['5519999990001'] }, deps);
   assert.deepEqual(opts.mentioned, []);
 });
+
+// ---- caixinhas do WhatsApp: Pix, botões (link/copiar/ligar/resposta) e link com prévia -------------------------
+test('(14) Pix e botões: payload da Evolution, texto e cartão da saída; validação', async () => {
+  const cv = await conv(T1, H(14));
+  const { deps } = mkDeps();
+  const chamadas = [];
+  deps.evolution.sendButtons = async (_c, n, body) => { chamadas.push(body); return { key: { id: 'BT' + chamadas.length } }; };
+  deps.evolution.pickMessageId = (r) => r && r.key && r.key.id;
+  const pix = await inbox.sendEspecial(T1, cv, { tipo: 'pix', dados: { nome: 'Academia do Rock Valinhos', chave: '12.345.678/0001-90', tipo_chave: 'cnpj' } }, deps);
+  assert.equal(pix.ok, true);
+  assert.deepEqual(chamadas[0].buttons, [{ type: 'pix', currency: 'BRL', name: 'Academia do Rock Valinhos', keyType: 'cnpj', key: '12.345.678/0001-90' }]);
+  const rp = (await soRows(T1)).find((r) => r.external_message_id === 'BT1');
+  assert.equal(rp.conteudo.tipo, 'pix');
+  assert.match(rp.body, /Chave \(CNPJ\): 12\.345\.678\/0001-90/);
+  const bt = await inbox.sendEspecial(T1, cv, { tipo: 'botoes', dados: { titulo: 'Mensalidade de outubro', descricao: 'Vence dia 10', botoes: [
+    { tipo: 'url', rotulo: 'Pagar agora', valor: 'https://mpago.la/abc' }, { tipo: 'copiar', rotulo: 'Copiar código', valor: '00020126...' }, { tipo: 'ligar', rotulo: 'Ligar', valor: '(19) 3871-0000' }] } }, deps);
+  assert.equal(bt.ok, true);
+  assert.deepEqual(chamadas[1].buttons.map((b) => b.type), ['url', 'copy', 'call']);
+  assert.equal(chamadas[1].buttons[2].phoneNumber, '+551938710000');
+  assert.deepEqual(await inbox.sendEspecial(T1, cv, { tipo: 'botoes', dados: { titulo: 'x', botoes: [{ tipo: 'url', rotulo: 'a', valor: 'http://x.com' }] } }, deps), { invalido: 'link_invalido' });
+  assert.deepEqual(await inbox.sendEspecial(T1, cv, { tipo: 'botoes', dados: { titulo: 'x', botoes: [{ tipo: 'resposta', rotulo: 'Sim' }, { tipo: 'url', rotulo: 'a', valor: 'https://x.com' }] } }, deps), { invalido: 'botoes_misturados' });
+  assert.deepEqual(await inbox.sendEspecial(T1, cv, { tipo: 'pix', dados: { nome: 'x', chave: 'y', tipo_chave: 'banco' } }, deps), { invalido: 'pix_invalido' });
+  assert.equal(chamadas.length, 2, 'inválidos não enviam');
+});
+
+test('(15) texto com link sem https: ganha https:// para virar caixinha no WhatsApp', async () => {
+  const cv = await conv(T1, H(15));
+  const { deps } = mkDeps();
+  let enviado = null;
+  deps.evolution.sendText = async (_c, _n, t) => { enviado = t; return { key: { id: 'LNK15' } }; };
+  deps.evolution.pickMessageId = () => 'LNK15';
+  await inbox.sendMessage(T1, cv, { text: 'Segue o link: www.mercadopago.com.br/pagar', sender: 'RECEPCAO' }, deps);
+  assert.equal(enviado, 'Segue o link: https://www.mercadopago.com.br/pagar');
+});
