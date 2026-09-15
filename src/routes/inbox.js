@@ -90,7 +90,7 @@ function foldAcentoSql(expr) {
 
 // Monta { sql, params } da listagem (E12-03). `cursor` = objeto decodificado {ts,id} | null.
 // FONTE ÚNICA da query — usada pelo handler (sob withTenant/RLS) e pelo itest (como postgres).
-function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = null, limit = 30, cursor = null } = {}) {
+function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = null, limit = 30, cursor = null, grupos = null } = {}) {
   const v = VIEWS.has(view) ? view : 'todas';
   const lim = Math.min(Math.max(parseInt(limit, 10) || 30, 1), 50);
 
@@ -109,18 +109,24 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     let pDig = null;
     if (dig) { params.push(`%${dig}%`); pDig = params.length; }   // tem dígito → nome OU telefone
     // sem dígito → só nome (senão '%%' casaria TUDO). Dobra de acento nos DOIS lados: "monica" acha "Mônica".
-    const cond = (alvoNome, alvoIdent) => (dig
+    const base = (alvoNome, alvoIdent) => (dig
       ? `(${foldAcentoSql(alvoNome)} LIKE ${foldAcentoSql('$' + pNome)} OR (${alvoIdent} <> '' AND ${alvoIdent} LIKE $${pDig}))`
       : `${foldAcentoSql(alvoNome)} LIKE ${foldAcentoSql('$' + pNome)}`);
+    // GRUPO: o nome do grupo ("ADR Professores") só existe na Evolution — o dashboard manda os ids dos grupos cujo
+    // nome casa com a busca. Sem isso o grupo "se chamava" quem escreveu por último e a busca não o achava.
+    const gr = Array.isArray(grupos) ? grupos.map(String).filter((g) => /@g\.us$/.test(g)).slice(0, 200) : [];
+    let pGr = null;
+    if (gr.length) { params.push(gr); pGr = params.length; }
+    const cond = (alvoNome, alvoIdent, alvoExt) => (pGr ? `(${base(alvoNome, alvoIdent)} OR ${alvoExt} = ANY($${pGr}::text[]))` : base(alvoNome, alvoIdent));
     if (cortaAgora) {
       // O MESMO nome do `projected` (mesma ordem do COALESCE) — se um mudar, o outro tem de mudar.
       condBusca = cond(`COALESCE(
              (SELECT sm.sender FROM messages sm
                WHERE sm.conversation_id = cv.id AND sm.role = 'USER'
                  AND coalesce(sm.sender, '') <> '' ORDER BY sm.received_at DESC LIMIT 1),
-             pe.display_name, lk.name, cv.external_id)`, IDENT_CONV);
+             pe.display_name, lk.name, cv.external_id)`, IDENT_CONV, 'cv.external_id');
     } else {
-      extra.push(cond('nome', 'ident'));
+      extra.push(cond('nome', 'ident', 'external_id'));
     }
   }
   // Renovações (ADR-049 rev.): o que está DE FATO em jogo de renovação, não "vence algum dia".
@@ -1033,12 +1039,13 @@ router.get('/:tenantId/inbox/conversations', authenticate, requireTenantAccess(R
   const view = VIEWS.has(req.query.view) ? req.query.view : 'todas';
   const fonte = typeof req.query.fonte === 'string' && req.query.fonte.trim() ? req.query.fonte.trim() : null;
   const q = typeof req.query.q === 'string' && req.query.q.trim() ? req.query.q.trim() : null;
+  const grupos = typeof req.query.grupos === 'string' && req.query.grupos ? req.query.grupos.split(',') : null;
   const cursor = req.query.cursor ? decodeCursor(req.query.cursor) : null;
   if (req.query.cursor && !cursor) return res.status(400).json({ error: 'invalid_cursor' });
 
   try {
     const { items, next_cursor } = await withTenant(req.tenantId, (c) =>
-      listConversations(c, req.tenantId, { view, fonte, q, limit: req.query.limit, cursor }));
+      listConversations(c, req.tenantId, { view, fonte, q, grupos, limit: req.query.limit, cursor }));
     res.json({ tenant_id: req.tenantId, view, count: items.length, items, next_cursor });
   } catch (err) {
     logger.error('tenant.inbox.conversations.error', { tenant_id: req.tenantId, error: err.message });

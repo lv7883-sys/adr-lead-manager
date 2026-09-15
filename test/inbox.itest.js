@@ -319,6 +319,11 @@ test('(5) filtros view / fonte / q', async () => {
   assert.ok(!byExt((await list(tenant, { q: 'Bruno', limit: 50 })).items, H(401)), 'busca por nome EXCLUI quem não casa (não é %%)');
   assert.ok(byExt((await list(tenant, { q: '19000000400', limit: 50 })).items, H(400)), 'busca por dígitos');
   assert.ok(byExt((await list(tenant, { fonte: 'whatsapp', limit: 50 })).items, H(400)), 'filtro fonte');
+  // grupo: o nome vem da Evolution — o dashboard manda os ids dos grupos que casam com a busca
+  const cGrupo = await conv(tenant, '120363000000000500@g.us'); await msg(cGrupo);
+  assert.ok(byExt((await list(tenant, { q: 'professores', grupos: ['120363000000000500@g.us'], limit: 50 })).items, '120363000000000500@g.us'), 'busca acha o grupo pelo nome');
+  assert.ok(!byExt((await list(tenant, { q: 'professores', limit: 50 })).items, '120363000000000500@g.us'), 'sem a lista, não casa');
+  assert.ok(byExt((await list(tenant, { q: 'professores', grupos: ['120363000000000500@g.us'], fonte: 'whatsapp', limit: 50 })).items, '120363000000000500@g.us'), 'também fora do caminho rápido');
 });
 
 test('(6) keyset pagination sem sobreposição', async () => {
