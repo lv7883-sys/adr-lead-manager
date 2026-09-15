@@ -16,7 +16,13 @@ const PREFIXO_REACAO = '[reação]';
 // Texto da bolha de uma reação (ADR-031: reação não vira bolha vazia).
 const textoReacao = (emoji) => `${PREFIXO_REACAO} ${emoji}`;
 
-// Predicado SQL: esta mensagem é um TURNO de verdade (não é reação). `a` = alias de `messages`.
-const naoEhReacaoSql = (a = 'm') => `coalesce(${a}.body, '') NOT LIKE '${PREFIXO_REACAO}%'`;
+// Aviso de SISTEMA do WhatsApp num grupo ("Fulano entrou", "X mudou o nome do grupo"): aparece no meio da
+// conversa, mas também não é turno nem conta como não lida (paridade 6). Marca = separador invisível U+2063
+// no início do texto: não aparece na tela nem na prévia, e dispensa coluna nova em todos os leitores.
+const MARCA_SISTEMA = '⁣';
+const textoSistema = (t) => `${MARCA_SISTEMA}${t}`;
 
-module.exports = { PREFIXO_REACAO, textoReacao, naoEhReacaoSql };
+// Predicado SQL: esta mensagem é um TURNO de verdade (não é reação nem aviso de sistema). `a` = alias de `messages`.
+const naoEhReacaoSql = (a = 'm') => `coalesce(${a}.body, '') NOT LIKE '${PREFIXO_REACAO}%' AND coalesce(${a}.body, '') NOT LIKE '${MARCA_SISTEMA}%'`;
+
+module.exports = { PREFIXO_REACAO, textoReacao, MARCA_SISTEMA, textoSistema, naoEhReacaoSql };
