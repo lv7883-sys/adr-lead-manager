@@ -41,12 +41,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     };
 
     const vazias = await withTenant(TENANT_ID, async (c) => (await c.query(`
-      SELECT 'staff_outbound_samples' AS tabela, id, external_message_id FROM staff_outbound_samples
+      SELECT 'staff_outbound_samples' AS tabela, id, external_message_id, received_at FROM staff_outbound_samples
        WHERE tenant_id = $1 AND coalesce(trim(body), '') = '' AND external_message_id IS NOT NULL
       UNION ALL
-      SELECT 'messages', id, external_message_id FROM messages
+      SELECT 'messages', id, external_message_id, received_at FROM messages
        WHERE tenant_id = $1 AND coalesce(trim(body), '') = '' AND external_message_id IS NOT NULL
-      ORDER BY 1`, [TENANT_ID])).rows);
+      ORDER BY received_at`, [TENANT_ID])).rows);
     console.log(`${APPLY ? '=== --apply ===' : '=== ENSAIO (amostra de 25, nada muda) ==='} vazias: ${vazias.length}`);
 
     const lote = APPLY ? vazias : vazias.slice(0, 25);

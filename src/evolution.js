@@ -258,4 +258,15 @@ async function findMessages({ instance, apikey }, remoteJid, opts = {}) {
   return { records, page: currentPage, pages, total, pageSize };
 }
 
-module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, findMessages, _toggle9BR };
+// Paridade 4 — leitura vai para o WhatsApp. readMessages = [{ remoteJid (número ou grupo), fromMe:false, id }].
+// A Evolution descarta jid @lid aqui (só aceita número/grupo) — o chamador converte.
+async function markMessageAsRead({ instance, apikey }, readMessages) {
+  return req('POST', `/chat/markMessageAsRead/${encodeURIComponent(instance)}`, apikey, { readMessages });
+}
+
+// Paridade 4 — "marcar como não lida" vale no celular/Web. body = { lastMessage: { key, messageTimestamp }, chat }.
+async function markChatUnread({ instance, apikey }, body) {
+  return req('POST', `/chat/markChatUnread/${encodeURIComponent(instance)}`, apikey, body);
+}
+
+module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, findMessages, markMessageAsRead, markChatUnread, _toggle9BR };

@@ -25,6 +25,7 @@ const { isUuid } = require('../validation');
 const { terminalSql, statusVivoSql } = require('../lifecycle');
 const { fetchTimeline } = require('../timeline');
 const { naoEhReacaoSql } = require('../reacao');
+const leituraWhatsapp = require('../leituraWhatsapp');   // paridade 4: leitura/não lida vão para o WhatsApp
 const outbound = require('../outbound');
 const evolutionDefault = require('../evolution');
 const metaDefault = require('../meta');
@@ -955,9 +956,16 @@ router.post('/:tenantId/inbox/conversations/:conversationId/marcar-lido', authen
     upTo = d.toISOString();
   }
   try {
-    const out = await withTenant(req.tenantId, (c) => markRead(c, req.tenantId, conversationId, upTo));
+    let anterior = null;
+    const out = await withTenant(req.tenantId, async (c) => {
+      const a = (await c.query('SELECT last_read_at FROM conversations WHERE id = $1 AND tenant_id = $2', [conversationId, req.tenantId])).rows[0];
+      anterior = a ? a.last_read_at : null;
+      return markRead(c, req.tenantId, conversationId, upTo);
+    });
     if (!out) return res.status(404).json({ error: 'conversation_not_found' });
     res.json({ ok: true, ...out });
+    // Paridade 4: como no WhatsApp Web, abrir a conversa lê também no celular (e dá o tique azul ao cliente).
+    leituraWhatsapp.lerNoWhatsapp(req.tenantId, conversationId, anterior, out.last_read_at).catch(() => {});
   } catch (err) {
     logger.error('tenant.inbox.marcar_lido.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
@@ -973,6 +981,8 @@ router.post('/:tenantId/inbox/conversations/:conversationId/marcar-nao-lido', au
     const out = await withTenant(req.tenantId, (c) => markUnread(c, req.tenantId, conversationId));
     if (!out) return res.status(404).json({ error: 'conversation_not_found' });
     res.json(out);
+    // Paridade 4: "marcar como não lida" vale também no celular e no Web.
+    leituraWhatsapp.marcarNaoLidaNoWhatsapp(req.tenantId, conversationId).catch(() => {});
   } catch (err) {
     logger.error('tenant.inbox.marcar_nao_lido.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
