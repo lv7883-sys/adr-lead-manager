@@ -1078,6 +1078,46 @@ router.get('/:tenantId/inbox/conversations', authenticate, requireTenantAccess(R
   }
 });
 
+// GET /tenant/:tenantId/inbox/contatos-whatsapp — TODOS os contatos de WhatsApp da Caixa de Entrada (conversas diretas),
+// para o seletor do Disparo. Antes o seletor usava a 1ª página da lista (50). Nome = mesma pilha da lista (quem
+// escreveu > cadastro > lead). Uma consulta só, por CTEs (sem LATERAL sob RLS): ~80 ms para ~2.000 conversas.
+router.get('/:tenantId/inbox/contatos-whatsapp', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const contatos = await withTenant(req.tenantId, async (c) => (await c.query(
+      `WITH ult AS (
+         SELECT DISTINCT ON (m.conversation_id) m.conversation_id, m.sender
+           FROM messages m
+          WHERE m.tenant_id = $1 AND m.role = 'USER' AND coalesce(m.sender, '') <> ''
+          ORDER BY m.conversation_id, m.received_at DESC
+       ), lk AS (
+         SELECT DISTINCT ON (${IDENT_LEAD}) ${IDENT_LEAD} AS ident, l.name, l.status
+           FROM leads l WHERE l.tenant_id = $1 AND ${IDENT_LEAD} <> ''
+          ORDER BY ${IDENT_LEAD}, l.created_at ASC
+       ), pe AS (
+         SELECT cp.br_key AS rk, min(p.display_name) AS nome
+           FROM contact_point cp JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
+          WHERE cp.tenant_id = $1 AND cp.kind = 'phone' AND cp.br_key <> '' AND coalesce(p.display_name, '') <> ''
+          GROUP BY 1
+       )
+       SELECT ${IDENT_CONV} AS numero, COALESCE(u.sender, pe.nome, lk.name) AS nome,
+              (lk.ident IS NOT NULL AND lk.status IS DISTINCT FROM 'NOT_LEAD' AND lk.status IS DISTINCT FROM 'REVIEW_QUEUE') AS is_lead,
+              cv.last_activity_at AS ultima_atividade
+         FROM conversations cv
+         LEFT JOIN ult u ON u.conversation_id = cv.id
+         LEFT JOIN lk ON lk.ident = ${IDENT_CONV}
+         LEFT JOIN pe ON pe.rk = cv.br_key
+        WHERE cv.tenant_id = $1 AND cv.channel = 'whatsapp' AND cv.conversation_kind IS DISTINCT FROM 'GROUP'
+          AND length(${IDENT_CONV}) BETWEEN 10 AND 15
+        ORDER BY cv.last_activity_at DESC NULLS LAST`, [req.tenantId])).rows);
+    // o mesmo número pode ter 2 conversas (formatos antigos): fica a mais recente
+    const vistos = new Set();
+    res.json({ contatos: contatos.filter((x) => { const k = x.numero.slice(-10); if (vistos.has(k)) return false; vistos.add(k); return true; }) });
+  } catch (err) {
+    logger.error('tenant.inbox.contatos_whatsapp.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // GET /tenant/:tenantId/inbox/nao-lidas — total de mensagens não-lidas (soma), p/ o badge do nav.
 router.get('/:tenantId/inbox/nao-lidas', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {
