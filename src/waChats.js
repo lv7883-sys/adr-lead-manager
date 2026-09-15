@@ -90,7 +90,7 @@ async function aplicarChatsUpdate(tenantId, data, deps = {}) {
 function tratarEvento(tenantId, body, log) {
   if (String(body && body.event || '').toLowerCase() !== 'chats.update') return false;
   aplicarChatsUpdate(tenantId, body.data)
-    .then((r) => { const uteis = r.filter((x) => x.acoes && x.acoes.length); if (uteis.length) (log || logger).info('wa_chats.update', { aplicados: uteis }); })
+    .then((r) => { if (r.length) (log || logger).info('wa_chats.update', { itens: r }); })   // só itens com estado (lida/não lida/arquivar/fixar/silenciar)
     .catch((e) => (log || logger).warn('wa_chats.falhou', { tenant_id: tenantId, error: e.message }));
   return true;
 }
