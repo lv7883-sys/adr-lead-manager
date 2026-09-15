@@ -910,6 +910,31 @@ router.post('/:tenantId/inbox/conversations/:conversationId/especial', authentic
   }
 });
 
+// POST /tenant/:tenantId/leads/:leadId/especial — localização, contato ou enquete a partir da tela do LEAD: acha (ou abre)
+// a conversa do telefone do lead e usa o mesmo envio da Caixa de Entrada.
+router.post('/:tenantId/leads/:leadId/especial', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { leadId } = req.params;
+  if (!isUuid(leadId)) return res.status(400).json({ error: 'invalid_lead_id' });
+  try {
+    const conv = await withTenant(req.tenantId, async (c) => {
+      const l = (await c.query('SELECT phone FROM leads WHERE id = $1 AND tenant_id = $2', [leadId, req.tenantId])).rows[0];
+      if (!l || String(l.phone || '').replace(/\D/g, '').length < 10) return null;
+      return ensureConversation(c, req.tenantId, l.phone);
+    });
+    if (!conv) return res.status(404).json({ error: 'lead_sem_whatsapp' });
+    const out = await sendEspecial(req.tenantId, conv.conversation_id, { tipo: String(req.body?.tipo || ''), dados: req.body?.dados || {}, sender: req.tenantRole });
+    if (out.invalido) return res.status(400).json({ error: out.invalido });
+    if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
+    if (out.unsupported) return res.status(422).json({ error: 'canal_nao_suportado', channel: out.unsupported });
+    if (out.reason === 'tenant_sem_evolution') return res.status(400).json({ error: 'tenant_sem_evolution' });
+    if (out.reason && out.reason.startsWith('instancia=')) return res.status(409).json({ error: out.reason });
+    res.json({ ok: true, message_id: out.message_id });
+  } catch (err) {
+    logger.error('tenant.leads.especial.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(502).json({ error: 'send_failed', detail: err.message });
+  }
+});
+
 // GET /tenant/:tenantId/inbox/conversations/:conversationId/participantes — para a @menção no grupo (paridade 5).
 router.get('/:tenantId/inbox/conversations/:conversationId/participantes', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   const { conversationId } = req.params;
