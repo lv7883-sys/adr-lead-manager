@@ -23,12 +23,12 @@ before(async () => {
     CREATE TABLE staff_outbound_samples (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text, external_id text,
       external_message_id text, source text, sender text, body text, raw jsonb,
-      media_url text, media_type text, media_filename text, reply_to_message_id uuid,
-      is_group boolean NOT NULL DEFAULT false);   -- migr. 103
+      media_url text, media_type text, media_filename text, reply_to_message_id uuid, reply_to_external_id text,
+      is_group boolean NOT NULL DEFAULT false, deleted_at timestamptz);   -- migr. 103
     CREATE UNIQUE INDEX so_uq ON staff_outbound_samples (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL;
     CREATE TABLE messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
-      direction text, role text, external_message_id text, sender text, body text, raw jsonb,
+      direction text, role text, external_message_id text, sender text, body text, raw jsonb, media_type text,
       received_at timestamptz NOT NULL DEFAULT now());
   `);
 });
@@ -161,4 +161,22 @@ test('(9) ocultar em canal não-comentário -> unsupported, sem chamar Graph', a
   const { deps, spy } = mkDeps();
   const out = await inbox.ocultarComentario(T1, cv, 'X', true, deps);
   assert.deepEqual(out, { unsupported: 'whatsapp' }); assert.equal(spy.hides, 0);
+});
+
+test('(10) responder a mensagem NOSSA (recepção): cita com a key fromMe e grava reply_to_external_id', async () => {
+  const cv = await conv(T1, H(10));
+  const nossa = (await c.query(`INSERT INTO staff_outbound_samples (tenant_id, channel, external_id, external_message_id, source, body)
+     VALUES ($1,'whatsapp',$2,'NOSSA1','api','Aula amanhã às 17h') RETURNING id`, [T1, H(10)])).rows[0].id;
+  const { deps } = mkDeps();
+  let quotedVisto = null;
+  deps.evolution.sendText = async (_c, _n, _t, quoted) => { quotedVisto = quoted; return { key: { id: 'MSGID10' } }; };
+  deps.evolution.pickMessageId = () => 'MSGID10';
+  const out = await inbox.sendMessage(T1, cv, { text: 'confirmando!', sender: 'RECEPCAO', replyToMessageId: nossa }, deps);
+  assert.equal(out.ok, true);
+  assert.equal(out.quoted, true);
+  assert.equal(quotedVisto.key.id, 'NOSSA1');
+  assert.equal(quotedVisto.key.fromMe, true);
+  const row = (await soRows(T1)).find((r) => r.external_message_id === 'MSGID10');
+  assert.equal(row.reply_to_message_id, null);
+  assert.equal(row.reply_to_external_id, 'NOSSA1');
 });

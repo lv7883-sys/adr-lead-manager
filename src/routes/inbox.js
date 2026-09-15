@@ -743,7 +743,8 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
   const messageId = evolution.pickMessageId(r);
   await registrarSaida(tenantId, {
     phone, externalMessageId: messageId, sender, body: text,
-    replyToMessageId: citada ? citada.id : null, isGroup: cv.conversation_kind === 'GROUP',
+    replyToMessageId: citada ? citada.id : null, replyToExternalId: citada && !citada.id ? citada.ext_id : null,
+    isGroup: cv.conversation_kind === 'GROUP',
   });
   // 1ª mensagem enviada → a conversa deixa de ser rascunho e passa a aparecer na Caixa normal (migr. 097).
   await withTenant(tenantId, (c) => c.query(

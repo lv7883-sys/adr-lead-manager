@@ -17,13 +17,13 @@ const { isUuid } = require('./validation');
 // de uma conversa privada: aparecia na thread de quem tivesse os mesmos dígitos e ressuscitava a
 // conversa na Caixa de Entrada (era a "mensagem duplicada" que a recepção via). O chamador manda
 // `isGroup` (sabe o tipo da conversa); o sufixo @g.us do destino serve de rede.
-async function registrarSaida(tenantId, { phone, externalMessageId, sender, body, media, replyToMessageId, isGroup }) {
+async function registrarSaida(tenantId, { phone, externalMessageId, sender, body, media, replyToMessageId, replyToExternalId, isGroup }) {
   const ehGrupo = isGroup === true || /@g\.us$/i.test(String(phone || ''));
   await withTenant(tenantId, (c) => c.query(
     `INSERT INTO staff_outbound_samples
        (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
-        media_url, media_type, media_filename, reply_to_message_id, is_group)
-     VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, NULL, $6, $7, $8, $9, $10)
+        media_url, media_type, media_filename, reply_to_message_id, is_group, reply_to_external_id)
+     VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, NULL, $6, $7, $8, $9, $10, $11)
      ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO UPDATE
        -- o evento de envio (SEND_MESSAGE) pode chegar ANTES deste registro: aí a linha já existe, mas sem
        -- quem enviou (recepção x Janis), sem a citação e sem o arquivo que só o Regente conhece.
@@ -33,24 +33,37 @@ async function registrarSaida(tenantId, { phone, externalMessageId, sender, body
            media_url = COALESCE(staff_outbound_samples.media_url, EXCLUDED.media_url),
            media_type = COALESCE(staff_outbound_samples.media_type, EXCLUDED.media_type),
            media_filename = COALESCE(staff_outbound_samples.media_filename, EXCLUDED.media_filename),
-           is_group = staff_outbound_samples.is_group OR EXCLUDED.is_group`,
+           is_group = staff_outbound_samples.is_group OR EXCLUDED.is_group,
+           reply_to_external_id = COALESCE(staff_outbound_samples.reply_to_external_id, EXCLUDED.reply_to_external_id)`,
     [tenantId, phone, externalMessageId || null, sender || 'Recepção', body || null,
      (media && media.url) || null, (media && media.type) || null, (media && media.filename) || null,
-     replyToMessageId || null, ehGrupo]
+     replyToMessageId || null, ehGrupo, replyToExternalId || null]
   ));
 }
 
 // Resolve a mensagem citada (linha de messages). Devolve { id, role, body, media_type, wa_key }
 // ou null. wa_key = key do WhatsApp (raw->data->key) usada no quoted da Evolution.
+// Paridade 4/5: como no WhatsApp, dá para citar QUALQUER mensagem — também as da escola (recepção/Janis).
+// Essas não estão em messages: devolve id NULL (a FK reply_to_message_id aponta só para messages) e o id do
+// WhatsApp em ext_id, gravado em reply_to_external_id — a timeline casa a citação por ele.
 async function msgCitada(tenantId, replyToMessageId) {
   if (!replyToMessageId || !isUuid(replyToMessageId)) return null;
   return withTenant(tenantId, async (c) => {
     const r = await c.query(
-      `SELECT id, role, body, media_type, raw->'data'->'key' AS wa_key
+      `SELECT id, role, body, media_type, raw->'data'->'key' AS wa_key, external_message_id AS ext_id
          FROM messages WHERE id = $1`,
       [replyToMessageId]
     );
-    return r.rows[0] || null;
+    if (r.rows[0]) return r.rows[0];
+    const nosso = await resolverKeyMensagem(c, tenantId, replyToMessageId);
+    if (!nosso) return null;
+    const s = (await c.query(
+      `SELECT body, media_type, is_group, external_id FROM staff_outbound_samples WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, nosso.soId])).rows[0] || {};
+    const key = { ...nosso.key };
+    // saída de grupo registrada pelo Regente nasce sem raw: o destino é o próprio id do grupo
+    if (s.is_group && /@g.us$/.test(String(s.external_id || '')) && !/@g.us$/.test(String(key.remoteJid))) key.remoteJid = s.external_id;
+    return { id: null, role: 'ASSISTANT', body: s.body || null, media_type: s.media_type || null, wa_key: key, ext_id: key.id };
   });
 }
 

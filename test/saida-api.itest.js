@@ -33,7 +33,7 @@ before(async () => {
     CREATE TABLE staff_outbound_samples (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text, external_id text,
       external_message_id text, source text, sender text, body text, raw jsonb,
-      media_url text, media_type text, media_filename text, reply_to_message_id uuid,
+      media_url text, media_type text, media_filename text, reply_to_message_id uuid, reply_to_external_id text,
       is_group boolean NOT NULL DEFAULT false, ack_status text, received_at timestamptz DEFAULT now());
     CREATE UNIQUE INDEX so_uq ON staff_outbound_samples (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL;
     CREATE TABLE pending_approvals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
