@@ -13,6 +13,7 @@
 const { withTenant } = require('./db');
 const logger = require('./logger');
 const { textoReacao } = require('./reacao');
+const { descrever } = require('./waConteudo');   // mesma régua do webhook (paridade 3)
 
 // Placeholder legível p/ mídia SEM texto (findMessages não baixa o binário no backfill — a
 // CURA de mídia do webhook é p/ o fluxo ao vivo). Sem isso, uma foto/áudio trocado durante a
@@ -36,13 +37,13 @@ function _placeholderMidia(m) {
 // Retorna null p/ registro sem id de mensagem. atMs = epoch ms (Evolution manda em segundos).
 function mapEvolutionMsg(rec) {
   if (!rec || !rec.key) return null;
-  const m = rec.message || {};
+  const d = descrever(rec.message || {});
+  const m = d.inner || {};
   let body = (m.conversation != null ? m.conversation
     : (m.extendedTextMessage && m.extendedTextMessage.text != null ? m.extendedTextMessage.text : null));
-  if (body == null || body === '') body = _placeholderMidia(m) || '';
-  // Sem conteúdo reconhecível NÃO vira bolha (paridade 2): edição cifrada, protocolo (apagar/editar),
-  // distribuição de chave... Antes entravam com body '' e viravam 2.954 bolhas vazias. Edições cifradas
-  // são aplicadas na original pelo waSync (waEdicao); os demais tipos de conteúdo entram na etapa 3.
+  if (body == null || body === '') body = d.texto || _placeholderMidia(m) || '';
+  // Sem conteúdo reconhecível NÃO vira bolha (paridade 2/3): edição cifrada, protocolo, distribuição de
+  // chave, voto de enquete, álbum... Antes entravam com body '' (2.954 bolhas vazias).
   if (!body) return null;
   return {
     externalMessageId: rec.key.id ? String(rec.key.id) : null,
@@ -50,6 +51,9 @@ function mapEvolutionMsg(rec) {
     body: body || '',
     sender: rec.pushName || null,
     atMs: rec.messageTimestamp ? Number(rec.messageTimestamp) * 1000 : null,
+    conteudo: d.conteudo || null,
+    citadaId: (d.conteudo && d.conteudo.contexto && d.conteudo.contexto.citadaId) || null,
+    rec,   // a mensagem inteira: guardada no raw (permite carregar a mídia e reler o conteúdo depois)
   };
 }
 
@@ -73,16 +77,20 @@ async function importarConversa(tenantId, { channel = 'whatsapp', externalId, ms
         let r;
         if (m.fromMe) {
           r = await c.query(
-            `INSERT INTO staff_outbound_samples (tenant_id, channel, external_id, external_message_id, source, sender, body, raw, received_at)
-             VALUES ($1,$2,$3,$4,'historico',$5,$6,'{}'::jsonb,$7)
+            `INSERT INTO staff_outbound_samples (tenant_id, channel, external_id, external_message_id, source, sender, body, raw, received_at, conteudo, reply_to_external_id, is_group)
+             VALUES ($1,$2,$3,$4,'historico',$5,$6,$7,$8,$9,$10,$11)
              ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
-            [tenantId, channel, String(externalId), String(m.externalMessageId), m.sender || null, m.body || '', at]);
+            [tenantId, channel, String(externalId), String(m.externalMessageId), m.sender || null, m.body || '',
+             JSON.stringify(m.rec ? { source: 'historico', data: m.rec } : {}), at,
+             m.conteudo ? JSON.stringify(m.conteudo) : null, m.citadaId || null, /@g\.us$/i.test(String(externalId))]);
         } else {
           r = await c.query(
-            `INSERT INTO messages (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw, received_at)
-             VALUES ($1,$2,'inbound','USER',$3,$4,$5,$6,$7)
+            `INSERT INTO messages (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw, received_at, conteudo, reply_to_external_id)
+             VALUES ($1,$2,'inbound','USER',$3,$4,$5,$6,$7,$8,$9)
              ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
-            [tenantId, conv.id, String(m.externalMessageId), m.sender || null, m.body || '', JSON.stringify({ source: 'historico' }), at]);
+            [tenantId, conv.id, String(m.externalMessageId), m.sender || null, m.body || '',
+             JSON.stringify(m.rec ? { source: 'historico', data: m.rec } : { source: 'historico' }), at,
+             m.conteudo ? JSON.stringify(m.conteudo) : null, m.citadaId || null]);
         }
         if (r.rowCount) inseridos++; else pulados++;
       }

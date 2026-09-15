@@ -31,13 +31,15 @@ before(async () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), conversation_id uuid, role text, sender text,
       body text, media_url text, media_type text, media_filename text, media_transcription text,
       edited_at timestamptz, deleted_at timestamptz, received_at timestamptz DEFAULT now(),
-      external_message_id text, reply_to_message_id uuid, raw jsonb);
+      external_message_id text, reply_to_message_id uuid, raw jsonb, conteudo jsonb, reply_to_external_id text);   -- migr. 116
     CREATE TABLE staff_outbound_samples (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, external_id text, sender text,
       body text, media_url text, media_type text, media_filename text,
       edited_at timestamptz, deleted_at timestamptz, received_at timestamptz DEFAULT now(),
       external_message_id text, reply_to_message_id uuid, ack_status text, raw jsonb,
-      is_group boolean NOT NULL DEFAULT false);   -- migr. 103
+      is_group boolean NOT NULL DEFAULT false, conteudo jsonb, reply_to_external_id text);   -- migr. 103 / 116
+    CREATE TABLE wa_lid (tenant_id uuid NOT NULL, lid text NOT NULL, pn text, proprio boolean NOT NULL DEFAULT false,
+      visto_em timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, lid));   -- migr. 115
     CREATE TABLE pending_approvals (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid,
       suggested_response text, status text, reply_to_message_id uuid, created_at timestamptz DEFAULT now());
@@ -199,4 +201,35 @@ test('(8) reação SEM alvo conhecido continua visível como bolha (não some da
     raw: { data: { message: { reactionMessage: { text: '🥴', key: { id: 'ALVO-QUE-NAO-TEMOS' } } } } } });
   const bodies = (await thread(T1, cv)).timeline.map((t) => t.body);
   assert.ok(bodies.includes('[reação] 🥴'), 'sem alvo capturado, a reação permanece como bolha');
+});
+
+// ---- PARIDADE 3 (15/09/2026): citação feita no celular, cartões e menções ---------------------------
+test('(9) citação feita no CELULAR (só o id do WhatsApp) apontando para mensagem da ESCOLA aparece como citação', async () => {
+  const cv = await conv(T1, H(10));
+  await outbound(T1, Dg(10), { body: 'Aula amanhã às 17h', dias: 1, extMsgId: 'S100' });
+  await c.query(`INSERT INTO messages (conversation_id, role, body, received_at, external_message_id, reply_to_external_id)
+                 VALUES ($1,'USER','Ok, combinado!', now(), 'M100', 'S100')`, [cv]);
+  const it = (await thread(T1, cv)).timeline.find((t) => t.body === 'Ok, combinado!');
+  assert.ok(it.reply_to, 'tem citação');
+  assert.equal(it.reply_to.author, 'staff');
+  assert.equal(it.reply_to.preview, 'Aula amanhã às 17h');
+});
+
+test('(10) o cartão (conteudo) chega até a tela', async () => {
+  const cv = await conv(T1, H(11));
+  await c.query(`INSERT INTO messages (conversation_id, role, body, received_at, external_message_id, conteudo)
+                 VALUES ($1,'USER','📍 Localização: Academia', now(), 'M110', $2)`, [cv, { tipo: 'localizacao', lat: -22.9, lng: -46.9, nome: 'Academia', url: 'https://maps.google.com/?q=-22.9,-46.9' }]);
+  const it = (await thread(T1, cv)).timeline.find((t) => t.external_message_id === 'M110');
+  assert.equal(it.conteudo.tipo, 'localizacao');
+  assert.equal(it.conteudo.nome, 'Academia');
+});
+
+test('(11) menção "@número" vira "@nome" de quem já escreveu', async () => {
+  const outra = await conv(T1, H(12));
+  await msg(outra, { body: 'oi', sender: 'Maria', extMsgId: 'M120', raw: { data: { key: { participant: '5519999990012@s.whatsapp.net' } } } });
+  const cv = await conv(T1, H(13));
+  await c.query(`INSERT INTO messages (conversation_id, role, body, received_at, external_message_id, conteudo)
+                 VALUES ($1,'USER','@5519999990012 bom dia', now(), 'M130', $2)`, [cv, { tipo: 'texto', contexto: { mencoes: ['5519999990012@s.whatsapp.net'] } }]);
+  const it = (await thread(T1, cv)).timeline.find((t) => t.external_message_id === 'M130');
+  assert.equal(it.body, '@Maria bom dia');
 });

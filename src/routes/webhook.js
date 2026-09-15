@@ -13,6 +13,8 @@ const media = require('../media');
 const autoReply = require('../autoReply');   // ADR-006+ resposta automática fora do horário
 const waSync = require('../waSync');          // reconexão → backfill do histórico offline
 const waEdicao = require('../waEdicao');      // edição cifrada do WhatsApp (paridade 2)
+const waConteudo = require('../waConteudo');  // tradutor único do conteúdo (paridade 3)
+const waEnquete = require('../waEnquete');    // voto de enquete cifrado (paridade 3)
 const { decrypt } = require('../crypto');
 
 const router = express.Router();
@@ -48,13 +50,16 @@ function normalizeMessage(body) {
   const data = body?.data;
   if (data && data.key) {
     const jid = data.key.remoteJid || '';
-    const m = data.message || {};
+    // paridade 3: desembrulha (temporária, visualização única, outro aparelho) e descreve TODO tipo de conteúdo
+    const descr = waConteudo.descrever(data.message || {});
+    const m = descr.inner || {};
     const media = detectarMidia(m);
     const reaction = detectarReacao(m);   // ADR-031 — reação emoji (não é mídia)
     let texto = m.conversation ?? m.extendedTextMessage?.text ?? null;
+    if (texto == null && descr.texto) texto = descr.texto;   // localização, contato, enquete, lista, botões, evento...
     if (!texto && media) texto = media.placeholder;   // body legível p/ histórico
     if (!texto && reaction) texto = textoReacao(reaction.emoji);   // ADR-031: não vira bolha vazia
-    if (!texto && ehViewOnce(m)) texto = '[mensagem de visualização única]';   // ADR-031 (cifrada, não baixável)
+    if (!texto && !media && ehViewOnce(data.message || {})) texto = '[mensagem de visualização única]';   // ADR-031 (cifrada, não baixável)
     return {
       externalId: jid.split('@')[0] || jid,
       externalMessageId: data.key.id ? String(data.key.id) : null,
@@ -71,6 +76,10 @@ function normalizeMessage(body) {
       reaction,
       // grupo nunca é um lead (vale p/ qualquer tenant) — sinaliza p/ o guard.
       isGroup: /@g\.us$/.test(jid),
+      // paridade 3: dados p/ o cartão (localização, contato, enquete...) e o contexto (citação, menções, encaminhada)
+      conteudo: descr.conteudo,
+      // não é bolha no WhatsApp (protocolo, álbum, distribuição de chave...): o handler não grava
+      semConteudo: !!descr.semConteudo && !texto && !media && !reaction,
     };
   }
   return null;
@@ -80,6 +89,10 @@ function normalizeMessage(body) {
 // placeholder pro body, ou null se for texto puro.
 function detectarMidia(m) {
   if (!m || typeof m !== 'object') return null;
+  m = waConteudo.desembrulhar(m).inner || m;   // mídia dentro de mensagem temporária / visualização única
+  if (m.ptvMessage) {   // vídeo redondo (nota de vídeo)
+    return { kind: 'video', mimetype: m.ptvMessage.mimetype || 'video/mp4', filename: null, placeholder: '[vídeo]' };
+  }
   if (m.audioMessage) {
     return { kind: 'audio', mimetype: m.audioMessage.mimetype || 'audio/ogg', filename: null, placeholder: '[áudio]' };
   }
@@ -423,6 +436,24 @@ async function marcarLidoPorRecibo(tenantId, body, log) {
   if (log && n) log.info('inbox.read_synced', { recibos: ids.length, conversas: n });
 }
 
+// Paridade 3: grava o cartão (conteudo) e a citação feita no celular (reply_to_external_id) na linha que
+// acabou de entrar — mesmo padrão da cura de mídia: os 7 INSERTs do funil ficam intocados. Não sobrescreve
+// conteúdo existente (a enquete acumula votos em conteudo.votos).
+async function gravarExtras(tenantId, m, log) {
+  if (!m || !m.externalMessageId || !m.conteudo) return;
+  const citada = (m.conteudo.contexto && m.conteudo.contexto.citadaId) || null;
+  try {
+    await withTenant(tenantId, async (c) => {
+      for (const tabela of ['messages', 'staff_outbound_samples']) {
+        await c.query(
+          `UPDATE ${tabela} SET conteudo = COALESCE(conteudo, $2::jsonb), reply_to_external_id = COALESCE(reply_to_external_id, $3)
+            WHERE tenant_id = $1 AND external_message_id = $4`,
+          [tenantId, JSON.stringify(m.conteudo), citada, m.externalMessageId]);
+      }
+    });
+  } catch (e) { if (log) log.warn('conteudo.gravar_falhou', { error: e.message }); }
+}
+
 async function handleZapiWebhook(req, res) {
   const tenant = req.tenant;
   const log = req.log;
@@ -459,6 +490,12 @@ async function handleZapiWebhook(req, res) {
       waEdicao.aplicarEdicaoCifrada(tenant.id, dataEv).catch((e) => log.warn('wa_edicao.unhandled', { error: e.message }));
       return;
     }
+    // VOTO DE ENQUETE (paridade 3): cifrado; soma na enquete original e nunca vira bolha
+    const innerEv = dataEv.message ? waConteudo.desembrulhar(dataEv.message).inner : null;
+    if (innerEv && waEnquete.ehVoto(innerEv)) {
+      waEnquete.aplicarVoto(tenant.id, { ...dataEv, message: innerEv }).catch((e) => log.warn('wa_enquete.unhandled', { error: e.message }));
+      return;
+    }
     waEdicao.aprenderLids(tenant.id, dataEv.key).catch((e) => log.warn('wa_lid.unhandled', { error: e.message }));
   }
 
@@ -485,6 +522,18 @@ async function handleZapiWebhook(req, res) {
 
   if (!msg || !msg.externalId) {
     log.info('webhook.no_message', { reason: 'unparseable_payload' });
+    return;
+  }
+  // Edição no formato antigo (protocolMessage EDIT) também chega por upsert/send.message — antes só era
+  // aplicada quando vinha em messages.update. Aplica e para: edição não é bolha.
+  const editUpsert = _detectEdit(req.body);
+  if (editUpsert) {
+    aplicarEdicao(tenant.id, editUpsert, log).catch((e) => log.warn('edit.unhandled', { error: e.message }));
+    return;
+  }
+  // Não é bolha no WhatsApp (protocolo, álbum, distribuição de chave...): não grava nada (paridade 3).
+  if (msg.semConteudo) {
+    log.info('webhook.sem_bolha', { from_me: msg.fromMe });
     return;
   }
   // ADR-016 — baixa a mídia da ENTRADA (grava em disco e, se áudio, transcreve) antes de persistir.
@@ -548,12 +597,14 @@ async function handleZapiWebhook(req, res) {
         await baixarMidiaInbound(tenant, msg, log);
         await engine.captureGroupInbound(tenant.id, String(jid), msg, req.body);
         await curarMidia(tenant, msg, log);
+        await gravarExtras(tenant.id, msg, log);
       })().catch((e) => log.warn('group.capture_unhandled', { error: e.message }));
     } else if (msg.fromMe) {
       (async () => {
         if (msg.media && msg.media.kind === 'audio') await baixarMidiaInbound(tenant, msg, log);
         if (msg.media && msg.media.transcription) msg.body = msg.media.transcription;
         await staffSamples.captureOutbound(tenant.id, msg, req.body);
+        await gravarExtras(tenant.id, msg, log);
       })().catch((e) => log.warn('group.saida_unhandled', { error: e.message }));
     }
     log.info('webhook.group', { captured: true, from_me: msg.fromMe });
@@ -593,6 +644,7 @@ async function handleZapiWebhook(req, res) {
         }
       }
       const cap = await staffSamples.captureOutbound(tenant.id, msg, req.body);
+      await gravarExtras(tenant.id, msg, log);
       // Só classifica em linha NOVA (rowCount>0) — nunca no eco duplicado (dedup por msg id).
       // ADR-031: reação de saída é capturada (bolha), mas NÃO classifica a bola (meta-sinal).
       if (cap && cap.rowCount > 0 && !msg.reaction && !msg.envioApi) {
@@ -610,6 +662,7 @@ async function handleZapiWebhook(req, res) {
     await baixarMidiaInbound(tenant, msg, log);
     await engine.processInbound(tenant, msg, req.body);
     await curarMidia(tenant, msg, log);
+    await gravarExtras(tenant.id, msg, log);
     // ADR-006+ — resposta automática FORA DO HORÁRIO (a "Janis"). Best-effort: roda DEPOIS de
     // persistir o inbound; nunca bloqueia/derruba a ingestão. Só 1:1 (inbound já filtrado acima).
     autoReply.maybeAutoReply(tenant, { channel: 'whatsapp', externalId: msg.externalId, inboundText: msg.body, contactName: msg.sender,

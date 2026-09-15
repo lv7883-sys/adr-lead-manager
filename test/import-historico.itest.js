@@ -18,11 +18,11 @@ before(async () => {
       external_id text, last_read_at timestamptz, updated_at timestamptz DEFAULT now(), UNIQUE (tenant_id, channel, external_id));
     CREATE TABLE messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
       direction text NOT NULL, role text, external_message_id text, sender text, body text, raw jsonb,
-      received_at timestamptz NOT NULL DEFAULT now());
+      received_at timestamptz NOT NULL DEFAULT now(), conteudo jsonb, reply_to_external_id text);   -- migr. 116
     CREATE UNIQUE INDEX uq_msg_ext ON messages (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL;
     CREATE TABLE staff_outbound_samples (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text NOT NULL,
       external_id text, external_message_id text, source text, sender text, body text, raw jsonb,
-      received_at timestamptz NOT NULL DEFAULT now());
+      received_at timestamptz NOT NULL DEFAULT now(), conteudo jsonb, reply_to_external_id text, is_group boolean NOT NULL DEFAULT false);   -- migr. 116
     CREATE UNIQUE INDEX uq_so_ext ON staff_outbound_samples (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL;
   `);
 });

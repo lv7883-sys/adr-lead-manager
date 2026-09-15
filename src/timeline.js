@@ -65,11 +65,26 @@ const TIMELINE_SQL = `WITH reac AS (
                       AND (cv.conversation_kind = 'GROUP') = $4
                       AND m.role = 'USER' AND m.external_message_id IS NOT NULL
                       AND coalesce(m.raw#>>'{data,message,reactionMessage,text}','') = ''
+                 ),
+                 cit AS (
+                   -- paridade 3: mensagens citáveis desta conversa pelo id do WhatsApp — a citação feita no
+                   -- celular/Web só traz esse id e pode apontar para mensagem do cliente OU da escola.
+                   SELECT m.external_message_id AS k, m.id, 'USER'::text AS role, m.body, m.media_type
+                     FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+                      AND (cv.conversation_kind = 'GROUP') = $4 AND m.external_message_id IS NOT NULL
+                   UNION ALL
+                   SELECT s.external_message_id, s.id, 'ASSISTANT'::text, s.body, s.media_type
+                     FROM staff_outbound_samples s
+                    WHERE s.tenant_id = $1 AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
+                      AND (s.is_group IS TRUE) = $4 AND s.external_message_id IS NOT NULL
                  )
                  SELECT t.id, t.received_at, t.kind, t.sender, t.body,
                         t.media_url, t.media_type, t.media_filename, t.media_transcription, t.reactions, t.ack_status, t.edited_at, t.deleted_at,
                         t.external_message_id, t.media_pendente,
-                        t.reply_to_id, rt.role AS rt_role, rt.body AS rt_body, rt.media_type AS rt_media_type
+                        COALESCE(t.reply_to_id, cit.id) AS reply_to_id,
+                        COALESCE(rt.role, cit.role) AS rt_role, COALESCE(rt.body, cit.body) AS rt_body,
+                        COALESCE(rt.media_type, cit.media_type) AS rt_media_type, t.conteudo
                    FROM (
                    -- Entrada do LEAD (USER). Rascunhos da IA (ASSISTANT) NAO entram na
                    -- conversa: os pendentes pertencem ao bloco "Resposta sugerida".
@@ -81,7 +96,8 @@ const TIMELINE_SQL = `WITH reac AS (
                           m.edited_at,                -- Fatia 2: marcador "editada"
                           m.deleted_at,               -- Fatia 3: marcador "apagada"
                           m.external_message_id,       -- ADR-042: comment_id (p/ ocultar comentário)
-                          (m.media_url IS NULL AND jsonb_exists_any(m.raw->'data'->'message', ${_NOS_MIDIA_SQL})) AS media_pendente
+                          (m.media_url IS NULL AND jsonb_exists_any(m.raw->'data'->'message', ${_NOS_MIDIA_SQL})) AS media_pendente,
+                          m.conteudo, m.reply_to_external_id AS reply_ext
                      FROM messages m
                      JOIN conversations cv ON cv.id = m.conversation_id
                     WHERE cv.tenant_id = $1
@@ -106,7 +122,8 @@ const TIMELINE_SQL = `WITH reac AS (
                           s.edited_at,   -- ACAO-2: edicao da recepcao (direto da saida)
                           s.deleted_at,  -- ACAO-1: exclusao da recepcao (direto da saida)
                           s.external_message_id,       -- ADR-042: paridade de colunas no UNION
-                          (s.media_url IS NULL AND jsonb_exists_any(s.raw->'data'->'message', ${_NOS_MIDIA_SQL})) AS media_pendente
+                          (s.media_url IS NULL AND jsonb_exists_any(s.raw->'data'->'message', ${_NOS_MIDIA_SQL})) AS media_pendente,
+                          s.conteudo, s.reply_to_external_id AS reply_ext
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
                       AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
@@ -163,13 +180,15 @@ const TIMELINE_SQL = `WITH reac AS (
                               AND so.body = pa.suggested_response
                             ORDER BY so.received_at DESC LIMIT 1) AS deleted_at,
                           NULL::text AS external_message_id,   -- ADR-042: paridade de colunas no UNION
-                          false AS media_pendente
+                          false AS media_pendente,
+                          NULL::jsonb AS conteudo, NULL::text AS reply_ext
                      FROM pending_approvals pa
                     WHERE pa.tenant_id = $1 AND pa.lead_id = $3
                       AND pa.status IN ('APPROVED', 'EDITED')
                       AND pa.suggested_response IS NOT NULL
                  ) t
                  LEFT JOIN messages rt ON rt.id = t.reply_to_id
+                 LEFT JOIN cit ON t.reply_to_id IS NULL AND t.reply_ext IS NOT NULL AND cit.k = t.reply_ext
                  ORDER BY t.received_at ASC`;
 
 // Monta reply_to {id, author:"lead"|"staff", preview}. author vem do papel da citada
@@ -184,7 +203,8 @@ function mapTimelineRow(r) {
     edited_at: r.edited_at || null,      // Fatia 2 — marcador "editada" (inbound)
     deleted_at: r.deleted_at || null,    // Fatia 3 — marcador "apagada" (inbound)
     external_message_id: r.external_message_id || null,   // ADR-042 — comment_id (ocultar comentário)
-    media_pendente: r.media_pendente === true,   // tem mídia no raw mas sem arquivo → botão "Carregar"
+    media_pendente: r.media_pendente === true,
+    conteudo: r.conteudo || null,   // paridade 3: cartão (localização, contato, enquete...) + contexto (encaminhada, menções)   // tem mídia no raw mas sem arquivo → botão "Carregar"
     reply_to: null,
   };
   if (r.reply_to_id) {
@@ -198,6 +218,41 @@ function mapTimelineRow(r) {
   return row;
 }
 
+// MENÇÕES (paridade 3): no WhatsApp "@5519…" aparece como "@Maria". O nome é o do perfil que a pessoa
+// usou ao escrever (sender) em qualquer conversa do tenant, casando o número ou o @lid (wa_lid, migr. 115).
+// Só roda quando a conversa tem menção — é consulta de grupo, não de toda thread.
+async function _nomearMencoes(c, tenantId, itens) {
+  const jids = new Set();
+  for (const it of itens) for (const j of ((it.conteudo && it.conteudo.contexto && it.conteudo.contexto.mencoes) || [])) jids.add(String(j).replace(/:\d+@/, '@'));
+  if (!jids.size) return;
+  const pares = (await c.query(
+    `SELECT lid, pn FROM wa_lid WHERE tenant_id = $1 AND (lid = ANY($2) OR pn = ANY($2))`, [tenantId, [...jids]])).rows;
+  const todos = new Set(jids); pares.forEach((p) => { if (p.lid) todos.add(p.lid); if (p.pn) todos.add(p.pn); });
+  const nomes = (await c.query(
+    `SELECT DISTINCT ON (x.j) x.j, x.sender FROM (
+       SELECT m.raw#>>'{data,key,participant}' AS j, m.sender, m.received_at FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+        WHERE cv.tenant_id = $1 AND m.raw#>>'{data,key,participant}' = ANY($2)
+       UNION ALL
+       SELECT m.raw#>>'{data,key,participantAlt}', m.sender, m.received_at FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+        WHERE cv.tenant_id = $1 AND m.raw#>>'{data,key,participantAlt}' = ANY($2)
+       UNION ALL
+       SELECT m.raw#>>'{data,key,remoteJid}', m.sender, m.received_at FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+        WHERE cv.tenant_id = $1 AND m.raw#>>'{data,key,remoteJid}' = ANY($2)
+     ) x WHERE coalesce(x.sender, '') <> '' ORDER BY x.j, x.received_at DESC`, [tenantId, [...todos]])).rows;
+  const nomePorJid = new Map(nomes.map((n) => [n.j, n.sender]));
+  const nomeDe = (j) => nomePorJid.get(j) || pares.filter((p) => p.lid === j || p.pn === j).map((p) => nomePorJid.get(p.lid) || nomePorJid.get(p.pn)).find(Boolean);
+  for (const it of itens) {
+    const ms = (it.conteudo && it.conteudo.contexto && it.conteudo.contexto.mencoes) || [];
+    if (!ms.length || !it.body) continue;
+    let body = String(it.body);
+    for (const j of ms) {
+      const jj = String(j).replace(/:\d+@/, '@'); const nome = nomeDe(jj);
+      if (nome) body = body.split('@' + jj.split('@')[0]).join('@' + nome);
+    }
+    it.body = body;
+  }
+}
+
 // Roda a timeline dentro de um client já no contexto (RLS no handler; postgres no itest).
 // ident = dígitos do telefone/psid. leadId opcional (null p/ conversa de não-lead).
 // ehGrupo = a thread pedida é de GRUPO. O casamento aqui é por DÍGITOS (não há FK conversa↔lead), e
@@ -206,7 +261,9 @@ function mapTimelineRow(r) {
 async function fetchTimeline(c, { tenantId, ident, leadId = null, ehGrupo = false }) {
   if (!ident) return [];
   const rows = (await c.query(TIMELINE_SQL, [tenantId, ident, leadId, ehGrupo === true])).rows;
-  return rows.map(mapTimelineRow);
+  const itens = rows.map(mapTimelineRow);
+  await _nomearMencoes(c, tenantId, itens);
+  return itens;
 }
 
 module.exports = { TIMELINE_SQL, mapTimelineRow, fetchTimeline };
