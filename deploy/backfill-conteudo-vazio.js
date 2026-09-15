@@ -20,6 +20,7 @@ const outbound = require('../src/outbound');
 const { descrever } = require('../src/waConteudo');
 const { detectarMidia } = require('../src/routes/webhook');
 const waEdicao = require('../src/waEdicao');
+const { aplicarProtocoloDoHistorico } = require('../src/waSync');
 
 const APPLY = process.argv.includes('--apply');
 const TENANT_ID = process.env.TENANT_ID || 'ed731a58-62e5-45ad-acba-a5502ff39e92';
@@ -49,7 +50,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log(`${APPLY ? '=== --apply ===' : '=== ENSAIO (amostra de 25, nada muda) ==='} vazias: ${vazias.length}`);
 
     const lote = APPLY ? vazias : vazias.slice(0, 25);
-    const tot = { recuperada: 0, arquivada: 0, edicao_aplicada: 0, sem_na_api: 0, erro: 0 };
+    const tot = { recuperada: 0, arquivada: 0, edicao_aplicada: 0, apagamento_aplicado: 0, sem_na_api: 0, erro: 0 };
     const tipos = {};
     for (const v of lote) {
       try {
@@ -64,10 +65,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         let body = m.conversation ?? (m.extendedTextMessage && m.extendedTextMessage.text) ?? d.texto ?? (media && media.placeholder) ?? null;
         if (body === '') body = null;
         if (!APPLY) { if (body) tot.recuperada++; else tot.arquivada++; continue; }
-        if (waEdicao.ehEdicaoCifrada(m)) {
-          await waEdicao.aplicarEdicaoCifrada(TENANT_ID, { key: rec.key, message: m });
-          tot.edicao_aplicada++;
-        }
+        // edição (cifrada ou aberta) e apagamento: aplicados na mensagem ORIGINAL; a linha vazia é arquivada.
+        const prot = await aplicarProtocoloDoHistorico(TENANT_ID, { ...rec, message: m });
+        if (prot === 'apagada') tot.apagamento_aplicado++; else if (prot) tot.edicao_aplicada++;
         await withTenant(TENANT_ID, async (c) => {
           if (body) {
             await c.query(

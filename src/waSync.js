@@ -22,6 +22,20 @@ const { credsForTenant } = require('./outbound');
 const { mapEvolutionMsg, importarConversa } = require('./importHistorico');
 const waEdicao = require('./waEdicao');   // edição cifrada encontrada no histórico: aplica na original
 
+// Protocolo encontrado no histórico: edição cifrada (cliente), edição aberta (aparelho da escola) e
+// apagamento. O webhook é carregado na hora (ele mesmo requer este módulo). Exportado p/ o backfill.
+async function aplicarProtocoloDoHistorico(tenantId, rec) {
+  if (!rec || !rec.key || !rec.message) return null;
+  if (waEdicao.ehEdicaoCifrada(rec.message)) { await waEdicao.aplicarEdicaoCifrada(tenantId, rec); return 'edicao_cifrada'; }
+  if (!rec.message.protocolMessage) return null;
+  const wh = require('./routes/webhook');
+  const edit = wh._detectEdit({ data: rec });
+  if (edit) { await wh.aplicarEdicao(tenantId, edit); return 'edicao'; }
+  const ids = wh._detectDelete({ data: rec });
+  if (ids.length) { await wh.marcarApagada(tenantId, ids); return 'apagada'; }
+  return null;
+}
+
 // DEEP (reconexão) = varre TODAS as conversas do tenant (sem janela de tempo) e puxa o HISTÓRICO
 // INTEIRO de cada uma — garantia de "100% atualizado". SHALLOW (safety-net periódico) = mesma
 // paginação completa por conversa, mas só nas conversas com atividade recente (mantém o custo baixo
@@ -128,11 +142,9 @@ async function backfillChat(tenantId, creds, chat, deps = {}) {
   const dig = _telefoneDoChat(jid, records);
   if (!dig) return { inseridos: 0, pulados: 0, paginas, erro: 'sem_telefone' };
 
-  // edições cifradas do histórico: aplicadas na original (nunca viram bolha). Best-effort, uma a uma.
+  // edições (cifradas ou não) e apagamentos do histórico: aplicados na original (nunca viram bolha).
   for (const rec of records) {
-    if (rec && rec.key && rec.message && waEdicao.ehEdicaoCifrada(rec.message)) {
-      await waEdicao.aplicarEdicaoCifrada(tenantId, rec).catch((e) => logger.warn('wa_sync.edicao_falhou', { tenant_id: tenantId, error: e.message }));
-    }
+    await aplicarProtocoloDoHistorico(tenantId, rec).catch((e) => logger.warn('wa_sync.edicao_falhou', { tenant_id: tenantId, error: e.message }));
   }
   const msgs = records.map(mapEvolutionMsg).filter(Boolean);
   if (!msgs.length) return { inseridos: 0, pulados: 0, paginas };
@@ -271,6 +283,7 @@ async function handleConnectionUpdate(tenantId, body, deps = {}) {
 }
 
 module.exports = {
+  aplicarProtocoloDoHistorico,
   backfillTenant, backfillChat, syncReconnections, handleConnectionUpdate,
   _telefoneDoChat, _resolverExternalId, _estadoDoConnectionUpdate,
 };

@@ -35,9 +35,11 @@ test('sticker: kind image/webp, baixável e com placeholder [figurinha]', () => 
   assert.equal(msg.reaction, null);
 });
 
-test('view-once cifrada: placeholder legível, sem mídia', () => {
+// secretEncryptedMessage é EDIÇÃO cifrada (paridade 2, confirmado em produção), não visualização única:
+// não é bolha — o webhook decifra e aplica na mensagem original.
+test('secretEncryptedMessage (edição cifrada): não vira bolha, sem mídia', () => {
   const msg = normalizeMessage(evo({ secretEncryptedMessage: { encIv: 'a', encPayload: 'b' } }));
-  assert.equal(msg.body, '[mensagem de visualização única]');
+  assert.equal(msg.semConteudo, true);
   assert.equal(msg.media, null);
   assert.equal(msg.reaction, null);
 });

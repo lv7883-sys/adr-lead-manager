@@ -292,11 +292,13 @@ function _detectEdit(body) {
   for (const d of arr) {
     if (!d || typeof d !== 'object') continue;
     const m = d.message || {};
-    // protocolMessage MESSAGE_EDIT (forma canônica do Baileys), em vários aninhamentos.
+    // protocolMessage MESSAGE_EDIT (forma canônica do Baileys), em vários aninhamentos. No evento
+    // messages.edited a Evolution manda a PRÓPRIA protocolMessage como data (key = a mensagem editada).
     const proto = m.protocolMessage
                || (m.editedMessage && m.editedMessage.message && m.editedMessage.message.protocolMessage)
-               || (m.editedMessage && m.editedMessage.protocolMessage);
-    if (proto && /EDIT/i.test(String(proto.type || '')) && proto.editedMessage) {
+               || (m.editedMessage && m.editedMessage.protocolMessage)
+               || (d.key && d.type != null && !d.message ? d : null);
+    if (proto && waConteudo.tipoProtocolo(proto) === 'edicao' && proto.editedMessage) {
       const id = (proto.key && proto.key.id) || (d.key && d.key.id) || d.keyId || d.id;
       const novo = novoTexto(proto.editedMessage);
       if (id && novo != null) return { id: String(id), body: String(novo) };
@@ -356,8 +358,9 @@ function _detectDelete(body) {
     // (2) protocolMessage REVOKE (via update/upsert): id do ALVO em protocolMessage.key.id
     const m = d.message || {};
     const proto = m.protocolMessage
-               || (m.editedMessage && m.editedMessage.message && m.editedMessage.message.protocolMessage);
-    if (proto && /REVOKE/i.test(String(proto.type || '')) && proto.key && proto.key.id) {
+               || (m.editedMessage && m.editedMessage.message && m.editedMessage.message.protocolMessage)
+               || (d.key && d.type != null && !d.message ? d : null);   // messages.edited: data É a protocolMessage
+    if (proto && waConteudo.tipoProtocolo(proto) === 'revogacao' && proto.key && proto.key.id) {
       ids.add(String(proto.key.id));
     }
   }
@@ -366,18 +369,21 @@ function _detectDelete(body) {
 
 // Marca a(s) mensagem(ns) como apagada(s) — SETA deleted_at, NÃO apaga a linha nem o body
 // (auditoria; a UI mostra a frase de apagada). Idempotente (COALESCE mantém o 1º timestamp).
-// Ignora se não achar (0 linhas; nunca cria). Só INBOUND casa (outbound tem external_message_id NULL).
+// Ignora se não achar (0 linhas; nunca cria). Paridade 3: vale também para a mensagem da ESCOLA apagada no
+// celular/Web ("Você apagou esta mensagem") — antes só a do cliente sumia.
 async function marcarApagada(tenantId, ids, log) {
   if (!ids.length) return;
   const n = await withTenant(tenantId, async (c) => {
     let tot = 0;
     for (const id of ids) {
-      const r = await c.query(
-        `UPDATE messages SET deleted_at = COALESCE(deleted_at, now())
-          WHERE tenant_id = $1 AND external_message_id = $2`,
-        [tenantId, id]
-      );
-      tot += r.rowCount;
+      for (const tabela of ['messages', 'staff_outbound_samples']) {
+        const r = await c.query(
+          `UPDATE ${tabela} SET deleted_at = COALESCE(deleted_at, now())
+            WHERE tenant_id = $1 AND external_message_id = $2`,
+          [tenantId, id]
+        );
+        tot += r.rowCount;
+      }
     }
     return tot;
   });
@@ -478,6 +484,17 @@ async function handleZapiWebhook(req, res) {
   // heartbeats de 'open'. NÃO é mensagem — trata e retorna. Best-effort: nunca derruba o webhook.
   if (String(req.body?.event || '').toLowerCase() === 'connection.update') {
     waSync.handleConnectionUpdate(tenant.id, req.body).catch((e) => log.warn('wa_sync.webhook_unhandled', { error: e.message }));
+    return;
+  }
+
+  // PROTOCOLO (paridade 3): a Evolution desvia TODA protocolMessage do upsert para o evento messages.edited —
+  // edição feita no celular/Web da escola e "apagar para todos". Não é bolha: aplica na original e retorna.
+  if (String(req.body?.event || '').toLowerCase() === 'messages.edited') {
+    const edit = _detectEdit(req.body);
+    if (edit) aplicarEdicao(tenant.id, edit, log).catch((e) => log.warn('edit.unhandled', { error: e.message }));
+    const apagadasP = _detectDelete(req.body);
+    if (apagadasP.length) marcarApagada(tenant.id, apagadasP, log).catch((e) => log.warn('delete.unhandled', { error: e.message }));
+    if (!edit && !apagadasP.length) log.info('webhook.protocolo_ignorado', { tipo: String(req.body?.data?.type ?? '') });
     return;
   }
 
@@ -681,4 +698,8 @@ module.exports.normalizeMessage = normalizeMessage;
 module.exports.detectarMidia = detectarMidia;
 module.exports.detectarReacao = detectarReacao;
 module.exports._idsRecibosLeituraInbound = _idsRecibosLeituraInbound;
+module.exports._detectEdit = _detectEdit;
+module.exports._detectDelete = _detectDelete;
+module.exports.aplicarEdicao = aplicarEdicao;
+module.exports.marcarApagada = marcarApagada;
 module.exports.atualizarAckStatus = atualizarAckStatus;   // paridade 1: itest do tique pendente   // ADR-042 Fase 2

@@ -15,7 +15,17 @@
 // }
 //
 
-const _EMBRULHOS = ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'deviceSentMessage', 'lottieStickerMessage'];
+// associatedChildMessage = cada foto/vídeo de um ÁLBUM: embrulho com a mídia dentro (antes virava bolha vazia).
+const _EMBRULHOS = ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'deviceSentMessage', 'lottieStickerMessage',
+  'associatedChildMessage'];
+
+// Tipo da protocolMessage. O webhook traz o nome ('MESSAGE_EDIT'); o histórico (findMessages) traz o NÚMERO
+// do enum (14) — por isso edições e apagamentos do histórico passavam batido e viravam bolha vazia.
+const _PROTO = { 0: 'revogacao', 3: 'temporarias', 14: 'edicao', REVOKE: 'revogacao', EPHEMERAL_SETTING: 'temporarias', MESSAGE_EDIT: 'edicao' };
+function tipoProtocolo(p) {
+  if (!p || typeof p !== 'object' || p.type == null) return null;
+  return _PROTO[String(p.type).toUpperCase()] || null;
+}
 
 function desembrulhar(message) {
   let m = message || {};
@@ -84,6 +94,22 @@ function _botoesNativos(nfm) {
 // quem já trata (detectarMidia/detectarReacao no webhook): aqui só o que não é mídia.
 function _descreverInner(m) {
   if (m.conversation != null) return { texto: String(m.conversation) };
+  // Aviso de sistema "mensagens temporárias" (o único protocolo que o WhatsApp mostra na conversa).
+  if (m.protocolMessage && tipoProtocolo(m.protocolMessage) === 'temporarias') {
+    const s = _num(m.protocolMessage.ephemeralExpiration) || 0;
+    const prazo = s >= 7776000 ? '90 dias' : s >= 604800 ? '7 dias' : s >= 86400 ? '24 horas' : s ? Math.round(s / 3600) + ' horas' : '';
+    return { texto: prazo ? `⏱ Mensagens temporárias ativadas (${prazo})` : '⏱ Mensagens temporárias desativadas',
+      conteudo: { tipo: 'sistema', evento: 'temporarias', segundos: s } };
+  }
+  if (m.productMessage) {
+    const p = m.productMessage.product || {};
+    const preco = _num(p.priceAmount1000) != null && p.currencyCode ? ` — ${(_num(p.priceAmount1000) / 1000).toLocaleString('pt-BR', { style: 'currency', currency: p.currencyCode })}` : '';
+    return { texto: `🛍 Produto: ${_s(p.title) || 'item do catálogo'}${preco}${_s(m.productMessage.body) ? '\n' + _s(m.productMessage.body) : ''}` };
+  }
+  if (m.orderMessage) {
+    const o = m.orderMessage; const n = _num(o.itemCount);
+    return { texto: `🧾 Pedido${n ? ` (${n} ${n === 1 ? 'item' : 'itens'})` : ''}${_s(o.orderTitle) ? ': ' + _s(o.orderTitle) : ''}${_s(o.message) ? '\n' + _s(o.message) : ''}` };
+  }
   if (m.extendedTextMessage) {
     const e = m.extendedTextMessage;
     const conteudo = (e.matchedText || e.title) ? { tipo: 'link', url: _s(e.matchedText || e.canonicalUrl), titulo: _s(e.title), descricao: _s(e.description) } : null;
@@ -178,7 +204,7 @@ function _descreverInner(m) {
 
 // Tipos que NÃO são bolha no WhatsApp: são eventos sobre outras mensagens ou metadado de protocolo.
 const _SEM_BOLHA = ['protocolMessage', 'senderKeyDistributionMessage', 'keepInChatMessage', 'pollUpdateMessage', 'encReactionMessage',
-  'albumMessage', 'associatedChildMessage', 'secretEncryptedMessage', 'encEventResponseMessage', 'messageHistoryBundle', 'placeholderMessage'];
+  'albumMessage', 'secretEncryptedMessage', 'encEventResponseMessage', 'messageHistoryBundle', 'placeholderMessage'];
 const _MIDIA = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'documentWithCaptionMessage', 'stickerMessage', 'ptvMessage', 'reactionMessage'];
 
 function descrever(message) {
@@ -196,4 +222,4 @@ function descrever(message) {
   return { inner, texto: base.texto, conteudo, semConteudo };
 }
 
-module.exports = { descrever, desembrulhar, contexto, _lerVcard };
+module.exports = { descrever, desembrulhar, contexto, tipoProtocolo, _lerVcard };

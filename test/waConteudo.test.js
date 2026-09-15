@@ -80,3 +80,50 @@ test('voto de enquete: decifra e acha as opções pelo SHA-256 do nome; troca de
   assert.throws(() => enquete.decifrarVoto({ segredo, ...cif, enqueteId: 'POLL1', criador: '5519999990001@s.whatsapp.net', votante: '5519999990009@s.whatsapp.net' }), 'outro votante não abre');
   assert.equal(enquete.ehVoto({ pollUpdateMessage: { pollCreationMessageKey: { id: 'POLL1' }, vote: {} } }), true);
 });
+
+// ---- protocolo (paridade 3b): evento messages.edited e tipo numérico do histórico ----
+const wh = require('../src/routes/webhook');
+const { tipoProtocolo } = require('../src/waConteudo');
+
+test('tipo do protocolo: nome (webhook) e número (histórico) dão no mesmo', () => {
+  assert.equal(tipoProtocolo({ type: 'MESSAGE_EDIT' }), 'edicao');
+  assert.equal(tipoProtocolo({ type: 14 }), 'edicao');
+  assert.equal(tipoProtocolo({ type: 0 }), 'revogacao');
+  assert.equal(tipoProtocolo({ type: 'REVOKE' }), 'revogacao');
+  assert.equal(tipoProtocolo({ type: 3 }), 'temporarias');
+  assert.equal(tipoProtocolo({}), null);
+});
+
+test('messages.edited: a protocolMessage vem como data — edição e apagamento são reconhecidos', () => {
+  const edit = wh._detectEdit({ event: 'messages.edited', data: { key: { id: 'S1', remoteJid: '5519@s.whatsapp.net', fromMe: true }, type: 'MESSAGE_EDIT', editedMessage: { conversation: 'corrigido' } } });
+  assert.deepEqual(edit, { id: 'S1', body: 'corrigido' });
+  assert.deepEqual(wh._detectDelete({ event: 'messages.edited', data: { key: { id: 'S2', fromMe: true }, type: 'REVOKE' } }), ['S2']);
+});
+
+test('histórico (findMessages): protocolo com tipo NUMÉRICO também é edição/apagamento', () => {
+  const rec = { key: { id: 'P1' }, message: { protocolMessage: { key: { id: 'ALVO' }, type: 14, editedMessage: { extendedTextMessage: { text: 'novo' } } } } };
+  assert.deepEqual(wh._detectEdit({ data: rec }), { id: 'ALVO', body: 'novo' });
+  const rev = { key: { id: 'P2' }, message: { protocolMessage: { key: { id: 'ALVO2' }, type: 0 } } };
+  assert.deepEqual(wh._detectDelete({ data: rev }), ['ALVO2']);
+  assert.equal(descrever(rec.message).semConteudo, true, 'edição não vira bolha');
+});
+
+test('mensagem upsert normal (messageType, sem type) não é confundida com protocolo', () => {
+  const up = { event: 'messages.upsert', data: { key: { id: 'X' }, messageType: 'conversation', message: { conversation: 'oi' } } };
+  assert.equal(wh._detectEdit(up), null);
+  assert.deepEqual(wh._detectDelete(up), []);
+  assert.deepEqual(wh._detectDelete({ event: 'messages.update', data: { keyId: 'X', status: 'READ' } }), []);
+});
+
+test('foto de álbum, temporárias, produto e pedido viram bolha', () => {
+  const foto = descrever({ associatedChildMessage: { message: { imageMessage: { caption: 'turma', mimetype: 'image/jpeg' } } } });
+  assert.equal(foto.semConteudo, false);
+  assert.ok(foto.inner.imageMessage, 'mídia do álbum desembrulhada');
+  const t = descrever({ protocolMessage: { type: 3, ephemeralExpiration: 604800 } });
+  assert.equal(t.texto, '⏱ Mensagens temporárias ativadas (7 dias)');
+  assert.equal(t.conteudo.tipo, 'sistema');
+  assert.equal(descrever({ protocolMessage: { type: 'EPHEMERAL_SETTING', ephemeralExpiration: 0 } }).texto, '⏱ Mensagens temporárias desativadas');
+  assert.match(descrever({ productMessage: { product: { title: 'Aula avulsa' } } }).texto, /Produto: Aula avulsa/);
+  assert.match(descrever({ orderMessage: { itemCount: 2, orderTitle: 'Kit' } }).texto, /Pedido \(2 itens\): Kit/);
+  assert.equal(descrever({ albumMessage: { expectedImageCount: 3 } }).semConteudo, true, 'cabeçalho do álbum não é bolha');
+});
