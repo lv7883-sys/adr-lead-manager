@@ -567,7 +567,7 @@ async function markUnread(client, tenantId, conversationId) {
 // não existe no tenant.
 async function getConversationThread(client, tenantId, conversationId, usuario) {
   const cv = (await client.query(
-    `SELECT id, channel, external_id, last_read_at, conversation_kind,
+    `SELECT id, channel, external_id, last_read_at, conversation_kind, arquivada_em, fixada_em, silenciada_ate,
             regexp_replace(external_id, '[^0-9]', '', 'g') AS ident
        FROM conversations WHERE id = $1 AND tenant_id = $2`,
     [conversationId, tenantId]
@@ -638,6 +638,7 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
       lead_status: lead ? lead.status : null,
       desfecho: lead ? lead.desfecho : null,
       last_read_at: cv.last_read_at,
+      arquivada: !!cv.arquivada_em, fixada: !!cv.fixada_em,   // migr. 118
       atribuicao,
       contato: {
         // Contato = quem você fala no WhatsApp (pushName) PRIMEIRO; cadastro/lead é fallback.
