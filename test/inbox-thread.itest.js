@@ -37,7 +37,8 @@ before(async () => {
       body text, media_url text, media_type text, media_filename text,
       edited_at timestamptz, deleted_at timestamptz, received_at timestamptz DEFAULT now(),
       external_message_id text, reply_to_message_id uuid, ack_status text, raw jsonb,
-      is_group boolean NOT NULL DEFAULT false, conteudo jsonb, reply_to_external_id text);   -- migr. 103 / 116
+      is_group boolean NOT NULL DEFAULT false, conteudo jsonb, reply_to_external_id text,
+      entregue_em timestamptz, lida_em timestamptz);   -- migr. 103 / 116 / 117
     CREATE TABLE wa_lid (tenant_id uuid NOT NULL, lid text NOT NULL, pn text, proprio boolean NOT NULL DEFAULT false,
       visto_em timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, lid));   -- migr. 115
     CREATE TABLE pending_approvals (

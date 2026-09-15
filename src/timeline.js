@@ -84,7 +84,7 @@ const TIMELINE_SQL = `WITH reac AS (
                         t.external_message_id, t.media_pendente,
                         COALESCE(t.reply_to_id, cit.id) AS reply_to_id,
                         COALESCE(rt.role, cit.role) AS rt_role, COALESCE(rt.body, cit.body) AS rt_body,
-                        COALESCE(rt.media_type, cit.media_type) AS rt_media_type, t.conteudo
+                        COALESCE(rt.media_type, cit.media_type) AS rt_media_type, t.conteudo, t.entregue_em, t.lida_em
                    FROM (
                    -- Entrada do LEAD (USER). Rascunhos da IA (ASSISTANT) NAO entram na
                    -- conversa: os pendentes pertencem ao bloco "Resposta sugerida".
@@ -97,7 +97,8 @@ const TIMELINE_SQL = `WITH reac AS (
                           m.deleted_at,               -- Fatia 3: marcador "apagada"
                           m.external_message_id,       -- ADR-042: comment_id (p/ ocultar comentário)
                           (m.media_url IS NULL AND jsonb_exists_any(m.raw->'data'->'message', ${_NOS_MIDIA_SQL})) AS media_pendente,
-                          m.conteudo, m.reply_to_external_id AS reply_ext
+                          m.conteudo, m.reply_to_external_id AS reply_ext,
+                          NULL::timestamptz AS entregue_em, NULL::timestamptz AS lida_em
                      FROM messages m
                      JOIN conversations cv ON cv.id = m.conversation_id
                     WHERE cv.tenant_id = $1
@@ -123,7 +124,8 @@ const TIMELINE_SQL = `WITH reac AS (
                           s.deleted_at,  -- ACAO-1: exclusao da recepcao (direto da saida)
                           s.external_message_id,       -- ADR-042: paridade de colunas no UNION
                           (s.media_url IS NULL AND jsonb_exists_any(s.raw->'data'->'message', ${_NOS_MIDIA_SQL})) AS media_pendente,
-                          s.conteudo, s.reply_to_external_id AS reply_ext
+                          s.conteudo, s.reply_to_external_id AS reply_ext,
+                          s.entregue_em, s.lida_em   -- paridade 5: "Dados da mensagem"
                      FROM staff_outbound_samples s
                     WHERE s.tenant_id = $1
                       AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = $2
@@ -181,7 +183,13 @@ const TIMELINE_SQL = `WITH reac AS (
                             ORDER BY so.received_at DESC LIMIT 1) AS deleted_at,
                           NULL::text AS external_message_id,   -- ADR-042: paridade de colunas no UNION
                           false AS media_pendente,
-                          NULL::jsonb AS conteudo, NULL::text AS reply_ext
+                          NULL::jsonb AS conteudo, NULL::text AS reply_ext,
+                          (SELECT so.entregue_em FROM staff_outbound_samples so
+                            WHERE so.tenant_id = $1 AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
+                              AND so.body = pa.suggested_response ORDER BY so.received_at DESC LIMIT 1) AS entregue_em,
+                          (SELECT so.lida_em FROM staff_outbound_samples so
+                            WHERE so.tenant_id = $1 AND regexp_replace(so.external_id, '[^0-9]', '', 'g') = $2
+                              AND so.body = pa.suggested_response ORDER BY so.received_at DESC LIMIT 1) AS lida_em
                      FROM pending_approvals pa
                     WHERE pa.tenant_id = $1 AND pa.lead_id = $3
                       AND pa.status IN ('APPROVED', 'EDITED')
@@ -199,7 +207,9 @@ function mapTimelineRow(r) {
     media_url: r.media_url, media_type: r.media_type, media_filename: r.media_filename,
     media_transcription: r.media_transcription,
     reactions: Array.isArray(r.reactions) ? r.reactions : null,   // ADR-031 item 3
-    ack_status: r.ack_status || null,   // Fatia 1 — check so nas saidas (null no inbound)
+    ack_status: r.ack_status || null,
+    entregue_em: r.entregue_em || null,   // paridade 5: "Dados da mensagem"
+    lida_em: r.lida_em || null,   // Fatia 1 — check so nas saidas (null no inbound)
     edited_at: r.edited_at || null,      // Fatia 2 — marcador "editada" (inbound)
     deleted_at: r.deleted_at || null,    // Fatia 3 — marcador "apagada" (inbound)
     external_message_id: r.external_message_id || null,   // ADR-042 — comment_id (ocultar comentário)

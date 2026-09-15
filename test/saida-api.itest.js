@@ -34,24 +34,28 @@ before(async () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text, external_id text,
       external_message_id text, source text, sender text, body text, raw jsonb,
       media_url text, media_type text, media_filename text, reply_to_message_id uuid, reply_to_external_id text,
-      is_group boolean NOT NULL DEFAULT false, ack_status text, received_at timestamptz DEFAULT now());
+      is_group boolean NOT NULL DEFAULT false, ack_status text, received_at timestamptz DEFAULT now(),
+      entregue_em timestamptz, lida_em timestamptz);   -- migr. 117
     CREATE UNIQUE INDEX so_uq ON staff_outbound_samples (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL;
     CREATE TABLE pending_approvals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
       status text, created_at timestamptz DEFAULT now());
     -- migr. 114 (espelho): tique que chegou antes da mensagem
     CREATE TABLE wa_ack_pendente (tenant_id uuid NOT NULL, external_message_id text NOT NULL,
-      ack_status text NOT NULL, recebido_em timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, external_message_id));
+      ack_status text NOT NULL, recebido_em timestamptz NOT NULL DEFAULT now(), entregue_em timestamptz, lida_em timestamptz,
+      PRIMARY KEY (tenant_id, external_message_id));
     CREATE FUNCTION tg_staff_aplica_ack_pendente() RETURNS trigger AS $t$
-    DECLARE pend text;
+    DECLARE pend text; p_ent timestamptz; p_lida timestamptz;
     BEGIN
       IF NEW.external_message_id IS NULL THEN RETURN NEW; END IF;
       DELETE FROM wa_ack_pendente WHERE tenant_id = NEW.tenant_id AND external_message_id = NEW.external_message_id
-      RETURNING ack_status INTO pend;
+      RETURNING ack_status, entregue_em, lida_em INTO pend, p_ent, p_lida;
       IF pend IS NOT NULL AND
          (CASE pend WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END)
          > (CASE NEW.ack_status WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END) THEN
         NEW.ack_status := pend;
       END IF;
+      NEW.entregue_em := COALESCE(NEW.entregue_em, p_ent);
+      NEW.lida_em := COALESCE(NEW.lida_em, p_lida);
       RETURN NEW;
     END; $t$ LANGUAGE plpgsql;
     CREATE TRIGGER trg_staff_aplica_ack_pendente BEFORE INSERT ON staff_outbound_samples
@@ -135,4 +139,19 @@ test('(6) o evento de envio chega ANTES do registro do Regente -> o registro com
   assert.equal(s.source, 'api');
   const n = (await c.query('SELECT count(*)::int n FROM staff_outbound_samples WHERE external_message_id=$1', ['JN1'])).rows[0].n;
   assert.equal(n, 1, 'uma linha só');
+});
+
+test('(7) "Dados da mensagem": hora da entrega e da leitura — direto e quando o tique chega antes', async () => {
+  await webhook.atualizarAckStatus(T1, { event: 'messages.update', data: { keyId: 'RH1', fromMe: true, status: 'READ' } });
+  const s1 = await saida('RH1');
+  assert.ok(s1.entregue_em, 'entrega (já estava delivered sem hora: ganha a hora na leitura)');
+  assert.ok(s1.lida_em);
+  await webhook.atualizarAckStatus(T1, { event: 'messages.update', data: { keyId: 'INFO1', fromMe: true, status: 'DELIVERY_ACK' } });
+  await staffSamples.captureOutbound(T1,
+    { externalId: '5519999990003', externalMessageId: 'INFO1', source: 'regente-auto', body: 'Lembrete da aula' },
+    eco('5519999990003@s.whatsapp.net', 'INFO1'));
+  const s2 = await saida('INFO1');
+  assert.equal(s2.ack_status, 'delivered');
+  assert.ok(s2.entregue_em, 'a hora da entrega veio com o tique pendente');
+  assert.equal(s2.lida_em, null);
 });

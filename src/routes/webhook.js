@@ -241,7 +241,10 @@ async function atualizarAckStatus(tenantId, body, log) {
     for (const u of updates) {
       const r = await c.query(
         `UPDATE staff_outbound_samples
-            SET ack_status = $2
+            SET ack_status = $2,
+                -- paridade 5 ("Dados da mensagem"): hora em que o tique chegou (evento em tempo real)
+                entregue_em = CASE WHEN $2 IN ('delivered', 'read') THEN COALESCE(entregue_em, now()) ELSE entregue_em END,
+                lida_em = CASE WHEN $2 = 'read' THEN COALESCE(lida_em, now()) ELSE lida_em END
           WHERE tenant_id = $1 AND external_message_id = $3
             AND (ack_status IS NULL OR
                  (CASE ack_status WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END)
@@ -255,11 +258,14 @@ async function atualizarAckStatus(tenantId, body, log) {
           [tenantId, u.id])).rows[0];
         if (!existe) {
           await c.query(
-            `INSERT INTO wa_ack_pendente (tenant_id, external_message_id, ack_status) VALUES ($1, $2, $3)
+            `INSERT INTO wa_ack_pendente (tenant_id, external_message_id, ack_status, entregue_em, lida_em)
+             VALUES ($1, $2, $3, CASE WHEN $3 IN ('delivered', 'read') THEN now() END, CASE WHEN $3 = 'read' THEN now() END)
              ON CONFLICT (tenant_id, external_message_id) DO UPDATE
                SET ack_status = CASE WHEN (CASE EXCLUDED.ack_status WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END)
                                         > (CASE wa_ack_pendente.ack_status WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END)
                                      THEN EXCLUDED.ack_status ELSE wa_ack_pendente.ack_status END,
+                   entregue_em = COALESCE(wa_ack_pendente.entregue_em, EXCLUDED.entregue_em),
+                   lida_em = COALESCE(wa_ack_pendente.lida_em, EXCLUDED.lida_em),
                    recebido_em = now()`,
             [tenantId, u.id, u.ack]);
           pendentes += 1;
