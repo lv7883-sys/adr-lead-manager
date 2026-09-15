@@ -33,6 +33,7 @@ before(async () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
       external_id text, conversation_kind text DEFAULT 'DIRECT', updated_at timestamptz DEFAULT now(), last_read_at timestamptz,
       renovacao_draft boolean DEFAULT false,   -- migr. 097 (Fase B)
+      arquivada_em timestamptz, fixada_em timestamptz, silenciada_ate timestamptz,   -- migr. 118
       -- migr. 111 (atividade materializada, mantida por gatilho) + 112 (DEFAULT p/ conversa sem mensagem)
       last_activity_at timestamptz DEFAULT now(),
       -- migr. 112: chave de telefone materializada (a query casa contrato/cadastro por ela)
@@ -324,6 +325,25 @@ test('(5) filtros view / fonte / q', async () => {
   assert.ok(byExt((await list(tenant, { q: 'professores', grupos: ['120363000000000500@g.us'], limit: 50 })).items, '120363000000000500@g.us'), 'busca acha o grupo pelo nome');
   assert.ok(!byExt((await list(tenant, { q: 'professores', limit: 50 })).items, '120363000000000500@g.us'), 'sem a lista, não casa');
   assert.ok(byExt((await list(tenant, { q: 'professores', grupos: ['120363000000000500@g.us'], fonte: 'whatsapp', limit: 50 })).items, '120363000000000500@g.us'), 'também fora do caminho rápido');
+});
+
+test('(5b) arquivadas saem da lista e aparecem em Arquivadas; fixadas separadas; busca acha arquivada', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000e6'; await cfg(tenant, 7);
+  const cArq = await conv(tenant, H(600)); await msg(cArq);
+  const cFix = await conv(tenant, H(601)); await msg(cFix);
+  const cNormal = await conv(tenant, H(602)); await msg(cNormal);
+  await c.query('UPDATE conversations SET arquivada_em = now() WHERE id = $1', [cArq]);
+  await c.query("UPDATE conversations SET fixada_em = now(), silenciada_ate = now() + interval '1 day' WHERE id = $1", [cFix]);
+  const todas = (await list(tenant, { limit: 50 })).items;
+  assert.ok(!byExt(todas, H(600)) && byExt(todas, H(602)), 'arquivada some da lista');
+  const arq = (await list(tenant, { arquivadas: true, limit: 50 })).items;
+  assert.ok(byExt(arq, H(600)) && !byExt(arq, H(602)) && byExt(arq, H(600)).arquivada === true);
+  const fix = (await list(tenant, { fixadas: 'so', limit: 50 })).items;
+  assert.deepEqual(fix.map((i) => i.external_id), [H(601)]);
+  assert.equal(fix[0].fixada, true); assert.equal(fix[0].silenciada, true);
+  assert.ok(!byExt((await list(tenant, { fixadas: 'fora', limit: 50 })).items, H(601)));
+  assert.ok(byExt((await list(tenant, { q: '19000000600', limit: 50 })).items, H(600)), 'busca acha arquivada');
+  assert.ok(!byExt((await list(tenant, { fonte: 'whatsapp', limit: 50 })).items, H(600)), 'fora do caminho rápido também');
 });
 
 test('(6) keyset pagination sem sobreposição', async () => {

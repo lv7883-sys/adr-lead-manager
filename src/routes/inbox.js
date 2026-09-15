@@ -90,7 +90,7 @@ function foldAcentoSql(expr) {
 
 // Monta { sql, params } da listagem (E12-03). `cursor` = objeto decodificado {ts,id} | null.
 // FONTE ÚNICA da query — usada pelo handler (sob withTenant/RLS) e pelo itest (como postgres).
-function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = null, limit = 30, cursor = null, grupos = null } = {}) {
+function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = null, limit = 30, cursor = null, grupos = null, arquivadas = false, fixadas = null } = {}) {
   const v = VIEWS.has(view) ? view : 'todas';
   const lim = Math.min(Math.max(parseInt(limit, 10) || 30, 1), 50);
 
@@ -140,6 +140,11 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   } else {
     // Rascunho de renovação só aparece na aba Renovação — nunca na Caixa normal (Todas/Leads/Outras).
     extra.push('renovacao_draft IS NOT TRUE');
+    // ARQUIVADAS (migr. 118): como no WhatsApp, saem da lista (Todas/Leads/Outras) e vão para "Arquivadas"; a busca
+    // procura em todas. A aba Renovações é fila de trabalho do Regente: não esconde nada.
+    if (!q) extra.push(arquivadas ? 'arquivada_em IS NOT NULL' : 'arquivada_em IS NULL');
+    if (fixadas === 'so') extra.push('fixada_em IS NOT NULL');
+    else if (fixadas === 'fora') extra.push('fixada_em IS NULL');
     if (v === 'leads') extra.push('is_lead = true');
     else if (v === 'nao_lead') extra.push('is_lead = false');
   }
@@ -287,6 +292,9 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     if (v === 'renovacoes') cortePre.push('cv.id IN (SELECT id FROM renovsel)');
     else {
       cortePre.push('cv.renovacao_draft IS NOT TRUE');   // rascunho só aparece na aba Renovação
+      if (!q) cortePre.push(arquivadas ? 'cv.arquivada_em IS NOT NULL' : 'cv.arquivada_em IS NULL');   // migr. 118
+      if (fixadas === 'so') cortePre.push('cv.fixada_em IS NOT NULL');
+      else if (fixadas === 'fora') cortePre.push('cv.fixada_em IS NULL');
       if (v === 'leads') cortePre.push('cv.id IN (SELECT id FROM leadsel)');
       else if (v === 'nao_lead') cortePre.push('NOT EXISTS (SELECT 1 FROM leadsel ls WHERE ls.id = cv.id)');
     }
@@ -306,7 +314,8 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     conv AS (
       SELECT cv.id AS conversation_id, cv.channel, cv.external_id, cv.last_read_at,
              cv.updated_at, cv.conversation_kind, cv.renovacao_draft, ${IDENT_CONV} AS ident,
-             cv.br_key AS rkey   -- chave canônica p/ casar contrato (migr. 085)
+             cv.br_key AS rkey,  -- chave canônica p/ casar contrato (migr. 085)
+             cv.arquivada_em, cv.fixada_em, cv.silenciada_ate   -- migr. 118
         FROM conversations cv
        WHERE cv.tenant_id = $1
 ${cortaCedo}
@@ -399,6 +408,7 @@ ${renovCtesDepois}
                  WHERE rd.tenant_id = $1 AND rd.br_key = m.rkey
                    AND rd.venc IS NOT DISTINCT FROM rn.venc) AS dismissed,
         m.renovacao_draft,   -- rascunho de renovação (migr. 097): só na aba Renovação até enviar
+        m.arquivada_em, m.fixada_em, m.silenciada_ate,   -- migr. 118
         m.lead_id, m.lead_status, m.lead_desfecho,
         -- Nome do CONTATO = quem você realmente fala (pushName do WhatsApp) PRIMEIRO; cadastro/lead como
         -- fallback. Recepcionistas reclamavam que aparecia o ALUNO quando o contato é o pai/responsável.
@@ -477,6 +487,9 @@ function mapConversationRow(r) {
     } : null,
     last_activity_at: r.last_activity_at,
     nao_lidas: Number(r.nao_lidas) || 0,
+    arquivada: !!r.arquivada_em,   // migr. 118
+    fixada: !!r.fixada_em,
+    silenciada: !!r.silenciada_ate && (String(r.silenciada_ate) === 'infinity' || new Date(r.silenciada_ate).getTime() > Date.now()),
     // ADR-049: presente quando a pessoa tem contrato com vencimento (renovação). venc = data ISO
     // (YYYY-MM-DD); dias = dias até vencer (negativo = vencido). O estágio (D-45/30/15/7/vencido)
     // é rotulado no dashboard, reusando a lógica da régua.
@@ -1065,12 +1078,14 @@ router.get('/:tenantId/inbox/conversations', authenticate, requireTenantAccess(R
   const fonte = typeof req.query.fonte === 'string' && req.query.fonte.trim() ? req.query.fonte.trim() : null;
   const q = typeof req.query.q === 'string' && req.query.q.trim() ? req.query.q.trim() : null;
   const grupos = typeof req.query.grupos === 'string' && req.query.grupos ? req.query.grupos.split(',') : null;
+  const arquivadas = req.query.arquivadas === '1';
+  const fixadas = ['so', 'fora'].includes(req.query.fixadas) ? req.query.fixadas : null;
   const cursor = req.query.cursor ? decodeCursor(req.query.cursor) : null;
   if (req.query.cursor && !cursor) return res.status(400).json({ error: 'invalid_cursor' });
 
   try {
     const { items, next_cursor } = await withTenant(req.tenantId, (c) =>
-      listConversations(c, req.tenantId, { view, fonte, q, grupos, limit: req.query.limit, cursor }));
+      listConversations(c, req.tenantId, { view, fonte, q, grupos, arquivadas, fixadas, limit: req.query.limit, cursor }));
     res.json({ tenant_id: req.tenantId, view, count: items.length, items, next_cursor });
   } catch (err) {
     logger.error('tenant.inbox.conversations.error', { tenant_id: req.tenantId, error: err.message });
@@ -1115,6 +1130,39 @@ router.get('/:tenantId/inbox/contatos-whatsapp', authenticate, requireTenantAcce
   } catch (err) {
     logger.error('tenant.inbox.contatos_whatsapp.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /tenant/:tenantId/inbox/arquivadas-resumo — a linha "Arquivadas" da lista: quantas e quantas com não lidas.
+router.get('/:tenantId/inbox/arquivadas-resumo', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const r = await withTenant(req.tenantId, async (c) => (await c.query(
+      `SELECT count(*)::int AS total,
+              count(*) FILTER (WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = cv.id AND m.role = 'USER'
+                                  AND ${naoEhReacaoSql('m')} AND (cv.last_read_at IS NULL OR m.received_at > cv.last_read_at)))::int AS com_nao_lidas
+         FROM conversations cv WHERE cv.tenant_id = $1 AND cv.arquivada_em IS NOT NULL AND cv.renovacao_draft IS NOT TRUE`, [req.tenantId])).rows[0]);
+    res.json(r);
+  } catch (err) {
+    logger.error('tenant.inbox.arquivadas_resumo.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tenantId/inbox/conversations/:conversationId/arquivar  { arquivar: true|false } — como no WhatsApp; vale no celular.
+router.post('/:tenantId/inbox/conversations/:conversationId/arquivar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { conversationId } = req.params;
+  if (!isUuid(conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
+  const arquivar = req.body?.arquivar !== false;
+  try {
+    const n = await withTenant(req.tenantId, (c) => c.query(
+      'UPDATE conversations SET arquivada_em = CASE WHEN $3 THEN COALESCE(arquivada_em, now()) ELSE NULL END WHERE id = $1 AND tenant_id = $2',
+      [conversationId, req.tenantId, arquivar]).then((r) => r.rowCount));
+    if (!n) return res.status(404).json({ error: 'conversation_not_found' });
+    res.json({ ok: true, arquivada: arquivar });
+    leituraWhatsapp.arquivarNoWhatsapp(req.tenantId, conversationId, arquivar).catch(() => {});
+  } catch (err) {
+    logger.error('tenant.inbox.arquivar.error', { tenant_id: req.tenantId, error: err.message });
+    if (!res.headersSent) res.status(500).json({ error: 'internal error' });
   }
 });
 

@@ -103,4 +103,31 @@ async function marcarNaoLidaNoWhatsapp(tenantId, conversationId, deps = {}) {
   }
 }
 
-module.exports = { chavesParaLer, lerNoWhatsapp, marcarNaoLidaNoWhatsapp, _jidLegivel };
+// Arquivar/desarquivar no Regente -> vale no celular e no Web (a Evolution precisa da última mensagem da conversa).
+async function arquivarNoWhatsapp(tenantId, conversationId, arquivar, deps = {}) {
+  try {
+    const run = deps.withTenant || withTenant;
+    const ult = await run(tenantId, async (c) => (await c.query(
+      `SELECT m.external_message_id AS id, m.raw#>'{data,key}' AS k, m.received_at, false AS nossa, cv.external_id, cv.conversation_kind
+         FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+        WHERE m.conversation_id = $1 AND cv.tenant_id = $2 AND m.external_message_id IS NOT NULL AND m.external_message_id NOT LIKE 'sis:%' AND m.external_message_id NOT LIKE 'call:%'
+        ORDER BY m.received_at DESC LIMIT 1`, [conversationId, tenantId])).rows[0]);
+    if (!ult) return { ok: false, reason: 'sem_mensagem' };
+    const k = ult.k || {};
+    const ehGrupo = ult.conversation_kind === 'GROUP' || String(ult.external_id).includes('@g.us');
+    const remoteJid = k.remoteJid || _jidLegivel(k, {}, ult.external_id, ehGrupo);
+    if (!remoteJid) return { ok: false, reason: 'sem_jid' };
+    const key = { remoteJid, fromMe: false, id: String(ult.id) };
+    if (ehGrupo && k.participant) key.participant = k.participant;
+    const creds = await (deps.credsForTenant || require('./outbound').credsForTenant)(tenantId);
+    if (!creds || !creds.instance || !creds.apikey) return { ok: false, reason: 'tenant_sem_evolution' };
+    await (deps.evolution || require('./evolution')).archiveChat(creds, {
+      lastMessage: { key, messageTimestamp: Math.floor(new Date(ult.received_at).getTime() / 1000) }, chat: remoteJid, archive: !!arquivar });
+    return { ok: true };
+  } catch (e) {
+    logger.warn('inbox.arquivar_whatsapp_falhou', { tenant_id: tenantId, conversation_id: conversationId, error: e.message });
+    return { ok: false, erro: e.message };
+  }
+}
+
+module.exports = { chavesParaLer, lerNoWhatsapp, marcarNaoLidaNoWhatsapp, arquivarNoWhatsapp, _jidLegivel };

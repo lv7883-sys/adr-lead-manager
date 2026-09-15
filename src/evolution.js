@@ -284,6 +284,11 @@ async function findParticipants({ instance, apikey }, groupJid) {
   return (d && Array.isArray(d.participants)) ? d.participants : [];
 }
 
+// Arquivar/desarquivar a conversa no celular e no Web (mesmo formato do markChatUnread + archive).
+async function archiveChat({ instance, apikey }, body) {
+  return req('POST', `/chat/archiveChat/${encodeURIComponent(instance)}`, apikey, body);
+}
+
 // Paridade 4 — leitura vai para o WhatsApp. readMessages = [{ remoteJid (número ou grupo), fromMe:false, id }].
 // A Evolution descarta jid @lid aqui (só aceita número/grupo) — o chamador converte.
 async function markMessageAsRead({ instance, apikey }, readMessages) {
@@ -295,4 +300,4 @@ async function markChatUnread({ instance, apikey }, body) {
   return req('POST', `/chat/markChatUnread/${encodeURIComponent(instance)}`, apikey, body);
 }
 
-module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, findMessages, markMessageAsRead, markChatUnread, sendLocation, sendContact, sendPoll, findParticipants, _toggle9BR };
+module.exports = { status, sendText, sendMedia, sendWhatsAppAudio, sendReaction, pickMessageId, getBase64FromMediaMessage, deleteMessage, editMessage, findChats, findMessages, markMessageAsRead, markChatUnread, sendLocation, sendContact, sendPoll, findParticipants, archiveChat, _toggle9BR };

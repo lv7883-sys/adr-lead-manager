@@ -15,7 +15,8 @@ const waSync = require('../waSync');          // reconexão → backfill do hist
 const waEdicao = require('../waEdicao');      // edição cifrada do WhatsApp (paridade 2)
 const waConteudo = require('../waConteudo');  // tradutor único do conteúdo (paridade 3)
 const waEnquete = require('../waEnquete');    // voto de enquete cifrado (paridade 3)
-const waEventos = require('../waEventos');     // paridade 6: ligação e eventos de grupo
+const waEventos = require('../waEventos');
+const waChats = require('../waChats');         // paridade: estado da lista de conversas vindo do celular     // paridade 6: ligação e eventos de grupo
 const { decrypt } = require('../crypto');
 
 const router = express.Router();
@@ -526,6 +527,8 @@ async function handleZapiWebhook(req, res) {
 
   // LIGAÇÃO e EVENTOS DE GRUPO (paridade 6): viram aviso no meio da conversa, como no WhatsApp. Não são mensagem.
   if (waEventos.tratarEvento(tenant.id, req.body, log)) return;
+  // NÃO LIDA / LIDA / ARQUIVAR / FIXAR / SILENCIAR feitos no celular ou no Web (chats.update completo — Evolution corrigida)
+  if (waChats.tratarEvento(tenant.id, req.body, log)) return;
 
   // PROTOCOLO (paridade 3): a Evolution desvia TODA protocolMessage do upsert para o evento messages.edited —
   // edição feita no celular/Web da escola e "apagar para todos". Não é bolha: aplica na original e retorna.
