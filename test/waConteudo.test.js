@@ -127,3 +127,11 @@ test('foto de álbum, temporárias, produto e pedido viram bolha', () => {
   assert.match(descrever({ orderMessage: { itemCount: 2, orderTitle: 'Kit' } }).texto, /Pedido \(2 itens\): Kit/);
   assert.equal(descrever({ albumMessage: { expectedImageCount: 3 } }).semConteudo, true, 'cabeçalho do álbum não é bolha');
 });
+
+test('funil e Janis como antes: cartão (localização, contato, enquete…) chega VAZIO ao funil; texto e mídia não mudam', () => {
+  assert.equal(wh.textoDeCartaoForaDoFunil({ conteudo: { tipo: 'localizacao' }, body: '📍 Localização: Academia' }), '📍 Localização: Academia');
+  assert.equal(wh.textoDeCartaoForaDoFunil({ conteudo: { tipo: 'resposta' }, body: '✅ Sim' }), '✅ Sim');
+  assert.equal(wh.textoDeCartaoForaDoFunil({ conteudo: { tipo: 'texto', contexto: { encaminhada: true } }, body: 'oi' }), null);
+  assert.equal(wh.textoDeCartaoForaDoFunil({ conteudo: { tipo: 'link' }, body: 'olha https://x' }), null);
+  assert.equal(wh.textoDeCartaoForaDoFunil({ body: 'oi' }), null);
+});

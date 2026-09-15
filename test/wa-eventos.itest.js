@@ -5,7 +5,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { Client } = require('pg');
 const ev = require('../src/waEventos');
-const { naoEhReacaoSql } = require('../src/reacao');
+const { naoEhReacaoSql, MARCA_SISTEMA: MARCA } = require('../src/reacao');
 
 let c;
 const T1 = '00000000-0000-0000-0000-0000000000d6';
@@ -40,15 +40,15 @@ test('(1) ligação perdida: toca -> não atendida -> "📞 Chamada de voz perdi
   await ev.registrarChamada(T1, { ...base, status: 'offer' }, { withTenant: run });
   let r = await linhas('call:CALL1');
   assert.equal(r.length, 1);
-  assert.equal(r[0].body, '📞 Chamada de voz');
+  assert.equal(r[0].body.replace(MARCA, ''), '📞 Chamada de voz');
   await ev.registrarChamada(T1, { ...base, status: 'terminate' }, { withTenant: run });
   r = await linhas('call:CALL1');
   assert.equal(r.length, 1);
-  assert.equal(r[0].body, '📞 Chamada de voz perdida');
+  assert.equal(r[0].body.replace(MARCA, ''), '📞 Chamada de voz perdida');
   assert.equal(r[0].conteudo.tipo, 'chamada');
   assert.equal(r[0].external_id, '5519999990001');
   const n = (await c.query(`SELECT count(*)::int n FROM messages m WHERE m.external_message_id='call:CALL1' AND ${naoEhReacaoSql('m')}`)).rows[0].n;
-  assert.equal(n, 1, 'ligação conta como não lida');
+  assert.equal(n, 0, 'ligação não vira turno do cliente nem não lida (indicadores do Regente iguais a antes)');
 });
 
 test('(2) ligação de vídeo atendida e depois encerrada continua atendida (não vira perdida)', async () => {
@@ -57,7 +57,7 @@ test('(2) ligação de vídeo atendida e depois encerrada continua atendida (nã
   await ev.registrarChamada(T1, { ...base, status: 'accept' }, { withTenant: run });
   await ev.registrarChamada(T1, { ...base, status: 'terminate' }, { withTenant: run });
   const r = await linhas('call:CALL2');
-  assert.equal(r[0].body, '📞 Chamada de vídeo');
+  assert.equal(r[0].body.replace(MARCA, ''), '📞 Chamada de vídeo');
   assert.equal(r[0].conteudo.estado, 'atendida');
 });
 
@@ -67,7 +67,7 @@ test('(3) ligação de quem nunca escreveu cria a conversa; @lid usa o número a
   assert.equal(r[0].resultado, 'recusada');
   const l = await linhas('call:CALL3');
   assert.equal(l[0].external_id, '5519988887777');
-  assert.equal(l[0].body, '📞 Chamada de voz recusada');
+  assert.equal(l[0].body.replace(MARCA, ''), '📞 Chamada de voz recusada');
 });
 
 test('(4) grupo: adicionou / entrou / saiu / removeu / admin, com nomes, e não contam como não lida', async () => {

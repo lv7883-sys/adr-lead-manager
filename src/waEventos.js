@@ -1,9 +1,8 @@
 'use strict';
 // waEventos.js — paridade com o WhatsApp, etapa 6: o que acontece na conversa sem ser mensagem.
 //
-//  - LIGAÇÃO (evento call): "📞 Chamada de voz perdida" / "Chamada de vídeo" no meio da conversa. Conta como
-//    não lida (no WhatsApp também) — é a ligação que a recepção não viu. Nunca aciona a Janis (não passa pelo
-//    funil de entrada: é gravada direto).
+//  - LIGAÇÃO (evento call): "📞 Chamada de voz perdida" / "Chamada de vídeo" no meio da conversa. Marca de sistema:
+//    não vira turno do cliente nem não lida (indicadores do Regente iguais a antes). Nunca aciona a Janis.
 //  - GRUPO (group-participants.update / groups.update): "Fulano entrou", "X adicionou Y", "Y saiu",
 //    "X mudou o nome do grupo para …". Não conta como não lida (marca de sistema, src/reacao.js).
 //
@@ -112,7 +111,9 @@ async function registrarChamada(tenantId, data, deps = {}) {
       if (novo === 'tocando' && anterior && anterior !== 'tocando') estado = anterior;
       const video = !!ch.isVideo;
       const at = ch.date ? new Date(ch.date) : new Date();
-      await _gravar(c, { tenantId, conversationId: cv.id, externalId: ext, body: textoChamada(video, estado), at: isNaN(at) ? new Date() : at,
+      // marca de sistema: a ligação aparece na conversa, mas não vira "turno do cliente" (bola, devemos resposta,
+      // retomada) nem não lida — os indicadores do Regente ficam iguais a antes
+      await _gravar(c, { tenantId, conversationId: cv.id, externalId: ext, body: textoSistema(textoChamada(video, estado)), at: isNaN(at) ? new Date() : at,
         conteudo: { tipo: 'chamada', video, perdida: estado === 'perdida', estado }, raw: { event: 'call', data: ch } });
       return { id: ch.id, resultado: estado };
     });

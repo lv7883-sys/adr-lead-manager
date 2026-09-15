@@ -452,6 +452,36 @@ async function marcarLidoPorRecibo(tenantId, body, log) {
 // Paridade 3: grava o cartão (conteudo) e a citação feita no celular (reply_to_external_id) na linha que
 // acabou de entrar — mesmo padrão da cura de mídia: os 7 INSERTs do funil ficam intocados. Não sobrescreve
 // conteúdo existente (a enquete acumula votos em conteudo.votos).
+// FUNIL E JANIS IDÊNTICOS A ANTES DA PARIDADE (pedido do Leo, 15/09/2026). Antes da etapa 3, estes tipos chegavam
+// com texto vazio: o funil (portões/identificação de lead) e a Janis não os viam como fala do cliente. O cartão agora
+// aparece na tela, mas o funil e a Janis continuam recebendo o MESMO vazio de antes; o texto do cartão só é gravado
+// depois, na linha da conversa (garantirLinhaDoCartao).
+const _CARTAO_FORA_DO_FUNIL = new Set(['localizacao', 'contato', 'enquete', 'lista', 'resposta', 'botoes', 'evento', 'convite_grupo', 'sistema', 'chamada']);
+function textoDeCartaoForaDoFunil(m) {
+  const tipo = m && m.conteudo && m.conteudo.tipo;
+  return (tipo && _CARTAO_FORA_DO_FUNIL.has(tipo) && !m.media && m.body) ? m.body : null;
+}
+// Sem texto, o funil não grava a mensagem de quem não é lead (captureInboundOnly exige body): garante a linha com o cartão.
+async function garantirLinhaDoCartao(tenantId, m, texto, rawBody, log) {
+  if (!texto || !m.externalMessageId) return;
+  try {
+    await withTenant(tenantId, async (c) => {
+      const up = await c.query(
+        "UPDATE messages SET body = $3 WHERE tenant_id = $1 AND external_message_id = $2 AND coalesce(body, '') = ''",
+        [tenantId, m.externalMessageId, texto]);
+      if (up.rowCount) return;
+      const existe = (await c.query('SELECT 1 FROM messages WHERE tenant_id = $1 AND external_message_id = $2', [tenantId, m.externalMessageId])).rows[0];
+      if (existe) return;
+      const conv = await engine.upsertConversation(c, tenantId, 'whatsapp', m.externalId);
+      await c.query(
+        `INSERT INTO messages (tenant_id, conversation_id, direction, role, external_message_id, sender, body, raw)
+         VALUES ($1, $2, 'inbound', 'USER', $3, $4, $5, $6)
+         ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING`,
+        [tenantId, conv.id, m.externalMessageId, m.sender || null, texto, rawBody || null]);
+    });
+  } catch (e) { if (log) log.warn('cartao.linha_falhou', { error: e.message }); }
+}
+
 async function gravarExtras(tenantId, m, log) {
   if (!m || !m.externalMessageId || !m.conteudo) return;
   const citada = (m.conteudo.contexto && m.conteudo.contexto.citadaId) || null;
@@ -687,7 +717,10 @@ async function handleZapiWebhook(req, res) {
   // funil, pra a mensagem ser persistida já com a mídia. Best-effort, não trava.
   const processar = async () => {
     await baixarMidiaInbound(tenant, msg, log);
+    const textoCartao = textoDeCartaoForaDoFunil(msg);
+    if (textoCartao) msg.body = null;   // funil e Janis recebem o mesmo vazio de antes
     await engine.processInbound(tenant, msg, req.body);
+    await garantirLinhaDoCartao(tenant.id, msg, textoCartao, req.body, log);
     await curarMidia(tenant, msg, log);
     await gravarExtras(tenant.id, msg, log);
     // ADR-006+ — resposta automática FORA DO HORÁRIO (a "Janis"). Best-effort: roda DEPOIS de
@@ -709,6 +742,7 @@ module.exports.detectarMidia = detectarMidia;
 module.exports.detectarReacao = detectarReacao;
 module.exports._idsRecibosLeituraInbound = _idsRecibosLeituraInbound;
 module.exports._detectEdit = _detectEdit;
+module.exports.textoDeCartaoForaDoFunil = textoDeCartaoForaDoFunil;
 module.exports._detectDelete = _detectDelete;
 module.exports.aplicarEdicao = aplicarEdicao;
 module.exports.marcarApagada = marcarApagada;
