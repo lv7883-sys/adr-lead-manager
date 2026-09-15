@@ -12,6 +12,7 @@ const gemini = require('../gemini');
 const media = require('../media');
 const autoReply = require('../autoReply');   // ADR-006+ resposta automática fora do horário
 const waSync = require('../waSync');          // reconexão → backfill do histórico offline
+const waEdicao = require('../waEdicao');      // edição cifrada do WhatsApp (paridade 2)
 const { decrypt } = require('../crypto');
 
 const router = express.Router();
@@ -118,7 +119,9 @@ function detectarReacao(m) {
 // e não baixável; os wrappers viewOnce* embrulham a mídia real. Aqui só sinalizamos p/ o
 // placeholder — decodificar/baixar view-once é frente futura, fora deste ADR.
 function ehViewOnce(m) {
-  return !!(m && (m.secretEncryptedMessage || m.viewOnceMessage || m.viewOnceMessageV2 || m.viewOnceMessageV2Extension));
+  // secretEncryptedMessage NÃO é visualização única: é edição cifrada de outra mensagem (waEdicao.js).
+  // Tratá-la como view-once criou 785 bolhas falsas "[mensagem de visualização única]" até 15/09/2026.
+  return !!(m && (m.viewOnceMessage || m.viewOnceMessageV2 || m.viewOnceMessageV2Extension));
 }
 
 // 200 silencioso: reconhece o webhook sem revelar nada nem processar.
@@ -299,15 +302,22 @@ function _detectEdit(body) {
 // Guarda o 1º corpo em original_body (auditoria, idempotente via COALESCE), troca o body
 // e seta edited_at. Idempotente (reeditar atualiza de novo). Ignora se não achar a mensagem
 // (0 linhas; nunca cria). Só INBOUND casa (outbound tem external_message_id NULL em messages).
+// Paridade 2: vale também para mensagem da ESCOLA editada no celular/Web (antes só a do cliente mudava).
 async function aplicarEdicao(tenantId, edit, log) {
-  const n = await withTenant(tenantId, (c) => c.query(
-    `UPDATE messages
-        SET original_body = COALESCE(original_body, body),
-            body = $2,
-            edited_at = now()
-      WHERE tenant_id = $1 AND external_message_id = $3`,
-    [tenantId, edit.body, edit.id]
-  ).then((r) => r.rowCount));
+  const n = await withTenant(tenantId, async (c) => {
+    let tot = 0;
+    for (const tabela of ['messages', 'staff_outbound_samples']) {
+      const r = await c.query(
+        `UPDATE ${tabela}
+            SET original_body = COALESCE(original_body, body),
+                body = $2,
+                edited_at = now()
+          WHERE tenant_id = $1 AND external_message_id = $3`,
+        [tenantId, edit.body, edit.id]);
+      tot += r.rowCount;
+    }
+    return tot;
+  });
   if (log) log.info('edit.applied', { id: edit.id, aplicados: n });
 }
 
@@ -438,6 +448,18 @@ async function handleZapiWebhook(req, res) {
   if (String(req.body?.event || '').toLowerCase() === 'connection.update') {
     waSync.handleConnectionUpdate(tenant.id, req.body).catch((e) => log.warn('wa_sync.webhook_unhandled', { error: e.message }));
     return;
+  }
+
+  // EDIÇÃO CIFRADA (paridade 2): não é mensagem nova — decifra e aplica na ORIGINAL e retorna, antes de
+  // qualquer ingestão. Vale para upsert, send.message e update. E todo payload ensina pares número <-> @lid
+  // (a chave da edição usa o @lid de quem editou).
+  const dataEv = req.body && req.body.data;
+  if (dataEv && !Array.isArray(dataEv) && dataEv.key) {
+    if (dataEv.message && waEdicao.ehEdicaoCifrada(dataEv.message)) {
+      waEdicao.aplicarEdicaoCifrada(tenant.id, dataEv).catch((e) => log.warn('wa_edicao.unhandled', { error: e.message }));
+      return;
+    }
+    waEdicao.aprenderLids(tenant.id, dataEv.key).catch((e) => log.warn('wa_lid.unhandled', { error: e.message }));
   }
 
   // Fatia 3 — EXCLUSÃO (apagar p/ todos): evento dedicado messages.delete OU protocolMessage

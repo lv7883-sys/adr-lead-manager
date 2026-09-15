@@ -40,6 +40,10 @@ function mapEvolutionMsg(rec) {
   let body = (m.conversation != null ? m.conversation
     : (m.extendedTextMessage && m.extendedTextMessage.text != null ? m.extendedTextMessage.text : null));
   if (body == null || body === '') body = _placeholderMidia(m) || '';
+  // Sem conteúdo reconhecível NÃO vira bolha (paridade 2): edição cifrada, protocolo (apagar/editar),
+  // distribuição de chave... Antes entravam com body '' e viravam 2.954 bolhas vazias. Edições cifradas
+  // são aplicadas na original pelo waSync (waEdicao); os demais tipos de conteúdo entram na etapa 3.
+  if (!body) return null;
   return {
     externalMessageId: rec.key.id ? String(rec.key.id) : null,
     fromMe: !!rec.key.fromMe,

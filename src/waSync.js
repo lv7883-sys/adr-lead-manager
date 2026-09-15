@@ -20,6 +20,7 @@ const logger = require('./logger');
 const evolutionDefault = require('./evolution');
 const { credsForTenant } = require('./outbound');
 const { mapEvolutionMsg, importarConversa } = require('./importHistorico');
+const waEdicao = require('./waEdicao');   // edição cifrada encontrada no histórico: aplica na original
 
 // DEEP (reconexão) = varre TODAS as conversas do tenant (sem janela de tempo) e puxa o HISTÓRICO
 // INTEIRO de cada uma — garantia de "100% atualizado". SHALLOW (safety-net periódico) = mesma
@@ -127,6 +128,12 @@ async function backfillChat(tenantId, creds, chat, deps = {}) {
   const dig = _telefoneDoChat(jid, records);
   if (!dig) return { inseridos: 0, pulados: 0, paginas, erro: 'sem_telefone' };
 
+  // edições cifradas do histórico: aplicadas na original (nunca viram bolha). Best-effort, uma a uma.
+  for (const rec of records) {
+    if (rec && rec.key && rec.message && waEdicao.ehEdicaoCifrada(rec.message)) {
+      await waEdicao.aplicarEdicaoCifrada(tenantId, rec).catch((e) => logger.warn('wa_sync.edicao_falhou', { tenant_id: tenantId, error: e.message }));
+    }
+  }
   const msgs = records.map(mapEvolutionMsg).filter(Boolean);
   if (!msgs.length) return { inseridos: 0, pulados: 0, paginas };
 
