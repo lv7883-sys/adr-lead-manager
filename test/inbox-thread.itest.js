@@ -26,7 +26,8 @@ before(async () => {
     $fn$;
     CREATE TABLE conversations (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
-      external_id text, conversation_kind text DEFAULT 'DIRECT', updated_at timestamptz DEFAULT now(), last_read_at timestamptz);
+      external_id text, conversation_kind text DEFAULT 'DIRECT', updated_at timestamptz DEFAULT now(), last_read_at timestamptz,
+      arquivada_em timestamptz, fixada_em timestamptz, silenciada_ate timestamptz);   -- migr. 118
     CREATE TABLE messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), conversation_id uuid, role text, sender text,
       body text, media_url text, media_type text, media_filename text, media_transcription text,
