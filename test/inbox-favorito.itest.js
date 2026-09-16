@@ -34,7 +34,8 @@ before(async () => {
       suggested_response text, status text, reply_to_message_id uuid, created_at timestamptz DEFAULT now());
     CREATE TABLE leads (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, phone text,
-      meta_psid text, status text, desfecho text, origem text, created_at timestamptz DEFAULT now());
+      meta_psid text, status text, desfecho text, origem text, created_at timestamptz DEFAULT now(),
+      suggested_stage text, stage_reasoning text, suggested_stage_dismissed text);   -- etapa sugerida pela IA
     CREATE TABLE message_favorites (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
       message_kind text, message_id uuid, favorited_by text, favorited_at timestamptz DEFAULT now());

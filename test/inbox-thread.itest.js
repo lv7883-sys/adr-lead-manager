@@ -47,7 +47,8 @@ before(async () => {
       suggested_response text, status text, reply_to_message_id uuid, created_at timestamptz DEFAULT now());
     CREATE TABLE leads (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, phone text,
-      meta_psid text, status text, desfecho text, origem text, created_at timestamptz DEFAULT now());
+      meta_psid text, status text, desfecho text, origem text, created_at timestamptz DEFAULT now(),
+      suggested_stage text, stage_reasoning text, suggested_stage_dismissed text);   -- etapa sugerida pela IA
     CREATE TABLE message_favorites (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
       message_kind text, message_id uuid, favorited_by text, favorited_at timestamptz DEFAULT now());
@@ -234,4 +235,32 @@ test('(11) menção "@número" vira "@nome" de quem já escreveu', async () => {
                  VALUES ($1,'USER','@5519999990012 bom dia', now(), 'M130', $2)`, [cv, { tipo: 'texto', contexto: { mencoes: ['5519999990012@s.whatsapp.net'] } }]);
   const it = (await thread(T1, cv)).timeline.find((t) => t.external_message_id === 'M130');
   assert.equal(it.body, '@Maria bom dia');
+});
+
+// ---- ETAPA NO CABEÇALHO (16/09/2026) ------------------------------------------------------------------
+// A recepção move o lead de etapa pela Caixa de Entrada (como no kanban): a conversa traz a etapa atual e a
+// sugestão da IA pendente, pela mesma régua do kanban (stages.js).
+test('(14) conversa de lead traz a etapa do funil e a sugestão da IA pendente; não-lead não traz etapa', async () => {
+  const cv = await conv(T1, H(140)); await msg(cv, { body: 'oi', extMsgId: 'M140' });
+  const leadId = await lead(T1, { phone: Dg(140), status: 'QUALIFIED' });
+  let out = await thread(T1, cv);
+  assert.equal(out.conversation.etapa, 'qualificado');
+  assert.equal(out.conversation.sugestao_etapa, null, 'sem sugestão');
+
+  await c.query("UPDATE leads SET suggested_stage = 'experimental', stage_reasoning = 'combinou sábado às 10h' WHERE id = $1", [leadId]);
+  out = await thread(T1, cv);
+  assert.deepEqual(out.conversation.sugestao_etapa, { etapa: 'experimental', motivo: 'combinou sábado às 10h' });
+
+  await c.query("UPDATE leads SET suggested_stage_dismissed = 'experimental' WHERE id = $1", [leadId]);
+  assert.equal((await thread(T1, cv)).conversation.sugestao_etapa, null, 'sugestão dispensada não volta');
+
+  await c.query("UPDATE leads SET desfecho = 'nao_matriculado_preco', suggested_stage_dismissed = NULL WHERE id = $1", [leadId]);
+  out = await thread(T1, cv);
+  assert.equal(out.conversation.etapa, 'perdido');
+  assert.equal(out.conversation.sugestao_etapa, null, 'lead encerrado não recebe sugestão');
+
+  await c.query("UPDATE leads SET status = 'NOT_LEAD', desfecho = NULL WHERE id = $1", [leadId]);
+  out = await thread(T1, cv);
+  assert.equal(out.conversation.is_lead, false);
+  assert.equal(out.conversation.etapa, null, '"não é lead": as etapas somem');
 });

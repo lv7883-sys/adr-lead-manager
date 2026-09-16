@@ -237,13 +237,24 @@ router.put('/:tenantId/leads/:id/mover-kanban', authenticate, requireTenantAcces
   }
   const nota = typeof req.body?.nota === 'string' ? req.body.nota.trim().slice(0, 2000) : '';
   try {
-    const out = await withTenant(req.tenantId, (c) => _aplicarMoverEtapa(c, {
-      tenantId: req.tenantId, id, destCol, desfecho, autor: req.tenantRole, nota, limparSugestao: true,
-    }));
+    const out = await withTenant(req.tenantId, async (c) => {
+      // SNAPSHOT do antes: o "Desfazer" (Caixa de Entrada) restaura EXATO pelo mesmo /sugestao-etapa/restaurar
+      // da confirmação da IA — status/desfecho + a sugestão que o mover limpou + apaga o evento logado.
+      const antes = (await c.query(
+        'SELECT status, desfecho, desfecho_em, suggested_stage, stage_reasoning, stage_suggested_at FROM leads WHERE id = $1', [id])).rows[0];
+      const r = await _aplicarMoverEtapa(c, { tenantId: req.tenantId, id, destCol, desfecho, autor: req.tenantRole, nota, limparSugestao: true });
+      if (!antes || r.notFound || r.invalid) return r;
+      return { ...r, snapshot: {
+        lead_id: id, kind: 'stage', restore_path: 'sugestao-etapa/restaurar', toast_msg: 'Etapa restaurada.',
+        prior: { status: antes.status, desfecho: antes.desfecho, desfecho_em: antes.desfecho_em },
+        suggested_stage: antes.suggested_stage, stage_reasoning: antes.stage_reasoning,
+        stage_suggested_at: antes.stage_suggested_at, evento_id: r.eventoId || null,
+      } };
+    });
     if (out.notFound) return res.status(404).json({ error: 'lead not found' });
     if (out.invalid) return res.status(409).json({ error: `transição inválida (${out.origem} → ${destCol})` });
     logger.info('tenant.lead.kanban_movido', { tenant_id: req.tenantId, lead_id: id, origem: out.origem, destino: destCol, by: req.tenantRole });
-    res.json({ ok: true, coluna: destCol, ...out.row });
+    res.json({ ok: true, coluna: destCol, snapshot: out.snapshot || null, ...out.row });
   } catch (err) {
     logger.error('tenant.lead.kanban_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
     res.status(500).json({ error: 'internal error' });

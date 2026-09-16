@@ -372,6 +372,19 @@ test('(5c) filtro NÃO LIDAS: só quem tem mensagem não lida (reação não con
   assert.ok(byExt((await list(tenant, { limit: 50 })).items, H(701)), 'sem o filtro, tudo como antes');
 });
 
+test('(5d) lista traz a ETAPA do lead (mesma régua do kanban); não-lead sem etapa', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000e8'; await cfg(tenant, 7);
+  const cA = await conv(tenant, H(800)); await msg(cA); await lead(tenant, { phone: H(800), status: 'EXPERIMENTAL_AGENDADA' });
+  const cB = await conv(tenant, H(801)); await msg(cB); await lead(tenant, { phone: H(801), status: 'QUALIFYING', desfecho: 'nao_compareceu_aula' });
+  const cC = await conv(tenant, H(802)); await msg(cC); await lead(tenant, { phone: H(802), status: 'NOT_LEAD' });
+  const cD = await conv(tenant, H(803)); await msg(cD);
+  const itens = (await list(tenant, { limit: 50 })).items;
+  assert.equal(byExt(itens, H(800)).etapa, 'experimental');
+  assert.equal(byExt(itens, H(801)).etapa, 'perdido');
+  assert.equal(byExt(itens, H(802)).etapa, null);
+  assert.equal(byExt(itens, H(803)).etapa, null);
+});
+
 test('(6) keyset pagination sem sobreposição', async () => {
   const tenant = '00000000-0000-0000-0000-0000000000e6'; await cfg(tenant, 7);
   for (let i = 0; i < 5; i++) { const cv = await conv(tenant, H(500 + i)); await msg(cv, { diasAtras: i }); }

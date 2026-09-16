@@ -18,6 +18,7 @@
 // um Postgres real (test/inbox.itest.js) — os handlers HTTP só orquestram parse + withTenant.
 
 const { SQL_PERFIL } = require('../perfilAssistente');   // perfil da assistente junto da config (migr. 119)
+const stages = require('../stages');   // etapa do funil (mesma régua do kanban) na lista e na conversa
 const express = require('express');
 const { withTenant } = require('../db');
 const { authenticate } = require('../auth');
@@ -486,6 +487,8 @@ function mapConversationRow(r) {
     is_group: r.conversation_kind === 'GROUP',
     is_lead: r.is_lead === true,
     is_lead_ativo: r.is_lead_ativo === null || r.is_lead_ativo === undefined ? null : r.is_lead_ativo === true,
+    // etapa do funil (key do kanban: novo/qualificando/qualificado/experimental/convertido/perdido) — só p/ lead
+    etapa: r.is_lead === true ? stages.stageKey(r.lead_status, r.lead_desfecho) : null,
     lead_id: r.lead_id || null,
     lead_status: r.lead_status || null,
     desfecho: r.lead_desfecho || null,
@@ -588,7 +591,8 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
   if (!cv) return null;
 
   const lead = (await client.query(
-    `SELECT id, name, phone, meta_psid, status, desfecho, origem
+    `SELECT id, name, phone, meta_psid, status, desfecho, origem,
+            suggested_stage, stage_reasoning, suggested_stage_dismissed   -- etapa sugerida pela IA (confirmar no cabeçalho)
        FROM leads
       WHERE tenant_id = $1 AND $2 <> '' AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
       ORDER BY created_at ASC LIMIT 1`,
@@ -650,6 +654,9 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
       lead_id: lead ? lead.id : null,
       lead_status: lead ? lead.status : null,
       desfecho: lead ? lead.desfecho : null,
+      // Mover o lead de etapa pelo cabeçalho da conversa (mesma régua e mesma rota do kanban).
+      etapa: is_lead ? stages.stageOfLead(lead) : null,
+      sugestao_etapa: (is_lead && stages.isSugestaoAtiva(lead)) ? { etapa: lead.suggested_stage, motivo: lead.stage_reasoning || null } : null,
       last_read_at: cv.last_read_at,
       arquivada: !!cv.arquivada_em, fixada: !!cv.fixada_em,   // migr. 118
       atribuicao,
