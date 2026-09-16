@@ -74,11 +74,12 @@ test('seed: passa em todas as travas e só usa variáveis conhecidas', () => {
   }
 });
 
-test('seed: sem as variáveis da unidade, a tela acusa {link_ead} e {link_pesquisa}', () => {
+test('seed: sem as variáveis da unidade, a tela acusa {link_ead}; {link_pesquisa} da etapa externa não conta', () => {
   const r = R.validarRegua(MODELO);
   assert.equal(r.ok, false);
   assert.ok(r.erros.some((m) => m.includes('{link_ead}')));
-  assert.ok(r.erros.some((m) => m.includes('{link_pesquisa}')));
+  assert.ok(!r.erros.some((m) => m.includes('{link_pesquisa}')), 'a pesquisa é enviada pelo Diapasão');
+  assert.deepEqual(R.validarRegua(MODELO, { variaveisLivres: ['link_ead'] }).erros, []);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -112,10 +113,15 @@ test('cálculo: sem agenda ainda, as etapas presas às aulas ficam aguardando', 
   }
 });
 
-test('cálculo: aula anterior ao início do contrato não conta como 1ª aula agendada', () => {
-  const fatos = { atendimentos: [{ inicio: sp('2026-09-10', '15:00'), fim: sp('2026-09-10', '16:00') }, ...AULAS.atendimentos] };
+test('cálculo: aula antes ou NO DIA da matrícula não entra no lembrete (não há véspera possível)', () => {
+  const fatos = { atendimentos: [
+    { inicio: sp('2026-09-10', '15:00'), fim: sp('2026-09-10', '16:00') },
+    { inicio: sp('2026-09-18', '18:00'), fim: sp('2026-09-18', '19:00') },   // no dia da matrícula
+    ...AULAS.atendimentos,
+  ] };
   const ms = R.calcularMensagens({ conta: ANUAL, etapas: MODELO, fatos, horario: HORARIO });
-  assert.equal(R.dataSP(porOrdem(ms, 3, 1).dueAt), '2026-09-23');
+  assert.equal(R.dataSP(porOrdem(ms, 3, 1).dueAt), '2026-09-23', '1º lembrete = aula de 24/09');
+  assert.equal(R.dataSP(porOrdem(ms, 3, 2).dueAt), '2026-09-30', '2º lembrete = aula de 01/10');
 });
 
 test('R5: unidade sem horário de atendimento configurado não agenda nada', () => {
@@ -306,24 +312,69 @@ test('destinatário: responsável quando outra pessoa paga; aluno quando ele mes
   assert.equal(R.escolherDestinatario({ beneficiario: { ...pedro, telefone: null } }).telefone, null);
 });
 
-test('R7: irmãos na mesma etapa viram uma mensagem; etapas diferentes no mesmo dia, a outra espera', () => {
+test('R7: irmãos na mesma etapa viram uma mensagem; a véspera da aula nunca espera', () => {
   const tel = '+55 (19) 99999-0000';
-  const mesmaEtapa = [
+  const agora = sp('2026-09-23', '12:00');
+  const r1 = R.umaPorFamilia([
     { chave: 'ana', telefone: tel, dueAt: sp('2026-09-18', '09:00'), etapaId: 'e1', ordem: 1 },
-    { chave: 'bia', telefone: '5519999990000', dueAt: sp('2026-09-18', '10:00'), etapaId: 'e1', ordem: 1 },
-  ];
-  const r1 = R.umaPorFamilia(mesmaEtapa, { horario: HORARIO });
+    { chave: 'bia', telefone: '1999990000', dueAt: sp('2026-09-18', '10:00'), etapaId: 'e1', ordem: 1 },   // mesmo número, sem 55 e sem o 9
+  ], { horario: HORARIO, agora });
   assert.deepEqual(r1.manter.map((m) => m.chave), ['ana']);
   assert.deepEqual(r1.agrupadas.map((a) => [a.mensagem.chave, a.com]), [['bia', 'ana']]);
 
-  const dias = [
+  const r2 = R.umaPorFamilia([
     { chave: 'orient', telefone: tel, dueAt: sp('2026-09-23', '09:00'), etapaId: 'e2', ordem: 2 },
-    { chave: 'lembrete', telefone: tel, dueAt: sp('2026-09-23', '18:00'), etapaId: 'e3', ordem: 3, presaAoAtendimento: true },
-  ];
-  const r2 = R.umaPorFamilia(dias, { horario: HORARIO });
+    { chave: 'lembrete', telefone: tel, dueAt: sp('2026-09-23', '18:00'), etapaId: 'e3', ordem: 3, presaAoAtendimento: true, urgente: true },
+  ], { horario: HORARIO, agora });
   assert.deepEqual(r2.manter.map((m) => m.chave), ['lembrete'], 'o lembrete da aula não pode esperar');
   assert.equal(r2.adiadas[0].mensagem.chave, 'orient');
-  assert.equal(iso(r2.adiadas[0].novoDueAt), iso(sp('2026-09-24', '09:00')));
+  assert.equal(iso(r2.adiadas[0].novoDueAt), iso(sp('2026-09-24', '09:00')), 'dia seguinte');
+});
+
+test('R7+R3: mensagens atrasadas saem UMA por vez, na ordem da régua, 48 h entre elas', () => {
+  const tel = '5519999990000';
+  const agora = sp('2026-09-16', '10:00');
+  const r = R.umaPorFamilia([
+    { chave: 'bv4', telefone: tel, dueAt: sp('2026-09-10', '10:00'), etapaId: 'e4', ordem: 4 },
+    { chave: 'bv2', telefone: tel, dueAt: sp('2026-09-12', '09:00'), etapaId: 'e2', ordem: 2 },
+    { chave: 'bv5', telefone: tel, dueAt: sp('2026-09-15', '09:00'), etapaId: 'e5', ordem: 5 },
+  ], { horario: HORARIO, agora });
+  assert.deepEqual(r.manter.map((m) => m.chave), ['bv2'], 'a régua conta uma história: a de menor ordem primeiro');
+  assert.deepEqual(r.adiadas.map((a) => [a.mensagem.chave, iso(a.novoDueAt)]), [
+    ['bv4', iso(sp('2026-09-18', '10:00'))],
+    ['bv5', iso(sp('2026-09-21', '09:00'))],   // 20/09 10h é domingo → segunda 9h
+  ]);
+});
+
+test('R7: a que deixaria de valer antes de amanhã passa na frente; "como foi" espera o dia seguinte, sem 48 h', () => {
+  const tel = '5519999990000';
+  const agora = sp('2026-09-23', '10:00');
+  const base = [
+    { chave: 'bv1', telefone: tel, dueAt: sp('2026-09-18', '09:00'), etapaId: 'e1', ordem: 1, limite: sp('2026-09-25', '09:00') },
+    { chave: 'bv4', telefone: tel, dueAt: sp('2026-09-21', '16:00'), etapaId: 'e4', ordem: 4, presaAoAtendimento: true, limite: sp('2026-09-23', '16:00') },
+  ];
+  const r = R.umaPorFamilia(base, { horario: HORARIO, agora });
+  assert.deepEqual(r.manter.map((m) => m.chave), ['bv4'], 'vence hoje às 16h');
+  assert.deepEqual(r.adiadas.map((a) => [a.mensagem.chave, iso(a.novoDueAt)]), [['bv1', iso(sp('2026-09-24', '09:00'))]]);
+
+  // Boas-vindas saiu hoje de manhã: "como foi" (presa) espera só o dia seguinte, não 48 h.
+  const r2 = R.umaPorFamilia([{ ...base[1], limite: sp('2026-09-26', '16:00') }],
+    { horario: HORARIO, agora: sp('2026-09-24', '16:00'), envios: [{ telefone: tel, em: sp('2026-09-24', '09:00') }] });
+  assert.deepEqual(r2.adiadas.map((a) => iso(a.novoDueAt)), [iso(sp('2026-09-25', '09:00'))]);
+});
+
+test('R7+R3: telefone que recebeu mensagem há menos de 48 h espera completar as 48 h', () => {
+  const tel = '5519999990000';
+  const r = R.umaPorFamilia([{ chave: 'bv2', telefone: tel, dueAt: sp('2026-09-21', '09:00'), etapaId: 'e2', ordem: 2 }],
+    { horario: HORARIO, agora: sp('2026-09-21', '09:30'), envios: [{ telefone: '19 99999-0000', em: sp('2026-09-20', '11:00') }] });
+  assert.equal(r.manter.length, 0);
+  assert.equal(iso(r.adiadas[0].novoDueAt), iso(sp('2026-09-22', '11:00')));
+});
+
+test('R6: "como foi a primeira aula" só vale por 2 dias', () => {
+  const m = { etapa: { quando: { tipo: 'proximo_expediente' } }, dueAt: sp('2026-09-24', '16:00'), ancoraData: '2026-09-24' };
+  assert.equal(R.situacaoAgora(m, sp('2026-09-26', '15:59')), 'devida');
+  assert.equal(R.situacaoAgora(m, sp('2026-09-26', '16:00')), 'vencida');
 });
 
 test('R9 e alerta: só contratação nova; alerta de quem não começou no prazo da unidade', () => {

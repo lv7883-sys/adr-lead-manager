@@ -1,6 +1,6 @@
 # ADR-050 — Boas-vindas / Onboarding do cliente novo (régua pós-contratação)
 
-- **Status:** 🟢 **DECISÕES TRAVADAS** — rev. 3 (2026-09-16). **E17-01 implementada** na branch `feat/boas-vindas-e17-01` (não mergeada, sem deploy).
+- **Status:** 🟢 **DECISÕES TRAVADAS** — rev. 4 (2026-09-16). **E17-01 e E17-02 implementadas** na branch `feat/boas-vindas-e17-01` (não mergeada, sem deploy, nada aplicado em banco real). E17-02 validada por simulação com dados reais de Valinhos (§14) — **aguarda aprovação do dono para ativar**.
 - **Fonte do conteúdo:** planilha `Plano de Boas-vindas.xlsx` (OneDrive Gerencial/Recepção) — aba 1 (7 toques) e aba 2 (Guia do Aluno).
 - **Relacionados:** ADR-049 (renovação — o **espelho** deste), ADR-047 (NPS Pulse — **fecha** esta régua), ADR-042 (Central de Mensagens), ADR-006 (MANUAL/SEMI/AUTO), ADR-037 (cadastro mestre), ADR-025 (recursos genéricos, fronteira anti-vazamento de nicho), migr. 119 (perfil da assistente por ramo).
 - **Restrições do dono:**
@@ -130,8 +130,8 @@ valor some, nunca vaza `{profissional}` cru.
   Etapa que passaria do teto **não é enviada** e fica registrada como `fora_da_janela`.
   **Contrato curto ignora o início da renovação** (ver §10.1): no mensal a renovação começa no dia da
   matrícula, e a proteção é a régua reduzida + o teto de 50%.
-- **R3 — Pelo menos 48 h entre duas mensagens da régua**, exceto etapas presas a um atendimento
-  (véspera / próximo expediente), que por desenho ficam coladas nele.
+- **R3 — Pelo menos 48 h entre duas mensagens comuns da régua.** Etapas presas a um atendimento
+  (véspera / próximo expediente) não entram na conta das 48 h, porque por desenho ficam coladas nele.
 - **R4 — Mínimo de 2 e máximo de 10 etapas** ativas.
 - **R5 — Só dentro do horário de atendimento do tenant** (`src/horario.js`, fuso de São Paulo
   centralizado ali). Nunca faixa fixa, nunca `getHours()` do processo. Fora do expediente, escorrega
@@ -139,9 +139,24 @@ valor some, nunca vaza `{profissional}` cru.
   - "Véspera" = última faixa aberta do dia anterior, com preferência pelo fim do expediente (âncora
     18:00). Evita o literal "12 h antes", que para uma aula às 15 h daria 3 h da manhã.
   - "Próximo expediente" = primeira faixa aberta após o atendimento.
-- **R6 — Sem retroativo.** Etapa vencida há mais de 7 dias não sai; ao ligar o módulo, o modo `seed`
-  marca o passado como enviado sem enviar.
-- **R7 — Uma mensagem por família por dia.** Irmãos contratados juntos recebem uma só.
+- **R6 — Sem retroativo.** Cada mensagem tem prazo: **7 dias** (etapas em dias), **2 dias** ("próximo
+  expediente": "como foi a primeira aula" não cabe uma semana depois) e **até a 00:00 do dia da aula**
+  (véspera: depois disso "amanhã" seria mentira). Passou do prazo, não sai.
+  - **Exceção (rev. 4, achada na simulação):** etapa do início do contrato que cita a aula (`{dia}`,
+    `{horario}`, `{profissional}`) atrasa por falta de DADO — a agenda só mostra a semana corrente —, não
+    por culpa da família. Ela vale **até o dia seguinte à 1ª aula**; enquanto a 1ª aula não acontece,
+    segue valendo (dentro do teto R2). E cita sempre a **próxima** aula a partir do envio, nunca uma que
+    já passou.
+  - **Ativação** (`--ativar`, uma vez por unidade): o que já está devido é registrado como
+    `fora_da_janela` (`anterior_a_ativacao`) sem ir para a recepção.
+- **R7 — Uma mensagem por família por dia** (chave de telefone igual à `br_phone_key`). Refinada na
+  rev. 4 depois da simulação:
+  - irmãos na mesma etapa → **uma** mensagem, com os dois nomes ("Ana e Bruno");
+  - a **véspera da aula** nunca espera e ocupa o dia da família;
+  - fora ela, uma por dia — **"como foi a primeira aula" inclusive**;
+  - quem vai primeiro: a que deixaria de valer antes do dia seguinte; depois, a ordem da régua;
+  - vale sobre o que está **pronto agora**, não sobre a data prevista: ao ligar a régua, ou quando a
+    recepção ou a agenda atrasam, mensagens de dias diferentes ficam prontas juntas e saem uma por vez.
 - **R8 — Mensagem com `{dia}`, `{horario}` ou `{profissional}` não sai sem o dado.** Vira pendência
   para a recepção completar, nunca "sua aula é às [horário]".
 - **R9 — Só contratação nova.** O titular não pode ter contrato anterior no tenant; quem renova
@@ -338,7 +353,7 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 | Fase | Entrega | Valor sozinha? |
 |---|---|---|
 | **E17-01** ✅ | Migrations 120–125 + grants de agenda + `src/boasVindasRegua.js` (cálculo de datas e travas R1–R10) com testes — branch `feat/boas-vindas-e17-01` | — |
-| **E17-02** | Adaptador `academia-do-rock` (agenda + presença) + job diário em modo `avisa` | — |
+| **E17-02** ✅ | Adaptador `academia-do-rock` (agenda + presença) + job diário em modo `avisa` + simulação com dados reais (§14) | — |
 | **E17-03** | Aba **Boas-vindas** na Caixa de Entrada: toque pronto na conversa, envio com um clique, com anexo | ✅ |
 | **E17-04** | Tela de configuração: etapas, textos, anexos, variáveis, alerta, escolha do modelo | ✅ |
 | **E17-05** | Modo `auto`, `seed`, uma-por-família e alerta de cliente que não começou | ✅ |
@@ -429,6 +444,71 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 
 ---
 
-**Pendência de conteúdo (não bloqueia o código):** os arquivos em si — a imagem do EAD, o PDF do
-Guia do Aluno (hoje é texto na aba 2 da planilha) e a arte da etapa 6. Entram pela tela de
-configuração, na E17-04.
+**Conteúdo (atualizado na rev. 4):** a imagem do EAD (etapa 1) **já existia dentro da planilha** e foi extraída;
+o **PDF do Guia do Aluno** (etapa 5) foi gerado a partir da aba 2, sem mudar o texto. Falta só a arte da
+etapa 6. Os arquivos entram pela tela de configuração (E17-04).
+
+---
+
+## 14. E17-02 — rotina diária, adaptador de agenda e simulação com dados reais
+
+### 14.1 O que foi construído (branch `feat/boas-vindas-e17-01`)
+
+| Arquivo | Papel |
+|---|---|
+| `src/boasVindas/agendaAcademiaDoRock.js` | **Adaptador único** de agenda e presença (regra 10). Lê `app.agenda_snapshot` pela franquia do tenant (sem fallback), casa aula ↔ contrato por `_id_contrato` (ou `_id_aluno`), nunca por nome; exclui experimental e banda; traduz o status da Extranet |
+| `src/boasVindas/dados.js` | Consultas: contratos novos (60 dias, titular/pagador/telefone, ids externos, renovação, contato interno), config, régua, modelo, mensagens; upsert que **nunca** mexe no que a recepção já tratou |
+| `src/boasVindas/planejar.js` | Planejamento **puro** da unidade — a mesma função na rotina e na simulação |
+| `src/jobs/boas-vindas-sweep.js` | Rotina. `--dry` (simulação, não grava), `--ativar` (primeiro dia), `--tenant=`. Portão = `tenants_active()` + modo ≠ desligado; régua inválida não roda. **Não envia nada e não está no cron** |
+
+Testes: 50 unitários (`boas-vindas-regua`, `boas-vindas-planejar`) + 23 de banco (`boas-vindas-migrations`,
+`boas-vindas-sweep`), todos verdes num Postgres local descartável. `test/run-boas-vindas-itest.sh` (Docker, PG 16)
+ainda precisa rodar no host antes do merge.
+
+### 14.2 Fatos da fonte verificados em produção (somente leitura, 16/09)
+
+- `app.agenda_snapshot` guarda **uma linha por semana**, desde 22/06; o Scheduler raspa só **a semana corrente**.
+- 97% das aulas trazem `_id_aluno` e `_id_contrato`; `qualidade.presenca_aula` **não** tem `id_aluno`
+  preenchido — por isso a presença também sai do snapshot (status "Realizada").
+- Horário de atendimento de Valinhos: seg–sex 9h–21h, sáb 9h–13h. Não há tabela de feriados no banco.
+
+### 14.3 Simulação: "e se estivesse ligado nos últimos 60 dias?"
+
+Replay de meia em meia hora dentro do expediente, com o código real, vendo só a agenda que existia em cada
+momento e supondo que a recepção envia assim que a mensagem fica pronta.
+
+| Resultado | Valor |
+|---|---|
+| Matrículas novas no período (renovações excluídas: 81) | 27 |
+| Aulas encontradas pela ligação por id | 26 de 27 alunos |
+| Mensagens enviadas / previstas | 145 / 186 (78%) |
+| Dias em que uma família recebeu duas mensagens | **0** |
+| Boas-vindas enviadas | 25 de 27 (1 agrupada com irmão; 1 aluno sem aula na agenda) |
+| Boas-vindas no dia da matrícula | 14; as demais esperaram a agenda (1 a 9 dias) |
+| Lembretes de aula enviados | 39 de 52 |
+
+**Ajustes feitos por causa da simulação** (já nas regras acima e nos testes):
+
+1. O professor da aula se perdia no cálculo do lembrete (bug) — corrigido.
+2. Família recebia várias mensagens atrasadas no mesmo dia — R7 passou a valer sobre o que está pronto agora.
+3. Boas-vindas + "como foi a primeira aula" no mesmo dia (6 casos) — só a véspera fura a fila.
+4. Boas-vindas perdida por esperar a agenda (3 casos) — exceção da R6.
+5. Lembrete de aula no **próprio dia da matrícula** é impossível (16 de 54 casos) — "duas primeiras aulas"
+   passou a contar a partir do dia seguinte à matrícula.
+
+### 14.4 Limitações que continuam — decisão do dono
+
+| # | Limitação | Tamanho | Opções |
+|---|---|---|---|
+| L1 | **Lembrete de aula de segunda-feira não sai**: a véspera cai no sábado, antes de a agenda da semana ser raspada | 7 de 52 lembretes | (a) aceitar até a API da Extranet; (b) o Scheduler raspar também a semana seguinte no sábado — toca o Scheduler e gasta requisições à Extranet |
+| L2 | **"Projetos e eventos" cortado no trimestral**: 1ª aula + 25 dias passa do teto (dia 44) quando a 1ª aula demora mais de 19 dias | 8 casos, todos trimestrais | (a) aceitar; (b) aproximar a etapa (ex.: 1ª aula + 15 dias) |
+| L3 | **Boas-vindas espera a agenda** quando a 1ª aula é na semana seguinte | 11 de 25 saíram com 1 a 9 dias | resolve com a API; no modo avisa a recepção pode completar dia/horário à mão (E17-03) |
+
+### 14.5 Para ativar em Valinhos (após aprovação)
+
+1. Aplicar migrations 120–125 e `db/grants/boas_vindas_agenda_read.sql` (aditivas).
+2. Deploy do LM (a rotina não roda sozinha: não está no cron).
+3. Configurar Valinhos: `boas_vindas_modo = 'avisa'`, copiar o modelo, variável `link_ead`.
+4. `node src/jobs/boas-vindas-sweep.js --tenant=<valinhos> --dry` → conferir; depois `--ativar` uma vez.
+5. Cron diário (e de hora em hora no expediente, para véspera e "como foi").
+6. As mensagens só ficam **visíveis** para a recepção com a aba Boas-vindas (E17-03).

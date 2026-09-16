@@ -29,6 +29,7 @@ const LIMITES = Object.freeze({
   OFFSET_MAX_DIAS: 60,         // "dias" nunca passa do teto absoluto
   MAX_REPETICOES: 3,
   GRACE_DIAS: 7,               // R6
+  GRACE_PROXIMO_EXPEDIENTE_DIAS: 2,   // R6 — "como foi a 1ª aula" não faz sentido uma semana depois
   CONTRATO_CURTO_DIAS: 45,     // contrato de até 45 dias = "mensal" da Academia do Rock
   ALERTA_MIN: 7,
   ALERTA_MAX: 30,
@@ -294,7 +295,9 @@ function validarRegua(etapas, { ancorasDisponiveis = ANCORAS, variaveisLivres = 
     if (ANCORAS.includes(e.ancora) && !ancorasDisponiveis.includes(e.ancora)) {
       erros.push(`Etapa "${e.nome}": a unidade não tem ${e.ancora === 'atendimento_agendado' ? 'agenda' : 'registro de presença'} integrada ao Regente.`);
     }
-    for (const texto of [e.texto_titular, e.texto_responsavel]) {
+    // Etapa externa (ex.: NPS enviado pelo Diapasão) não é enviada pelo Regente: suas variáveis
+    // só importam para quem transformar a etapa em mensagem própria.
+    for (const texto of e.entregue_por === 'externo' ? [] : [e.texto_titular, e.texto_responsavel]) {
       for (const v of variaveisUsadas(texto)) {
         if (!conhecidas.has(v)) erros.push(`Etapa "${e.nome}": a variável {${v}} não existe. Confira o nome ou cadastre-a nas variáveis da unidade.`);
       }
@@ -375,11 +378,13 @@ function calcularMensagens({ conta, etapas, fatos = {}, horario: horarioCfg, fer
   const teto = tetoDaRegua(conta);
   const tetoFimMs = inicioDoDiaSP(somarDias(teto, 1));   // até 23:59 do dia do teto
   const agendados = (fatos.atendimentos || [])
-    .map((a) => ({ inicio: toMs(a.inicio), fim: toMs(a.fim) }))
-    .filter((a) => a.inicio != null && dataSP(a.inicio) >= conta.iniVigencia)
+    .map((a) => ({ ...a, inicio: toMs(a.inicio), fim: toMs(a.fim) }))
+    // Aulas DEPOIS do dia da matrícula: a do próprio dia não tem véspera possível (verificado em
+    // Valinhos: 16 de 54 lembretes caíam assim). "Duas primeiras aulas" = as duas primeiras a lembrar.
+    .filter((a) => a.inicio != null && dataSP(a.inicio) > conta.iniVigencia)
     .sort((a, b) => a.inicio - b.inicio);
   const primeiro = fatos.primeiroAtendimento && toMs(fatos.primeiroAtendimento.inicio) != null
-    ? { inicio: toMs(fatos.primeiroAtendimento.inicio), fim: toMs(fatos.primeiroAtendimento.fim) }
+    ? { ...fatos.primeiroAtendimento, inicio: toMs(fatos.primeiroAtendimento.inicio), fim: toMs(fatos.primeiroAtendimento.fim) }
     : null;
 
   const saida = [];
@@ -451,15 +456,23 @@ function calcularMensagens({ conta, etapas, fatos = {}, horario: horarioCfg, fer
 }
 
 // R6 — em relação a `agora`: 'futura' | 'devida' | 'vencida'.
-// Véspera vence à 00:00 do dia do atendimento (depois disso "amanhã" seria mentira).
+//   véspera             vence à 00:00 do dia do atendimento (depois disso "amanhã" seria mentira)
+//   próximo expediente  2 dias ("como foi a primeira aula" não cabe uma semana depois)
+//   dias                7 dias
+// Até quando a mensagem ainda vale (ms). null = sem data.
+function limiteDaMensagem(mensagem) {
+  if (!mensagem || mensagem.dueAt == null) return null;
+  const tipo = mensagem.etapa && mensagem.etapa.quando && mensagem.etapa.quando.tipo;
+  if (tipo === 'vespera') return inicioDoDiaSP(mensagem.ancoraData);
+  if (tipo === 'proximo_expediente') return mensagem.dueAt + LIMITES.GRACE_PROXIMO_EXPEDIENTE_DIAS * DIA_MS;
+  return mensagem.dueAt + LIMITES.GRACE_DIAS * DIA_MS;
+}
+
 function situacaoAgora(mensagem, agora) {
   const now = toMs(agora);
   if (mensagem.dueAt == null || now == null) return 'futura';
   if (now < mensagem.dueAt) return 'futura';
-  const limite = mensagem.etapa && mensagem.etapa.quando && mensagem.etapa.quando.tipo === 'vespera'
-    ? inicioDoDiaSP(mensagem.ancoraData)
-    : mensagem.dueAt + LIMITES.GRACE_DIAS * DIA_MS;
-  return now < limite ? 'devida' : 'vencida';
+  return now < limiteDaMensagem(mensagem) ? 'devida' : 'vencida';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -498,31 +511,81 @@ function bloqueioDaMensagem({ etapa, versao, valores = {}, telefone, anexoDispon
   return null;
 }
 
-// R7 — uma mensagem por telefone por dia (SP).
-// Entrada: mensagens devidas [{ chave, telefone, dueAt, etapaId, ordem, presaAoAtendimento }].
-//   mesma etapa, mesmo telefone, mesmo dia (irmãos) → uma fica, as outras são AGRUPADAS nela;
-//   etapas diferentes no mesmo dia → fica a presa ao atendimento (senão a de menor ordem); as outras
-//   são ADIADAS para a próxima abertura do dia seguinte (o job reavalia no outro dia).
-function umaPorFamilia(mensagens, { horario: horarioCfg, feriados } = {}) {
+// Chave de telefone BR, igual à lead_manager.br_phone_key (sem 55, sem o 9º dígito).
+function chaveTelefone(t) {
+  let d = String(t || '').replace(/\D/g, '');
+  if ((d.length === 12 || d.length === 13) && d.startsWith('55')) d = d.slice(2);
+  if (d.length === 11 && d[2] === '9') d = d.slice(0, 2) + d.slice(3);
+  return d;
+}
+
+// R7 + R3 por FAMÍLIA — o que a recepção vê para cada telefone AGORA.
+// Entrada:
+//   mensagens  candidatas: [{ chave, telefone, dueAt, etapaId, ordem, urgente, presaAoAtendimento, limite }]
+//              urgente = véspera da aula (o momento é dela); limite = até quando ainda vale (ms)
+//   envios     o que já saiu (ou foi aprovado): [{ telefone, em, presaAoAtendimento }]
+// Regras:
+//   • irmãos na MESMA etapa e mesmo telefone → uma fica, as outras são AGRUPADAS nela;
+//   • a véspera da aula nunca espera, e ocupa o dia da família;
+//   • fora ela, UMA mensagem por família por dia — "como foi a primeira aula" inclusive;
+//   • entre duas mensagens comuns, 48 h (R3); a presa a um atendimento não conta nas 48 h;
+//   • quem vai primeiro: a que deixaria de valer antes do dia seguinte; depois, a ordem da régua.
+// Importa sobretudo ao LIGAR a régua, quando a agenda atrasa e quando a recepção atrasa: mensagens
+// previstas para dias diferentes ficam prontas ao mesmo tempo, e a família receberia todas de uma vez.
+function umaPorFamilia(mensagens, { horario: horarioCfg, feriados, agora, envios = [] } = {}) {
+  const lista = (mensagens || []).filter((m) => m && m.telefone && m.dueAt != null);
+  const now = toMs(agora) != null ? toMs(agora) : Math.max(...lista.map((m) => m.dueAt), 0);
+  const fer = _feriados(feriados);
+  const H48 = LIMITES.ESPACO_MIN_HORAS * 3600000;
+  const amanha = (ms) => inicioDoDiaSP(somarDias(dataSP(ms), 1));
   const grupos = new Map();
-  for (const m of mensagens || []) {
-    if (!m || !m.telefone || m.dueAt == null) continue;
-    const k = `${String(m.telefone).replace(/\D/g, '')}|${dataSP(m.dueAt)}`;
+  for (const m of lista) {
+    const k = chaveTelefone(m.telefone);
     if (!grupos.has(k)) grupos.set(k, []);
     grupos.get(k).push(m);
   }
+  const enviosPorFone = new Map();
+  for (const e of envios || []) {
+    const em = toMs(e.em);
+    if (em == null) continue;
+    const k = chaveTelefone(e.telefone);
+    if (!enviosPorFone.has(k)) enviosPorFone.set(k, []);
+    enviosPorFone.get(k).push({ em, presa: e.presaAoAtendimento === true });
+  }
+
   const manter = [], agrupadas = [], adiadas = [];
-  for (const lista of grupos.values()) {
-    lista.sort((a, b) => (b.presaAoAtendimento === true) - (a.presaAoAtendimento === true)
-      || a.ordem - b.ordem || String(a.chave).localeCompare(String(b.chave)));
-    const escolhida = lista[0];
-    manter.push(escolhida);
-    for (const m of lista.slice(1)) {
-      if (m.etapaId === escolhida.etapaId) {
-        agrupadas.push({ mensagem: m, com: escolhida.chave });
+  for (const [k, grupo] of grupos) {
+    // Irmãos: mesma etapa → a de prazo e chave menores fica.
+    const porEtapa = new Map();
+    for (const m of grupo.sort((a, b) => a.dueAt - b.dueAt || String(a.chave).localeCompare(String(b.chave)))) {
+      if (!porEtapa.has(m.etapaId)) porEtapa.set(m.etapaId, m);
+      else agrupadas.push({ mensagem: m, com: porEtapa.get(m.etapaId).chave });
+    }
+    const unicas = [...porEtapa.values()];
+    const urgentes = unicas.filter((m) => m.urgente === true);
+    const venceAntesDeAmanha = (m) => (m.limite != null && m.limite <= amanha(now) ? 1 : 0);
+    const demais = unicas.filter((m) => m.urgente !== true)
+      .sort((a, b) => venceAntesDeAmanha(b) - venceAntesDeAmanha(a) || a.ordem - b.ordem || a.dueAt - b.dueAt);
+    manter.push(...urgentes);
+
+    const doFone = enviosPorFone.get(k) || [];
+    const ocupadoHoje = doFone.some((e) => dataSP(e.em) === dataSP(now)) || urgentes.some((u) => dataSP(u.dueAt) === dataSP(now));
+    let liberaDia = ocupadoHoje ? amanha(now) : -Infinity;
+    const comuns = doFone.filter((e) => !e.presa).map((e) => e.em);
+    let libera48 = comuns.length ? Math.max(...comuns) + H48 : -Infinity;
+    for (const m of demais) {
+      const presa = m.presaAoAtendimento === true;
+      const liberaEm = presa ? liberaDia : Math.max(liberaDia, libera48);
+      if (now >= liberaEm) {
+        manter.push(m);
+        liberaDia = amanha(now);
+        if (!presa) libera48 = now + H48;
       } else {
-        const novo = proximaAbertura(horarioCfg, inicioDoDiaSP(somarDias(dataSP(m.dueAt), 1)), { feriados });
+        const novo = proximaAbertura(horarioCfg, liberaEm, { feriados: fer });
         adiadas.push({ mensagem: m, novoDueAt: novo });
+        const base = novo != null ? novo : liberaEm;
+        liberaDia = amanha(base);
+        if (!presa) libera48 = base + H48;
       }
     }
   }
@@ -547,7 +610,7 @@ module.exports = {
   // validação
   validarAnexo, validarAlertaDias, validarVariaveisLivres, validarEtapa, validarRegua,
   // elegibilidade e cálculo
-  ehContratacaoNova, ehContratoCurto, tetoDaRegua, calcularMensagens, situacaoAgora,
+  ehContratacaoNova, ehContratoCurto, tetoDaRegua, calcularMensagens, limiteDaMensagem, situacaoAgora,
   // destinatário e travas
-  escolherDestinatario, bloqueioDaMensagem, umaPorFamilia, precisaAlertaSemInicio,
+  escolherDestinatario, bloqueioDaMensagem, chaveTelefone, umaPorFamilia, precisaAlertaSemInicio,
 };

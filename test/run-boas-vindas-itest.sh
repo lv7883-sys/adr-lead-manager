@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# run-boas-vindas-itest.sh — itest das migrations de BOAS-VINDAS (ADR-050, E17-01): 120–125 +
-# db/grants/boas_vindas_agenda_read.sql. PG DESCARTÁVEL: schema lead_manager + cadastro (060/072…) +
-# automacao_config mínima + um schema `app` mínimo (só as 3 tabelas lidas). Migrations aplicadas DUAS
+# run-boas-vindas-itest.sh — itests do BOAS-VINDAS (ADR-050): migrations 120–125 +
+# db/grants/boas_vindas_agenda_read.sql (E17-01) e a rotina diária jobs/boas-vindas-sweep (E17-02).
+# PG DESCARTÁVEL: schema lead_manager + cadastro (060/072/105…) + automacao_config/tenant_lead_config/
+# internal_contacts mínimos + um schema `app` mínimo (só as 3 tabelas lidas). Migrations aplicadas DUAS
 # vezes (idempotência). NUNCA toca produção.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${ITEST_PG_PORT:-55471}"
 CTR="lm-boas-vindas-itest-pg"
-TENANT_A="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+TENANT_A="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"   # itest das migrations
 TENANT_B="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+TENANT_C="cccccccc-cccc-4ccc-8ccc-cccccccccccc"   # itest da rotina (com agenda)
+TENANT_D="dddddddd-dddd-4ddd-8ddd-dddddddddddd"   # itest da rotina (sem agenda)
 VALINHOS="ed731a58-62e5-45ad-acba-a5502ff39e92"   # 060 semeia papéis de Valinhos
 
 cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; }
@@ -38,23 +41,34 @@ SQL
 psql_db <<SQL
 CREATE SCHEMA lead_manager;
 ALTER ROLE lead_manager_user SET search_path = lead_manager, public;
-CREATE TABLE lead_manager.tenants (id uuid PRIMARY KEY, name text);
-INSERT INTO lead_manager.tenants (id, name) VALUES ('${TENANT_A}','A'), ('${TENANT_B}','B'), ('${VALINHOS}','Valinhos');
+CREATE TABLE lead_manager.tenants (id uuid PRIMARY KEY, name text, horario_comercial jsonb);
+INSERT INTO lead_manager.tenants (id, name) VALUES
+  ('${TENANT_A}','A'), ('${TENANT_B}','B'), ('${TENANT_C}','C'), ('${TENANT_D}','D'), ('${VALINHOS}','Valinhos');
 GRANT USAGE ON SCHEMA lead_manager TO lead_manager_user;
 GRANT SELECT ON lead_manager.tenants TO lead_manager_user;
 SQL
 
-echo "[itest] migrations do cadastro (person/service_account…)…"
+echo "[itest] migrations do cadastro (person/service_account/professor…)…"
 for m in 051_contact_roles 060_cadastro_mestre 061_person_data_nascimento 067_contact_point_tipo \
-         068_person_payer_relation 069_canonical_roles_seed 070_field_provenance 072_cadastro_sync; do
+         068_person_payer_relation 069_canonical_roles_seed 070_field_provenance 072_cadastro_sync \
+         105_service_account_professor_person; do
   psql_db < "$ROOT/db/migrations/${m}.sql" >/dev/null
 done
 
-echo "[itest] automacao_config mínima (shape de produção até a 119)…"
+echo "[itest] tabelas mínimas (shape de produção) …"
 psql_db <<SQL
 CREATE TABLE lead_manager.automacao_config (tenant_id uuid PRIMARY KEY, nome_ia text, contexto_ia text,
   ramo_atividade text, objetivo_conversa text, estilo_ia text, comportamento_ia text, nao_falar text[] NOT NULL DEFAULT '{}');
-GRANT SELECT, INSERT, UPDATE, DELETE ON lead_manager.automacao_config TO lead_manager_user;
+CREATE TABLE lead_manager.tenant_lead_config (tenant_id uuid PRIMARY KEY, school_name text);
+INSERT INTO lead_manager.tenant_lead_config VALUES ('${TENANT_C}', 'Escola C');
+CREATE TABLE lead_manager.internal_contacts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL,
+  phone text NOT NULL, name text NOT NULL, type text NOT NULL, created_at timestamptz DEFAULT now(), UNIQUE (tenant_id, phone));
+CREATE OR REPLACE FUNCTION lead_manager.br_phone_key(x text) RETURNS text LANGUAGE sql IMMUTABLE AS \$fn\$
+  WITH d AS (SELECT regexp_replace(coalesce(x, ''), '[^0-9]', '', 'g') AS v),
+       loc AS (SELECT CASE WHEN length(v) IN (12,13) AND left(v,2)='55' THEN substr(v,3) ELSE v END AS v FROM d)
+  SELECT CASE WHEN length(v)=11 AND substr(v,3,1)='9' THEN left(v,2)||substr(v,4) ELSE v END FROM loc
+\$fn\$;
+GRANT SELECT, INSERT, UPDATE, DELETE ON lead_manager.automacao_config, lead_manager.tenant_lead_config, lead_manager.internal_contacts TO lead_manager_user;
 SQL
 
 echo "[itest] grants SEM schema app (deve só avisar)…"
@@ -83,6 +97,7 @@ psql_db < "$ROOT/db/grants/boas_vindas_agenda_read.sql"
 echo "[itest] rodando node --test…"
 cd "$ROOT"
 DATABASE_URL="postgres://lead_manager_user:itest@127.0.0.1:${PORT}/lm_itest" \
-RESOURCES_TENANT_A="$TENANT_A" RESOURCES_TENANT_B="$TENANT_B" BV_ITEST_APP=1 \
+ADMIN_DATABASE_URL="postgres://postgres:itest@127.0.0.1:${PORT}/lm_itest" \
+RESOURCES_TENANT_A="$TENANT_A" RESOURCES_TENANT_B="$TENANT_B" BV_TENANT_C="$TENANT_C" BV_TENANT_D="$TENANT_D" BV_ITEST_APP=1 \
 JWT_SECRET="itest-secret" REDIS_URL="redis://127.0.0.1:6399" \
-node --test test/boas-vindas-migrations.itest.js
+node --test --test-concurrency=1 test/boas-vindas-migrations.itest.js test/boas-vindas-sweep.itest.js
