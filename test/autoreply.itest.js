@@ -25,7 +25,8 @@ before(async () => {
       external_id text, conversation_kind text DEFAULT 'DIRECT', auto_reply_at timestamptz, updated_at timestamptz DEFAULT now());
     CREATE TABLE automacao_config (tenant_id uuid PRIMARY KEY, modo_fora_horario text, modo_fds text, nome_ia text, contexto_ia text,
       ia_fora_leads boolean DEFAULT true, ia_fora_nao_leads boolean DEFAULT true,
-      agendamento_sempre_manual boolean DEFAULT true, proposta_sempre_manual boolean DEFAULT true);   -- travas de AGENDA/VALORES
+      agendamento_sempre_manual boolean DEFAULT true, proposta_sempre_manual boolean DEFAULT true,   -- travas de AGENDA/VALORES
+      ramo_atividade text, objetivo_conversa text, estilo_ia text, comportamento_ia text, nao_falar text[] NOT NULL DEFAULT '{}');   -- perfil da assistente (migr 119)
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, school_name text,
       available_instruments text[] NOT NULL DEFAULT '{}');
     CREATE TABLE staff_outbound_samples (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text,
@@ -312,4 +313,62 @@ test('(21) sem cursos e sem contexto -> nenhum bloco de INFORMAÇÕES vazio', as
   const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi, tudo bem?' }, deps);
   assert.equal(out.ok, true);
   assert.doesNotMatch(deps.spy.systemPrompt, /INFORMAÇÕES DA ESCOLA que você PODE usar/);
+});
+
+// ---- PERFIL DA ASSISTENTE (16/09/2026, migr. 119) -----------------------------------------------------
+// "O que ela NÃO DEVE falar" vira TRAVA onde a resposta sai sozinha; empresa de outro ramo não recebe
+// texto de escola de música.
+async function setPerfil(campos) {
+  await c.query(`UPDATE automacao_config SET ramo_atividade=$2, objetivo_conversa=$3, estilo_ia=$4, comportamento_ia=$5, nao_falar=$6 WHERE tenant_id=$1`,
+    [T1, campos.ramo_atividade || null, campos.objetivo_conversa || null, campos.estilo_ia || null, campos.comportamento_ia || null, campos.nao_falar || []]);
+}
+
+test('(22) assunto proibido ESCRITO pelo cliente -> aviso fixo, sem chamar a IA nem o classificador', async () => {
+  await conv(); await setModo('auto'); await setPerfil({ nao_falar: ['concorrentes'] });
+  try {
+    const deps = mkDeps(NOITE);
+    let classificou = false;
+    deps.checarAssunto = async () => { classificou = true; return { toca: false }; };
+    const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'vocês são melhores que os concorrentes?' }, deps);
+    assert.equal(out.encaminhado, 'nao_falar');
+    assert.match(deps.spy.texto, AVISO);
+    assert.equal(deps.spy.systemPrompt, undefined, 'a IA nem é chamada');
+    assert.equal(classificou, false, 'escrito com todas as letras não gasta classificador');
+  } finally { await setPerfil({}); }
+});
+
+test('(23) assunto proibido SUTIL na entrada (classificador) e na SAÍDA da IA -> aviso fixo', async () => {
+  await conv(); await setModo('auto'); await setPerfil({ nao_falar: ['política'] });
+  try {
+    let deps = mkDeps(NOITE);
+    deps.checarAssunto = async ({ texto }) => ({ toca: /eleição/.test(texto), assunto: 'política' });
+    let out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'quem vocês acham que ganha a eleição?' }, deps);
+    assert.equal(out.encaminhado, 'nao_falar');
+    assert.match(deps.spy.texto, AVISO);
+
+    await conv();
+    deps = mkDeps(NOITE);
+    deps.checarAssunto = async ({ texto }) => ({ toca: /eleição/.test(texto), assunto: 'política' });
+    deps.generate = async ({ systemPrompt }) => { deps.spy.systemPrompt = systemPrompt; return 'Oi! Sobre a eleição, acho que o candidato X vai bem. A equipe retorna amanhã às 9h.'; };
+    out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi, tudo bem?' }, deps);
+    assert.equal(out.encaminhado, 'nao_falar', 'o texto da IA não sai');
+    assert.doesNotMatch(deps.spy.texto, /candidato/);
+    assert.match(deps.spy.systemPrompt, /ASSUNTOS PROIBIDOS[\s\S]*"política"[\s\S]*equipe no horário de atendimento/, 'e a proibição também foi no prompt');
+  } finally { await setPerfil({}); }
+});
+
+test('(24) empresa de outro ramo: prompt sem "aula"/"escola", com objetivo e comportamento da empresa', async () => {
+  await conv(); await setModo('auto', 'auto', 'Assistente', 'Rua A, 10.');
+  await setPerfil({ ramo_atividade: 'Clínica odontológica', objetivo_conversa: 'agendar uma avaliação', estilo_ia: 'profissional', comportamento_ia: 'Trate por senhor(a).' });
+  try {
+    const deps = mkDeps(NOITE);
+    const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi, vocês atendem aos sábados?', contactName: 'Maria Silva' }, deps);
+    assert.equal(out.ok, true);
+    const sp = deps.spy.systemPrompt;
+    assert.doesNotMatch(sp, /\baulas?\b|escola|instrumento|experimental|professor/i);
+    assert.match(sp, /INFORMAÇÕES DA EMPRESA[^"]*"""Rua A, 10\."""/);
+    assert.match(sp, /OBJETIVO DAS CONVERSAS COM INTERESSADOS: agendar uma avaliação/);
+    assert.match(sp, /Tipo comportamental: PROFISSIONAL/);
+    assert.match(sp, /AGENDA É EXCLUSIVA DA EQUIPE/, 'a trava de agenda continua, sem falar de aula');
+  } finally { await setPerfil({}); }
 });

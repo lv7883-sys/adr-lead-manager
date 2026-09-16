@@ -2,6 +2,7 @@
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const logger = require('./logger');
+const perfilIA = require('./perfilAssistente');   // perfil da assistente por empresa (multi-ramo)
 
 // Cadeia de modelos: o configurado (GEMINI_MODEL) primeiro, depois fallbacks
 // estáveis — incluindo os aliases *-latest, que acompanham automaticamente o
@@ -331,7 +332,7 @@ const REGRAS_REDACAO = {
   identidadeAssistente:
     '\n- VOCÊ É A ASSISTENTE VIRTUAL, não uma pessoa da equipe. As mensagens marcadas [RECEPÇÃO] no histórico foram escritas por pessoas da equipe — NÃO por você. Por isso: NUNCA fale em primeira pessoa sobre o que a equipe fez, disse ou vai fazer ("enviei", "mandei", "te passei", "combinamos", "conversamos", "anotei", "vou te enviar"); NUNCA continue uma conversa da recepção como se fosse sua; NUNCA assine nem se apresente com o nome de alguém da equipe. Se o cliente chamar você pelo nome de outra pessoa, não assuma essa identidade: responda como a assistente virtual, sem citar o nome da pessoa da equipe. Você não envia arquivos, não anota, não reserva e não resolve nada — só acolhe e avisa que a equipe retorna.',
   semNomeStaff:
-    '\n- NÃO se apresente nem assine com o nome de uma recepcionista/atendente ESPECÍFICA (ex.: NÃO escreva "aqui é a Késsia", "sou a Rafaela"), mesmo que esse nome apareça no histórico — quem envia pode ser outra pessoa da equipe. Se um nome de quem atende for realmente necessário na apresentação, use o espaço reservado "[seu nome]" para a atendente preencher; no fluxo normal, apenas continue sem assinar.',
+    '\n- NÃO se apresente nem assine com o nome de uma recepcionista/atendente ESPECÍFICA (ex.: NÃO escreva "aqui é a Fulana", "sou a Beltrana"), mesmo que esse nome apareça no histórico — quem envia pode ser outra pessoa da equipe. Se um nome de quem atende for realmente necessário na apresentação, use o espaço reservado "[seu nome]" para a atendente preencher; no fluxo normal, apenas continue sem assinar.',
   // Não re-oferecer o que JÁ foi enviado (apresentação, tabela de valores, documento...).
   naoReoferecer:
     '\n- ANTES de sugerir, confira o histórico: se você JÁ enviou o que o cliente pede (apresentação, tabela de valores, documento, fotos, link — no histórico aparece como "[documento: ...]", "[imagem]", ou você já disse que ia enviar), NÃO ofereça mandar de novo nem diga "posso reenviar". Reconheça que já enviou e siga a conversa: pergunte se recebeu, se ficou claro ou se tem alguma dúvida. Só ofereça enviar o que AINDA não aparece como enviado no histórico.',
@@ -341,15 +342,87 @@ const REGRAS_REDACAO = {
     '\n- POSTURA COMERCIAL (você é uma recepcionista com o jeito de uma boa vendedora consultiva — tem a coragem de conduzir para a venda que uma recepcionista tímida não teria, mas com acolhimento genuíno). Seu objetivo em TODA conversa é levar a pessoa a AGENDAR A AULA EXPERIMENTAL GRATUITA (fechar a matrícula em si fica com a equipe depois — não force matrícula, foque em marcar a experimental). Como conduzir, de forma natural (nunca robótica, nunca com cara de roteiro): (1) Crie conexão real — acolha o que a pessoa diz, use o contexto dela, seja calorosa. (2) Entenda antes de oferecer — se falta informação (qual instrumento, objetivo, quem vai estudar), faça UMA boa pergunta, sem interrogatório. (3) Trate a objeção com competência, não com pressão — primeiro VALIDE o que ela sente ("faz todo sentido querer planejar"), depois mostre o outro lado com um argumento concreto. (4) Use urgência REAL, nunca inventada — pegar o ritmo antes do ano letivo, garantir vaga no horário/professor que ela quer, a experimental é gratuita e sem compromisso, e sobretudo o valor de COLOCAR EM PRÁTICA AGORA um sonho que ela já tem, em vez de adiar mais um ano; JAMAIS invente escassez ("só resta 1 vaga") se não for verdade. (5) Peça o próximo passo com naturalidade — convide para a experimental e já ofereça sugerir um dia/horário. (6) SAIBA A HORA DE RECUAR — trabalhe a objeção com firmeza gentil, mas se a pessoa reforçar o "não" de forma clara pela 2ª ou 3ª vez ("decidi, é ano que vem mesmo"), ACOLHA, PARE de argumentar, deixe a porta aberta ("quando quiser, é só me chamar por aqui") e siga prestativa; insistir além disso afasta o cliente e mancha a escola. Seja corajosa com quem ainda está em dúvida e respeitosa com quem já decidiu.',
 };
 
+// ---- ADAPTAÇÃO POR EMPRESA (multi-ramo) --------------------------------------------------------------
+// Os textos deste arquivo nasceram numa escola de música ("aula experimental", "instrumento"). Quando a
+// empresa configura RAMO ou OBJETIVO no perfil da assistente (perfilAssistente.js), eles saem genéricos;
+// sem isso saem palavra por palavra como sempre (nenhuma unidade muda sem configurar). Tipo comportamental
+// ou instruções de comportamento definidos soltam o "sem emojis" fixo: quem manda é o perfil.
+function _adaptar(texto, perfil) {
+  let t = String(texto);
+  const p = perfil || {};
+  if ((p.estilo_ia && perfilIA.ESTILOS[p.estilo_ia]) || (p.comportamento_ia && String(p.comportamento_ia).trim())) {
+    t = t.split(', sem emojis').join(', no tom e no uso de emojis definidos em COMO SE COMPORTAR');
+  }
+  if (!perfilIA.generico(p)) return t;
+  const alvo = perfilIA.objetivo(p);
+  const trocas = [
+    ['Seu objetivo em TODA conversa é levar a pessoa a AGENDAR A AULA EXPERIMENTAL GRATUITA (fechar a matrícula em si fica com a equipe depois — não force matrícula, foque em marcar a experimental).',
+      'Seu objetivo em TODA conversa com interessados é levar a pessoa a ' + alvo + ' (o fechamento em si fica com a equipe depois — não force).'],
+    ['(qual instrumento, objetivo, quem vai estudar)', '(o que a pessoa procura, com que objetivo, para quem)'],
+    ['(4) Use urgência REAL, nunca inventada — pegar o ritmo antes do ano letivo, garantir vaga no horário/professor que ela quer, a experimental é gratuita e sem compromisso, e sobretudo o valor de COLOCAR EM PRÁTICA AGORA um sonho que ela já tem, em vez de adiar mais um ano; JAMAIS invente escassez ("só resta 1 vaga") se não for verdade.',
+      '(4) Use urgência REAL, nunca inventada — só use prazo, vaga ou condição que estejam nas informações da empresa; JAMAIS invente escassez ("só resta 1 vaga") se não for verdade.'],
+    ['(5) Peça o próximo passo com naturalidade — convide para a experimental e já ofereça sugerir um dia/horário.',
+      '(5) Peça o próximo passo com naturalidade — convide para ' + alvo + '.'],
+    ['("decidi, é ano que vem mesmo")', '("decidi, fica para depois")'],
+    ['mancha a escola', 'mancha a empresa'],
+    ['(instrumento, objetivo, pra quem, horário)', '(o que procura, objetivo, pra quem, quando)'],
+    ['(use as informações da escola)', '(use as informações da empresa)'],
+    ['nada de pergunta genérica ("tem algum instrumento em mente?") quando a resposta já está na conversa. Ex.: se pediu "instrumentos de corda", já diga quais a escola tem e convide para a experimental.',
+      'nada de pergunta genérica quando a resposta já está na conversa. Ex.: se a pessoa já disse o que procura, diga direto o que a empresa tem e convide para o próximo passo.'],
+    ['"prefere terça ou quinta pra experimental?"', '"prefere terça ou quinta?"'],
+    ['ESTÁGIO: RENOVAÇÃO — este aluno já estuda e o contrato está no fim. Seu objetivo é RENOVAR: vender a CONTINUIDADE (manter o ritmo/evolução que ele já conquistou, o mesmo horário e professor, não perder o que construiu).',
+      'ESTÁGIO: RENOVAÇÃO — esta pessoa já é cliente e o contrato está no fim. Seu objetivo é RENOVAR: vender a CONTINUIDADE (manter o que ela já conquistou e as condições que já tem, não perder o que construiu).'],
+    ['o objetivo PRINCIPAL é levar ao próximo passo comercial da escola (normalmente AGENDAR A AULA EXPERIMENTAL, se a escola oferece — veja as informações do prompt; o fechamento da matrícula vem depois, com a equipe). Se a pessoa já fez a experimental e está decidindo a matrícula, aí sim conduza para fechar a matrícula com o método. Use urgência REAL (colocar em prática agora um sonho já existente, pegar o ritmo, garantir o horário/professor que ela quer) — nunca escassez inventada.',
+      'o objetivo PRINCIPAL é levar a pessoa a ' + alvo + ' (o fechamento vem depois, com a equipe). Se a pessoa já passou dessa etapa e está decidindo, aí sim conduza para fechar com o método. Use urgência REAL — nunca escassez inventada.'],
+    ['e reconecte avançando para o agendamento da aula experimental. ', 'e reconecte avançando para o objetivo: ' + alvo + '. '],
+    ['como agendar a aula experimental,', 'como levar ao próximo passo (' + alvo + '),'],
+    ['uma escola de música', perfilIA.descricaoEmpresa(p)],
+    ['INFORMAÇÕES DA ESCOLA', 'INFORMAÇÕES DA EMPRESA'],
+    ['informações da escola', 'informações da empresa'],
+    ['tom caloroso da escola', 'tom caloroso da empresa'],
+    ['tom da escola', 'tom da empresa'],
+    ['sugestão da escola', 'sugestão da empresa'],
+    ['WhatsApp da escola', 'WhatsApp da empresa'],
+    ['nome da assistente da escola', 'nome da assistente da empresa'],
+    ['a escola quer manter a continuidade', 'a empresa quer manter a continuidade'],
+    ['Recepção/Escola', 'Recepção/Empresa'],
+    ['o que a escola oferece', 'o que a empresa oferece'],
+    ['contrato/política da escola', 'contrato/política da empresa'],
+    ['regra exata desta escola', 'regra exata desta empresa'],
+    ['"pode repor qualquer aula", ', ''],
+    ['ASSISTENTE VIRTUAL da escola', 'ASSISTENTE VIRTUAL da empresa'],
+    ['DISPONIBILIDADE de professor(a), datas de turma/evento', 'DISPONIBILIDADE de profissionais da equipe, datas de evento'],
+    ['do contrato de um aluno', 'do contrato de um cliente'],
+    ['o próprio aluno', 'o próprio cliente'],
+    ['responsável pelo aluno', 'responsável pelo cliente'],
+    ['"sua última aula é em X dias"', '"seu último atendimento é em X dias"'],
+    ['interrupção nas aulas', 'interrupção'],
+    ['\nEscola: ', '\nEmpresa: '],
+  ];
+  for (const [de, para] of trocas) t = t.split(de).join(para);
+  return t;
+}
+function posturaComercial(perfil) { return _adaptar(REGRAS_REDACAO.posturaComercial, perfil); }
+// Adapta um prompt montado protegendo trechos que vieram de FORA (prompt próprio da empresa, contexto,
+// conversa do cliente, rascunho): esse texto não é nosso e não pode ser reescrito pelas trocas acima.
+function _adaptarFixos(texto, perfil, protegidos) {
+  let t = String(texto);
+  const lista = (Array.isArray(protegidos) ? protegidos : [protegidos]).filter((x) => typeof x === 'string' && x.length >= 20 && t.includes(x));   // nomes curtos não: protegeriam pedaços de palavra
+  lista.forEach((x, i) => { t = t.split(x).join('@@PROTEGIDO_' + i + '@@'); });
+  t = _adaptar(t, perfil);
+  lista.forEach((x, i) => { t = t.split('@@PROTEGIDO_' + i + '@@').join(x); });
+  return t;
+}
+
 // ALMA DE VENDAS (treinamento de vendas da recepção — Academia do Rock). Aplicada SÓ nos caminhos
 // revisados por humano (sugestão do campo verde + chat de estratégia), NUNCA na resposta automática
-// ao cliente. Transforma a Janis numa vendedora consultiva de alto nível — calorosa como a Késsia,
+// ao cliente. Transforma a Janis numa vendedora consultiva de alto nível — calorosa como uma ótima recepcionista,
 // mas com INICIATIVA: sempre conduz, trata objeção com técnica e fecha com próximo passo concreto.
 // Assenta sobre REGRAS_REDACAO.fatos (anti-invenção): vender com verdade, nunca prometer o que o
 // contrato não garante.
 const REGRAS_VENDAS = {
   metodo:
-    '\n\nVOCÊ É UMA VENDEDORA CONSULTIVA DE ALTO NÍVEL (o jeito acolhedor da Késsia + coragem de conduzir e fechar). ' +
+    '\n\nVOCÊ É UMA VENDEDORA CONSULTIVA DE ALTO NÍVEL (o jeito acolhedor de uma ótima recepcionista + coragem de conduzir e fechar). ' +
     'Vender aqui é AJUDAR A DECIDIR, com verdade e acolhimento — nunca pressão. Siga o MÉTODO em 5 passos (decore a LÓGICA, não a frase; nada de soar roteiro):' +
     '\n  1) ACOLHER — valide o que a pessoa sente ("faz todo sentido", "entendo"). Nunca confronte.' +
     '\n  2) DIAGNOSTICAR SÓ O QUE FALTA — se a pessoa JÁ disse o que quer (instrumento, objetivo, pra quem, horário), NÃO pergunte de novo: responda DIRETO com o que a escola oferece (use as informações da escola) e AVANCE para o próximo passo. Só faça UMA pergunta quando faltar mesmo um dado essencial — nada de pergunta genérica ("tem algum instrumento em mente?") quando a resposta já está na conversa. Ex.: se pediu "instrumentos de corda", já diga quais a escola tem e convide para a experimental.' +
@@ -372,20 +445,20 @@ const REGRAS_VENDAS = {
     '\n- IMPORTANTE: a mensagem que você escreve é UMA mensagem de WhatsApp pronta pra enviar — curta, calorosa, natural, espelhando o tom da conversa. Aplique o método por dentro (não escreva "passo 1", não explique a técnica), e SEMPRE feche com a pergunta/próximo passo.',
 };
 // Monta o bloco de vendas segundo o estágio da conversa.
-function blocoVendas(contexto = 'lead') {
+function blocoVendas(contexto = 'lead', perfil = null) {
   const alvo = contexto === 'renovacao'
     ? '\n- ESTÁGIO: RENOVAÇÃO — este aluno já estuda e o contrato está no fim. Seu objetivo é RENOVAR: vender a CONTINUIDADE (manter o ritmo/evolução que ele já conquistou, o mesmo horário e professor, não perder o que construiu). Ancore no valor de continuar, trate a objeção de renovação (preço, tempo, resultado) com o método e feche convidando a confirmar a renovação a tempo, sem interrupção.'
     : '\n- ESTÁGIO: LEAD — o objetivo PRINCIPAL é levar ao próximo passo comercial da escola (normalmente AGENDAR A AULA EXPERIMENTAL, se a escola oferece — veja as informações do prompt; o fechamento da matrícula vem depois, com a equipe). Se a pessoa já fez a experimental e está decidindo a matrícula, aí sim conduza para fechar a matrícula com o método. Use urgência REAL (colocar em prática agora um sonho já existente, pegar o ritmo, garantir o horário/professor que ela quer) — nunca escassez inventada.';
-  return REGRAS_VENDAS.metodo + alvo + REGRAS_VENDAS.sanduiche + REGRAS_VENDAS.fechamento +
+  return _adaptar(REGRAS_VENDAS.metodo + alvo + REGRAS_VENDAS.sanduiche + REGRAS_VENDAS.fechamento +
     REGRAS_VENDAS.nuncaDizer + REGRAS_VENDAS.contrato + REGRAS_VENDAS.fecharPergunta +
-    '\n- SAIBA A HORA DE RECUAR: trabalhe a objeção com firmeza gentil, mas se a pessoa reforçar o "não" de forma clara pela 2ª/3ª vez, ACOLHA, pare de argumentar e deixe a porta aberta. Insistir além disso afasta e mancha a escola.';
+    '\n- SAIBA A HORA DE RECUAR: trabalhe a objeção com firmeza gentil, mas se a pessoa reforçar o "não" de forma clara pela 2ª/3ª vez, ACOLHA, pare de argumentar e deixe a porta aberta. Insistir além disso afasta e mancha a escola.', perfil);
 }
 
 // persona: 'recepcao' (padrão — a sugestão do campo verde, que a recepcionista revisa e envia como ela) |
 // 'assistente' (a resposta automática: quem fala é a assistente virtual, NÃO uma recepcionista).
 // transcript: histórico já legendado ([CLIENTE]/[RECEPÇÃO]/[VOCÊ]) — no modo assistente substitui os turnos
 // user/model, porque neles TODA saída da recepção vira fala "da própria IA" (e ela passava a falar como a Késsia).
-async function generateReply({ systemPrompt, history = [], message, clarification, retomada, vendas = false, contexto = 'lead', persona = 'recepcao', transcript = null }) {
+async function generateReply({ systemPrompt, history = [], message, clarification, retomada, vendas = false, contexto = 'lead', persona = 'recepcao', transcript = null, perfil = null }) {
   const assistente = persona === 'assistente';
   const usarTranscricao = assistente && typeof transcript === 'string';
   let sys = systemPrompt;
@@ -432,12 +505,13 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
     // Modo vendas (só sugestão revisada por humano): a alma de vendas completa (método 5 passos,
     // sanduíche, fechamento de ouro, o que nunca dizer) substitui a postura comercial leve do
     // fluxo automático. Fora do modo vendas, mantém a postura padrão (resposta automática ao cliente).
-    (vendas ? blocoVendas(contexto) : REGRAS_REDACAO.posturaComercial) +
+    (vendas ? blocoVendas(contexto, perfil) : posturaComercial(perfil)) +
     (permitirSaudacao
       ? (primeiroContato
           ? '\n- É a PRIMEIRA mensagem: pode cumprimentar e se apresentar brevemente (uma linha), conforme a referência de voz da escola.'
           : '\n- O lead ficou em silêncio por mais de um dia: um cumprimento leve de reabertura é bem-vindo, sem se reapresentar por completo.')
       : '\n- A conversa está em andamento: NÃO cumprimente ("Olá", "Oi", "Bom dia") nem se apresente de novo, e NUNCA assine com seu nome ou o nome de quem atende ("Atenciosamente", "— Fulana", "Aqui é a Fulana"). A pessoa já está falando com você — apenas continue.');
+  sys = _adaptarFixos(sys, perfil, systemPrompt);
   if (usarTranscricao && transcript.trim()) {
     sys += '\n\nHISTÓRICO DA CONVERSA (do mais antigo ao mais recente). Legenda: [CLIENTE] = a pessoa com quem você fala; ' +
       '[RECEPÇÃO] = escrita por uma pessoa da equipe, NÃO por você; [VOCÊ] = o que você mesma mandou antes. ' +
@@ -469,13 +543,13 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
 // de estratégia e a nova mensagem (texto + mídia opcional: foto/vídeo/áudio via inlineData) e devolve
 // uma estratégia prática e específica, no método do treinamento, SEM inventar (REGRAS_REDACAO.fatos).
 // `media` = { base64, mimetype } opcional. `contexto` = 'lead' | 'renovacao' | '' (não-lead → tom leve).
-async function estrategiaVendas({ systemPrompt, clientHistory = [], chatHistory = [], message = '', media = null, escola, nomeIa, contexto = 'lead' } = {}) {
+async function estrategiaVendas({ systemPrompt, clientHistory = [], chatHistory = [], message = '', media = null, escola, nomeIa, contexto = 'lead', perfil = null } = {}) {
   const transcript = (clientHistory || [])
     .map((m) => `${m.role === 'ASSISTANT' ? 'Recepção/Escola' : 'Cliente'}: ${String(m.content ?? m.body ?? '').replace(/\s+/g, ' ').trim()}`)
     .filter((x) => x.length > 20)
     .slice(-45).join('\n');
   const vende = contexto === 'lead' || contexto === 'renovacao';
-  const sys =
+  const sys = _adaptarFixos(
     `Você é a ${nomeIa || 'Janis'}, CONSULTORA DE VENDAS interna da recepção${escola ? ' da ' + escola : ''}. ` +
     'Você NÃO está falando com o cliente — você orienta a RECEPCIONISTA a conduzir e vender MELHOR ESTA conversa. ' +
     'Fale com ela de colega pra colega ("você"), em português do Brasil, direta e prática. ' +
@@ -484,13 +558,13 @@ async function estrategiaVendas({ systemPrompt, clientHistory = [], chatHistory 
     '- Diga em que pé está a conversa, a provável barreira/objeção e a temperatura do lead.\n' +
     '- Dê uma ESTRATÉGIA específica DESTA conversa (nada de conselho genérico).\n' +
     '- Quando fizer sentido, ofereça uma SUGESTÃO DE FALA pronta pra ela mandar ao cliente, entre aspas, curta e no tom caloroso da escola.' +
-    (vende ? blocoVendas(contexto) : '\n- Aqui NÃO é um lead/renovação de venda: oriente como uma boa recepcionista acolhedora resolveria (tom caloroso da escola), sem forçar venda.') +
+    (vende ? blocoVendas(contexto, perfil) : '\n- Aqui NÃO é um lead/renovação de venda: oriente como uma boa recepcionista acolhedora resolveria (tom caloroso da escola), sem forçar venda.') +
     REGRAS_REDACAO.semNomeStaff +
     REGRAS_REDACAO.fatos +
     (systemPrompt ? `\n\nINFORMAÇÕES DA ESCOLA (referência de fatos — nunca extrapole):\n${systemPrompt}` : '') +
     (transcript
       ? `\n\nCONVERSA REAL COM O CLIENTE (contexto; trate SÓ isto como fato do que já foi dito):\n${transcript}`
-      : '\n\n(Ainda não há mensagens trocadas com o cliente nesta conversa.)');
+      : '\n\n(Ainda não há mensagens trocadas com o cliente nesta conversa.)'), perfil, [systemPrompt, transcript, escola]);
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({ model: modelName, systemInstruction: sys, generationConfig: { temperature: 0.5 } });
     const contents = [];
@@ -509,15 +583,15 @@ async function estrategiaVendas({ systemPrompt, clientHistory = [], chatHistory 
 
 // D — "Melhorar com IA": revisa um rascunho escrito/editado pela recepcionista,
 // mantendo a INTENÇÃO e as informações dela. Não inventa dados. Retorna só o texto.
-async function improveReply({ systemPrompt, history = [], draft }) {
+async function improveReply({ systemPrompt, history = [], draft, perfil = null }) {
   // Histórico COMPLETO (mesma fonte da sugestão: o /improve já entrega loadRealHistory —
   // messages USER + staff_outbound_samples + drafts aprovados, sem LIMIT). Sem slice: é
   // o que faz o "Melhorar" ENXERGAR o que já enviamos e não re-oferecer.
   const ctx = history.length
     ? '\n\nHISTÓRICO DA CONVERSA (mais antigo -> mais novo):\n' +
-      history.map((m) => `${m.role === 'ASSISTANT' ? 'Escola' : 'Lead'}: ${m.content ?? m.body ?? ''}`).join('\n')
+      history.map((m) => `${m.role === 'ASSISTANT' ? (perfilIA.generico(perfil) ? 'Empresa' : 'Escola') : 'Lead'}: ${m.content ?? m.body ?? ''}`).join('\n')
     : '';
-  const prompt =
+  const prompt = _adaptarFixos(
     `${systemPrompt}\n\n` +
     // Mesmas regras da sugestão (constante compartilhada) — não divergir de novo.
     'COMO ESCREVER (mesmas regras da sugestão da escola):' +
@@ -525,14 +599,14 @@ async function improveReply({ systemPrompt, history = [], draft }) {
     REGRAS_REDACAO.nome +
     REGRAS_REDACAO.tom +
     REGRAS_REDACAO.naoReoferecer +
-    REGRAS_REDACAO.posturaComercial +
+    posturaComercial(perfil) +
     '\n\nTAREFA: revise e melhore o RASCUNHO de resposta abaixo, escrito pela recepcionista. ' +
     'Corrija o português e ajuste ao tom natural de WhatsApp da escola ("você", cordial e claro), ' +
     'deixando a mensagem fluida — MAS mantenha a intenção e as informações que ela colocou. ' +
     'Se o rascunho oferecer enviar algo que o HISTÓRICO mostra que JÁ foi enviado, corrija a AÇÃO ' +
     '(troque "vou te enviar" por "já enviei, você recebeu?") preservando a informação — não re-ofereça o já enviado. ' +
     'NÃO invente dados (endereço, preço, nomes, horários) que não estejam no histórico/prompt. ' +
-    `Responda SOMENTE com a mensagem final melhorada, sem comentários nem aspas.${ctx}\n\nRASCUNHO:\n${draft ?? ''}`;
+    `Responda SOMENTE com a mensagem final melhorada, sem comentários nem aspas.${ctx}\n\nRASCUNHO:\n${draft ?? ''}`, perfil, [systemPrompt, draft, ...history.map((m) => m.content ?? m.body ?? '')]);
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
       model: modelName,
@@ -546,8 +620,8 @@ async function improveReply({ systemPrompt, history = [], draft }) {
 // E1 — Assistente operacional da RECEPÇÃO: ajuda a recepcionista a atender (o que dizer,
 // como conduzir, agendar, lidar com objeções). NÃO fala com o cliente — orienta a pessoa.
 // Usa as informações da escola como base; não inventa dados.
-async function assistantReply({ schoolContext, leadName, leadConversation, history = [], message }) {
-  const sys =
+async function assistantReply({ schoolContext, leadName, leadConversation, history = [], message, perfil = null }) {
+  const sys = _adaptarFixos(
     'Você é um assistente interno que AJUDA A RECEPCIONISTA de uma escola de música a ' +
     'atender bem ESTE lead específico. Responda dúvidas operacionais (o que dizer, como ' +
     'conduzir, como agendar a aula experimental, como contornar objeções, como melhorar um ' +
@@ -557,7 +631,7 @@ async function assistantReply({ schoolContext, leadName, leadConversation, histo
     'tiver um dado, diga que não tem (não invente endereço, preço, nomes ou horários).' +
     (leadName ? `\n\nLEAD: ${leadName}` : '') +
     (leadConversation ? `\n\nCONVERSA COM ESTE LEAD (mais antigo -> mais novo):\n${leadConversation}` : '') +
-    (schoolContext ? `\n\nINFORMAÇÕES DA ESCOLA (referência):\n${schoolContext}` : '');
+    (schoolContext ? `\n\nINFORMAÇÕES DA ESCOLA (referência):\n${schoolContext}` : ''), perfil, [schoolContext, leadConversation, leadName]);
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
       model: modelName,
@@ -578,11 +652,11 @@ async function assistantReply({ schoolContext, leadName, leadConversation, histo
 
 // PARTE 3 — sugestão de retomada de lead silencioso. Analisa a conversa e propõe
 // uma abordagem natural e não invasiva. Retorna JSON {estrategia, rascunho}.
-async function sugestaoRetomada({ history = [], leadName, schoolContext, engajamentoNota = '' }) {
+async function sugestaoRetomada({ history = [], leadName, schoolContext, engajamentoNota = '', perfil = null }) {
   const convo = history
-    .map((m) => `${String(m.role).toLowerCase() === 'assistant' ? 'Escola' : 'Lead'}: ${m.content ?? m.body ?? m.text ?? ''}`)
+    .map((m) => `${String(m.role).toLowerCase() === 'assistant' ? (perfilIA.generico(perfil) ? 'Empresa' : 'Escola') : 'Lead'}: ${m.content ?? m.body ?? m.text ?? ''}`)
     .join('\n');
-  const sys =
+  const sys = _adaptarFixos(
     'Você ajuda a recepção de uma escola de música a RETOMAR o contato com um lead que ' +
     'parou de responder. Analise a conversa abaixo e proponha uma reabordagem NATURAL, ' +
     'calorosa e SEM pressão — referenciando onde a conversa parou (o assunto/dúvida real), ' +
@@ -593,7 +667,7 @@ async function sugestaoRetomada({ history = [], leadName, schoolContext, engajam
     (engajamentoNota ? `\n\nPADRÃO DE ENGAJAMENTO DESTE CLIENTE (use para calibrar o tom e a abordagem):\n${engajamentoNota}` : '') +
     `\n\nCONVERSA (mais antigo -> mais novo):\n${convo || '(sem histórico)'}` +
     '\n\nResponda SOMENTE com JSON: {"estrategia":"<por que e como reabordar, 1-2 frases para a ' +
-    'recepcionista>","rascunho":"<mensagem pronta para enviar ao lead, tom da escola, sem emojis>"}';
+    'recepcionista>","rascunho":"<mensagem pronta para enviar ao lead, tom da escola, sem emojis>"}', perfil, [schoolContext, convo, engajamentoNota, leadName]);
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
       model: modelName,
@@ -616,7 +690,7 @@ function _dataPt(iso) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
   return m ? `${m[3]}/${m[2]}/${m[1]}` : String(iso || '');
 }
-async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, dataFimISO, schoolContext, nomeIa, orientacao } = {}) {
+async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, dataFimISO, schoolContext, nomeIa, orientacao, perfil = null } = {}) {
   const dataFim = _dataPt(dataFimISO);
   const paraAluno = !responsavelNome || responsavelNome === alunoNome;
   const quem = paraAluno
@@ -639,7 +713,7 @@ async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, d
       'o interesse em continuar e antecipando dúvidas.'
     : 'O contrato encerra em mais de um mês (aviso bem antecipado): tom leve e sem qualquer pressão, ' +
       'apenas avisando com carinho que o ciclo vai terminar e que a escola quer manter a continuidade.';
-  const sys =
+  const sys = _adaptarFixos(
     'Você é a assistente de uma escola de música e vai escrever uma mensagem PROATIVA de WhatsApp ' +
     'convidando à RENOVAÇÃO do contrato de um aluno. A mensagem é enviada para ' + quem + '. ' +
     timing +
@@ -652,7 +726,7 @@ async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, d
     (orientacao ? `\n\nORIENTAÇÃO DO GESTOR para a renovação (siga à risca no tom e no foco):\n${orientacao}` : '') +
     (schoolContext ? `\n\nINFORMAÇÕES DA ESCOLA (referência):\n${schoolContext}` : '') +
     '\n\nResponda SOMENTE com JSON: {"estrategia":"<por que e como abordar, 1-2 frases para a ' +
-    'recepcionista>","rascunho":"<mensagem pronta para enviar, tom da escola, sem emojis>"}';
+    'recepcionista>","rascunho":"<mensagem pronta para enviar, tom da escola, sem emojis>"}', perfil, [schoolContext, orientacao, alunoNome, responsavelNome, servico]);
   return withModelFallback(async (modelName) => {
     const model = client().getGenerativeModel({
       model: modelName,
@@ -691,6 +765,35 @@ async function lerDesfechoRenovacao({ historico } = {}) {
       situacao: ['renovou', 'nao_renovou', 'indefinido'].includes(p.situacao) ? p.situacao : 'indefinido',
       motivo: typeof p.motivo === 'string' ? p.motivo.trim().slice(0, 120) : '',
     };
+  });
+}
+
+// ASSUNTOS PROIBIDOS da empresa (perfil da assistente) — a mensagem TOCA em algum? Usado só onde a
+// resposta sai SEM humano no meio (resposta automática, auto-envio da renovação), na entrada e na
+// saída. O caso óbvio (assunto escrito) já foi pego antes sem IA (perfilAssistente.assuntoEscrito);
+// aqui fica o sutil: "quem vocês acham que ganha a eleição?" para o assunto "política".
+// Quem chama decide o que fazer em erro (a trava fecha: vai o aviso fixo).
+async function tocaAssuntoProibido({ texto, assuntos = [] } = {}) {
+  const lista = (Array.isArray(assuntos) ? assuntos : []).map((a) => String(a || '').trim()).filter(Boolean);
+  const t = String(texto || '').trim();
+  if (!lista.length || !t) return { toca: false, assunto: null };
+  const prompt =
+    'Você verifica se uma mensagem de WhatsApp TOCA em algum assunto que a empresa proibiu a assistente virtual de tratar.\n' +
+    'Assuntos proibidos:\n' + lista.map((a, i) => `${i + 1}. ${a}`).join('\n') +
+    '\n\nConsidere que TOCA quando a mensagem fala do assunto, pergunta sobre ele, cita algo que claramente pertence a ele ' +
+    '(sinônimo, exemplo, caso específico) ou dá informação sobre ele. Uma palavra parecida usada com outro sentido NÃO conta. ' +
+    'Na dúvida razoável, considere que toca.' +
+    '\n\nMensagem:\n"""\n' + t.slice(0, 2000) + '\n"""\n\n' +
+    'Responda SOMENTE com JSON: {"toca": true ou false, "assunto": "<o assunto da lista, exatamente como escrito, ou vazio>"}';
+  return withModelFallback(async (modelName) => {
+    const model = client().getGenerativeModel({
+      model: modelName,
+      generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+    });
+    const res = await model.generateContent(prompt);
+    const p = JSON.parse(res.response.text());
+    const toca = !!(p && p.toca === true);
+    return { toca, assunto: toca ? (lista.find((a) => a === p.assunto) || String(p.assunto || lista[0])) : null };
   });
 }
 
@@ -880,6 +983,9 @@ Responda SOMENTE com JSON: {"resgata":<true|false>,"confidence":<0.0-1.0>,"motiv
 }
 
 module.exports = {
+  _adaptar,
+  posturaComercial,
+  blocoVendas,
   classifyRescue,
   classify,
   classifyConversa,
@@ -890,6 +996,7 @@ module.exports = {
   assistantReply,
   sugestaoRetomada,
   sugestaoRenovacao,
+  tocaAssuntoProibido,
   lerDesfechoRenovacao,
   classifyIntent,
   extractQualification,

@@ -17,6 +17,7 @@
 // A LÓGICA (SQL + projeção) fica em funções puras/exportadas p/ o itest exercitar contra
 // um Postgres real (test/inbox.itest.js) — os handlers HTTP só orquestram parse + withTenant.
 
+const { SQL_PERFIL } = require('../perfilAssistente');   // perfil da assistente junto da config (migr. 119)
 const express = require('express');
 const { withTenant } = require('../db');
 const { authenticate } = require('../auth');
@@ -1571,7 +1572,7 @@ async function suggestReply(tenantId, conversationId, contexto = 'lead', deps = 
     const last = (await c.query(
       `SELECT body FROM messages WHERE conversation_id = $1 AND role = 'USER' ORDER BY received_at DESC LIMIT 1`, [cv.id])).rows[0];
     const cfg = (await c.query(
-      `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
+      `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp, ${SQL_PERFIL}
          FROM tenant_lead_config WHERE tenant_id = $1`, [tenantId])).rows[0];
     const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
     return {
@@ -1587,6 +1588,7 @@ async function suggestReply(tenantId, conversationId, contexto = 'lead', deps = 
     const suggestion = await generate({
       systemPrompt: resolveSystemPrompt(info.config), history, message: info.lastBody,
       retomada: history.length > 0, vendas, contexto: contexto === 'renovacao' ? 'renovacao' : 'lead',
+      perfil: info.config && info.config.perfil,
     });
     return { ok: true, suggestion };
   } catch (e) {
@@ -1624,7 +1626,7 @@ async function _estrategiaCtx(c, tenantId, conversationId) {
        AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
       ORDER BY created_at ASC LIMIT 1`, [tenantId, cv.ident])).rows[0];
   const cfg = (await c.query(
-    `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
+    `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp, ${SQL_PERFIL}
        FROM tenant_lead_config WHERE tenant_id = $1`, [tenantId])).rows[0];
   const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
   let nomeIa = null;
@@ -1672,7 +1674,7 @@ router.post('/:tenantId/inbox/conversations/:conversationId/estrategia/abrir', a
       reply = await gemini.estrategiaVendas({
         systemPrompt: resolveSystemPrompt(ctx.cfg), clientHistory, chatHistory: [],
         message: 'Acabei de abrir esta conversa. Me dá uma leitura rápida de onde ela está e a melhor estratégia de abordagem agora.',
-        escola: ctx.escola, nomeIa: ctx.nomeIa, contexto,
+        escola: ctx.escola, nomeIa: ctx.nomeIa, contexto, perfil: ctx.cfg && ctx.cfg.perfil,
       });
     } catch (e) { return res.status(502).json({ error: 'generate_error', detail: e.message }); }
     const row = await withTenant(req.tenantId, (c) => c.query(
@@ -1726,7 +1728,7 @@ router.post('/:tenantId/inbox/conversations/:conversationId/estrategia', authent
     try {
       reply = await gemini.estrategiaVendas({
         systemPrompt: resolveSystemPrompt(ctx.cfg), clientHistory, chatHistory,
-        message: msgIA, media: mediaForAI, escola: ctx.escola, nomeIa: ctx.nomeIa, contexto,
+        message: msgIA, media: mediaForAI, escola: ctx.escola, nomeIa: ctx.nomeIa, contexto, perfil: ctx.cfg && ctx.cfg.perfil,
       });
     } catch (e) { return res.status(502).json({ error: 'generate_error', detail: e.message, user: userRow }); }
     const janisRow = await withTenant(req.tenantId, (c) => c.query(

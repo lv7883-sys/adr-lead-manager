@@ -3,6 +3,8 @@
 // Namespace self-service da unidade (ADR-004, Decisão 4): /tenant/:tenantId/*.
 // Distinto de /admin/* (plataforma). Autorização por (tenant, role).
 
+const perfilIA = require('../perfilAssistente');   // perfil da assistente (ramo, contexto, comportamento, proibidos)
+const { SQL_PERFIL } = perfilIA;   // perfil junto da config nas consultas de prompt (migr. 119)
 const express = require('express');
 const { withTenant } = require('../db');
 const { anonymizeLead } = require('../anonymize');
@@ -1501,7 +1503,7 @@ router.get('/:tenantId/leads/:id/sugestao-retomada', authenticate, requireTenant
     }
     const ctx = await withTenant(req.tenantId, async (c) => {
       const cfg = (await c.query(
-        `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
+        `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp, ${SQL_PERFIL}
            FROM tenant_lead_config WHERE tenant_id = $1`, [req.tenantId]
       )).rows[0];
       const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [req.tenantId])).rows[0]?.name;
@@ -1551,7 +1553,7 @@ router.get('/:tenantId/leads/:id/sugestao-retomada', authenticate, requireTenant
     const nota = _notaEngajamento(speed, !!(ctx.eng && ctx.eng.silenciou));
     const out = await gemini.sugestaoRetomada({
       history: ctx.convo, leadName: ctx.leadName, schoolContext,
-      engajamentoNota: nota ? nota.prompt : '',
+      engajamentoNota: nota ? nota.prompt : '', perfil: ctx.config && ctx.config.perfil,
     });
     if (nota && out && typeof out.estrategia === 'string') {
       out.estrategia = `Padrão do cliente: ${nota.desc}\n\n${out.estrategia}`.trim();
@@ -1918,7 +1920,7 @@ router.post(
         const cfg = (
           await c.query(
             `SELECT school_name, system_prompt_override, available_instruments,
-                    business_hours, notification_whatsapp
+                    business_hours, notification_whatsapp, ${SQL_PERFIL}
                FROM tenant_lead_config WHERE tenant_id = $1`,
             [req.tenantId]
           )
@@ -1957,7 +1959,7 @@ router.post(
       let improved, ultimoErro;
       for (let i = 0; i < 3; i += 1) {
         try {
-          improved = await gemini.improveReply({ systemPrompt, history, draft: text });
+          improved = await gemini.improveReply({ systemPrompt, history, draft: text, perfil: ctx.config && ctx.config.perfil });
           ultimoErro = null;
           break;
         } catch (e) {
@@ -2141,7 +2143,7 @@ router.post(
         const cfg = (
           await c.query(
             `SELECT school_name, system_prompt_override, available_instruments,
-                    business_hours, notification_whatsapp
+                    business_hours, notification_whatsapp, ${SQL_PERFIL}
                FROM tenant_lead_config WHERE tenant_id = $1`,
             [req.tenantId]
           )
@@ -2179,7 +2181,7 @@ router.post(
         ? ctx.convo.map((m) => `${m.kind}: ${m.body}`).join('\n')
         : null;
       const reply = await gemini.assistantReply({
-        schoolContext, leadName: ctx.leadName, leadConversation, history, message,
+        schoolContext, leadName: ctx.leadName, leadConversation, history, message, perfil: ctx.config && ctx.config.perfil,
       });
       logger.info('tenant.assistant.reply', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
       res.json({ ok: true, reply });
@@ -2311,6 +2313,10 @@ function _snapshotAutomacao(row) {
 }
 // Campos da ASSISTENTE que a tela edita. Ficavam FORA do GET: a tela abria "Nome da IA" e "O que a
 // IA pode responder" sempre vazios e, ao salvar qualquer outra coisa, gravava o vazio por cima.
+// Catálogo dos tipos comportamentais (fonte única: perfilAssistente.ESTILOS) — a tela lista daqui.
+function _estilosCatalogo() {
+  return Object.entries(perfilIA.ESTILOS).map(([valor, e]) => ({ valor, label: e.label, desc: e.desc }));
+}
 function _assistenteAutomacao(row) {
   return {
     nome_ia: row.nome_ia || '', contexto_ia: row.contexto_ia || '',
@@ -2330,9 +2336,9 @@ router.get('/:tenantId/automacao', authenticate, requireTenantAccess(READ_ROLES)
     });
     const cursos = normalizarCursos(out.lc && out.lc.available_instruments);
     const config = out.cfg
-      ? { ..._snapshotAutomacao(out.cfg), ..._assistenteAutomacao(out.cfg), cursos, updated_at: out.cfg.updated_at, updated_by: out.cfg.updated_by }
-      : { ...AUTOMACAO_DEFAULTS, ..._assistenteAutomacao({}), cursos, updated_at: null, updated_by: null };
-    res.json({ tenant_id: req.tenantId, config, historico: out.historico });
+      ? { ..._snapshotAutomacao(out.cfg), ..._assistenteAutomacao(out.cfg), ...perfilIA.doBanco(out.cfg), cursos, updated_at: out.cfg.updated_at, updated_by: out.cfg.updated_by }
+      : { ...AUTOMACAO_DEFAULTS, ..._assistenteAutomacao({}), ...perfilIA.doBanco({}), cursos, updated_at: null, updated_by: null };
+    res.json({ tenant_id: req.tenantId, config, historico: out.historico, estilos: _estilosCatalogo() });
   } catch (err) {
     logger.error('tenant.automacao.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
@@ -2356,6 +2362,8 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
   };
   // Cursos e aulas oferecidos (tenant_lead_config.available_instruments) — só mexe se veio no corpo.
   const cursos = Array.isArray(b.cursos) ? normalizarCursos(b.cursos) : null;
+  // Perfil da assistente (migr. 119): só os campos que vieram; ausente = mantém o salvo.
+  const perfilNovo = perfilIA.lerCorpo(b);
   for (const k of ['modo_comercial', 'modo_fora_horario', 'modo_fds']) {
     if (!MODOS.includes(novo[k])) return res.status(400).json({ error: `${k} inválido` });
   }
@@ -2371,6 +2379,9 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
       // Campo ausente no corpo = mantém o que está salvo (nunca apagar nome/contexto por omissão).
       if (novo.nome_ia == null && atual) novo.nome_ia = atual.nome_ia;
       if (novo.contexto_ia == null && atual) novo.contexto_ia = atual.contexto_ia;
+      // "antes" dos campos da assistente no log, p/ o histórico mostrar só o que mudou de verdade
+      anterior.nome_ia = atual ? (atual.nome_ia || '') : '';
+      anterior.contexto_ia = atual ? (atual.contexto_ia || '') : '';
       const r = await c.query(
         `INSERT INTO automacao_config
            (tenant_id, modo_comercial, modo_fora_horario, modo_fds,
@@ -2396,6 +2407,14 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
          novo.agendamento_sempre_manual, novo.nome_ia, novo.contexto_ia,
          novo.ia_fora_leads, novo.ia_fora_nao_leads, usuario]
       );
+      const camposPerfil = Object.keys(perfilNovo);   // whitelist de perfilIA.lerCorpo — seguro no SQL
+      if (camposPerfil.length) {
+        const antes = perfilIA.doBanco(atual || {});
+        for (const k of camposPerfil) anterior[k] = antes[k];
+        const sets = camposPerfil.map((k, i) => `${k} = $${i + 2}`).join(', ');
+        const vals = camposPerfil.map((k) => (k === 'nao_falar' ? perfilNovo[k] : (perfilNovo[k] || null)));
+        r.rows[0] = (await c.query(`UPDATE automacao_config SET ${sets} WHERE tenant_id = $1 RETURNING *`, [req.tenantId, ...vals])).rows[0] || r.rows[0];
+      }
       let cursosSalvos = null;
       if (cursos) {
         // "antes" da lista vai pro log, p/ o histórico mostrar o que mudou (e não registrar à toa)
@@ -2413,7 +2432,7 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
       await c.query(
         `INSERT INTO automacao_log (tenant_id, usuario, modo_anterior, modo_novo, motivo)
          VALUES ($1,$2,$3::jsonb,$4::jsonb,$5)`,
-        [req.tenantId, usuario, JSON.stringify(anterior), JSON.stringify(cursos ? { ...novo, cursos } : novo), motivo || null]
+        [req.tenantId, usuario, JSON.stringify(anterior), JSON.stringify({ ...novo, ...Object.fromEntries(camposPerfil.map((k) => [k, perfilIA.doBanco(perfilNovo)[k]])), ...(cursos ? { cursos } : {}) }), motivo || null]
       );
       return { row: r.rows[0], anterior, cursos: normalizarCursos(cursosSalvos) };
     });
@@ -2428,7 +2447,7 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
       notificarRecepcao(req.tenantId, 'automacao_alterada', { byName, mudancas, motivo: motivo || null })
         .catch((e) => logger.warn('tenant.automacao.notif_error', { tenant_id: req.tenantId, error: e.message }));
     }
-    res.json({ ok: true, config: { ..._snapshotAutomacao(out.row), ..._assistenteAutomacao(out.row), cursos: out.cursos, updated_at: out.row.updated_at, updated_by: out.row.updated_by }, anterior: out.anterior });
+    res.json({ ok: true, config: { ..._snapshotAutomacao(out.row), ..._assistenteAutomacao(out.row), ...perfilIA.doBanco(out.row), cursos: out.cursos, updated_at: out.row.updated_at, updated_by: out.row.updated_by }, anterior: out.anterior });
   } catch (err) {
     logger.error('tenant.automacao.update_error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });

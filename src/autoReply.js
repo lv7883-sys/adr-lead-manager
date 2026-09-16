@@ -22,6 +22,8 @@ const { PREFIXO_REACAO } = require('./reacao');   // marcador canônico de reaç
 const logger = require('./logger');
 const tema = require('./temaProibido');   // assuntos que só a recepção responde
 const { normalizarCursos } = require('./templates');   // lista de cursos da unidade (mesma regra das sugestões)
+const perfilIA = require('./perfilAssistente');   // perfil da assistente: ramo, objetivo, comportamento, assuntos proibidos
+const travaAssunto = require('./travaAssunto');   // o que a empresa proibiu: trava na entrada e na saída
 
 // A Janis só responde a uma mensagem com CONTEÚDO de verdade. Reação (emoji), figurinha, mídia sem
 // legenda ou "balão" só de emoji NÃO são um turno do cliente — são um aceno (ADR-031 / reacao.js).
@@ -196,7 +198,7 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
           WHERE tenant_id = $1 AND channel = $2
             AND regexp_replace(external_id, '[^0-9]', '', 'g') = regexp_replace($3, '[^0-9]', '', 'g')
           ORDER BY updated_at DESC LIMIT 1`, [tenantId, channel, String(externalId)])).rows[0];
-      const auto = (await c.query('SELECT modo_fora_horario, modo_fds, nome_ia, contexto_ia, ia_fora_leads, ia_fora_nao_leads, agendamento_sempre_manual, proposta_sempre_manual FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
+      const auto = (await c.query('SELECT modo_fora_horario, modo_fds, nome_ia, contexto_ia, ia_fora_leads, ia_fora_nao_leads, agendamento_sempre_manual, proposta_sempre_manual, ramo_atividade, objetivo_conversa, estilo_ia, comportamento_ia, nao_falar FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
       const cfg = (await c.query('SELECT school_name, available_instruments FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
       // Horário de atendimento = FONTE ÚNICA tenants.horario_comercial (o que a aba grava) + fallback legado.
       const t = (await c.query(
@@ -297,6 +299,12 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     if (barradoEntrada) {
       return entregar(avisoFixo(), { encaminhado: barradoEntrada.tema, fase: 'entrada', trecho: barradoEntrada.trecho });
     }
+    // O QUE A EMPRESA PROIBIU (perfil da assistente → "O que ela NÃO DEVE falar"): mesma saída, aviso fixo.
+    const perfil = perfilIA.doBanco(info.auto);
+    const proibidoEntrada = await travaAssunto.verificar(inboundText, perfil.nao_falar, { checar: deps.checarAssunto });
+    if (proibidoEntrada) {
+      return entregar(avisoFixo(), { encaminhado: proibidoEntrada.tema, fase: 'entrada', trecho: proibidoEntrada.trecho });
+    }
 
     // LÊ a conversa (mesma timeline da "sugestão de resposta") p/ responder no contexto — como
     // um humano faria. Best-effort: sem histórico se falhar.
@@ -312,16 +320,25 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     // Base de conhecimento que a escola preencheu (endereço, como funcionam as aulas, eventos…).
     const contexto = (info.auto && info.auto.contexto_ia && String(info.auto.contexto_ia).trim()) || '';
 
-    const blocoNome = contato
+    // Empresa que configurou ramo/objetivo: textos sem "aula"/"escola" (perfilAssistente.generico). Sem isso,
+    // o texto de sempre, palavra por palavra.
+    const generico = perfilIA.generico(perfil);
+    const NEG = perfilIA.negocio(perfil).toUpperCase();
+    const blocoNome = generico
+      ? (contato ? `Você JÁ SABE, pelo WhatsApp, que está falando com ${contato} — trate pelo primeiro nome (${primeiroNome}) e NÃO pergunte o nome dela. ` : '')
+      : contato
       ? `Você JÁ SABE, pelo WhatsApp, que está falando com ${contato} — trate pelo primeiro nome (${primeiroNome}) e NÃO pergunte o nome dela. Se a conversa for sobre aula, pergunte de forma natural PARA QUEM seria a aula: se é para ${primeiroNome} ou para outra pessoa (e, se for outra, o nome e a idade). `
       : `Se ainda não souber o nome e a conversa for sobre aula, pergunte para quem seria a aula (a própria pessoa ou outra) — sem soar burocrática. `;
     const infoEscola = [
-      cursos.length ? `Cursos e aulas oferecidos (lista oficial e atual): ${cursos.join(', ')}.` : '',
+      cursos.length ? `${generico ? 'O que a empresa oferece' : 'Cursos e aulas oferecidos'} (lista oficial e atual): ${cursos.join(', ')}.` : '',
       contexto,
     ].filter(Boolean).join('\n');
     const blocoContexto = infoEscola
-      ? `INFORMAÇÕES DA ESCOLA que você PODE usar para responder (ex.: cursos oferecidos, endereço, como funcionam as aulas, eventos): """${infoEscola}""" ` +
-        (cursos.length ? `Se perguntarem por um curso ou aula que NÃO está na lista de cursos, não diga que tem nem que não tem: a recepção confirma. ` : '')
+      ? (generico
+          ? `INFORMAÇÕES DA EMPRESA que você PODE usar para responder (ex.: o que a empresa oferece, endereço, como funciona o atendimento): """${infoEscola}""" ` +
+            (cursos.length ? `Se perguntarem por algo que NÃO está na lista do que a empresa oferece, não diga que tem nem que não tem: a equipe confirma. ` : '')
+          : `INFORMAÇÕES DA ESCOLA que você PODE usar para responder (ex.: cursos oferecidos, endereço, como funcionam as aulas, eventos): """${infoEscola}""" ` +
+            (cursos.length ? `Se perguntarem por um curso ou aula que NÃO está na lista de cursos, não diga que tem nem que não tem: a recepção confirma. ` : ''))
       : '';
     const proximaFrase = proxima || 'no próximo horário de atendimento';
     const retorno = proxima ? `quando a equipe abrir (${proxima})` : 'no próximo horário de atendimento';
@@ -330,21 +347,29 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
       `Você é ${nomeIa}, a ASSISTENTE VIRTUAL do atendimento de ${escola} — você NÃO é nenhuma das recepcionistas. Escreva de forma calorosa e natural (nada robótico, nada genérico). ` +
       blocoNome + blocoContexto +
       `AGORA é FORA do horário de atendimento. LEIA o histórico da conversa e responda de forma PERSONALIZADA e curta (1 a 3 frases), em português do Brasil, reconhecendo o assunto. ` +
-      `REGRA DE OURO (obrigatória): você SÓ pode afirmar fatos que estejam ESCRITOS EXPLICITAMENTE nas "INFORMAÇÕES DA ESCOLA" acima. É TERMINANTEMENTE PROIBIDO inventar, deduzir, supor ou completar qualquer informação. ` +
-      `Você PODE — só se estiver nas informações acima — dar o ENDEREÇO e explicar COMO FUNCIONAM as aulas (individuais, projetos de banda, eventos). ` +
-      `Se a pessoa perguntar OU mencionar QUALQUER coisa que não esteja explícita nas informações acima (ex.: um workshop, um evento específico, nome de professor, promoção, data, valor, horário de aula): NÃO confirme, NÃO detalhe e NÃO invente — diga com sinceridade que a recepção confirma esse detalhe ${retorno}. Mesmo que apareça no histórico da conversa, trate como NÃO confirmado (use o histórico só p/ entender o assunto e o tom, NUNCA como fonte de fatos). ` +
+      `REGRA DE OURO (obrigatória): você SÓ pode afirmar fatos que estejam ESCRITOS EXPLICITAMENTE nas "INFORMAÇÕES DA ${NEG}" acima. É TERMINANTEMENTE PROIBIDO inventar, deduzir, supor ou completar qualquer informação. ` +
+      (generico
+        ? `Você PODE — só se estiver nas informações acima — dar o ENDEREÇO e explicar COMO FUNCIONA o que a empresa oferece. `
+        : `Você PODE — só se estiver nas informações acima — dar o ENDEREÇO e explicar COMO FUNCIONAM as aulas (individuais, projetos de banda, eventos). `) +
+      `Se a pessoa perguntar OU mencionar QUALQUER coisa que não esteja explícita nas informações acima (ex.: ${generico ? 'um evento específico, nome de alguém da equipe, promoção, data, valor, horário' : 'um workshop, um evento específico, nome de professor, promoção, data, valor, horário de aula'}): NÃO confirme, NÃO detalhe e NÃO invente — diga com sinceridade que a recepção confirma esse detalhe ${retorno}. Mesmo que apareça no histórico da conversa, trate como NÃO confirmado (use o histórico só p/ entender o assunto e o tom, NUNCA como fonte de fatos). ` +
       `NUNCA informe PREÇOS/valores. É TERMINANTEMENTE PROIBIDO falar sobre PAGAMENTO em qualquer forma (formas de pagamento, cobrança, mensalidade, boleto, Pix, cartão, parcelamento) e você NUNCA envia LINK de pagamento — pagamento é EXCLUSIVO da recepção. Se a pessoa tocar nesse assunto, apenas diga com naturalidade que a recepção cuida disso ${retorno}. ` +
-      (regras.agenda
+      (generico
+        ? (regras.agenda
+            ? `AGENDA É EXCLUSIVA DA EQUIPE: NUNCA escreva dia, data ou horário de NENHUM atendimento ou compromisso e NUNCA agende, confirme, remarque, antecipe ou cancele nada — mesmo que um horário apareça no histórico: ele pode ter mudado depois. `
+            : `NÃO AGENDE nem confirme HORÁRIOS — exclusivo da equipe. `)
+        : (regras.agenda
         ? `AGENDA É EXCLUSIVA DA RECEPÇÃO: NUNCA escreva dia, data ou horário de NENHUMA aula (experimental ou de aluno) e NUNCA agende, confirme, remarque, reponha, antecipe ou cancele aula — mesmo que um horário apareça no histórico: ele pode ter mudado depois. `
-        : `NÃO AGENDE nem confirme HORÁRIO de aula experimental — exclusivo da recepção. `) +
+        : `NÃO AGENDE nem confirme HORÁRIO de aula experimental — exclusivo da recepção. `)) +
       regraHorario +
+      // perfil: ramo, objetivo, COMO SE COMPORTAR e ASSUNTOS PROIBIDOS (o contexto já está nas INFORMAÇÕES)
+      (perfilIA.blocoPerfil(perfil, { persona: 'assistente', semContexto: true }).trim() ? perfilIA.blocoPerfil(perfil, { persona: 'assistente', semContexto: true }).trim() + ' ' : '') +
       `NÃO assine nem repita seu nome no final — o nome já aparece no topo.`;
 
     const generate = deps.generate || gemini.generateReply;
     let corpo;
     try {
       corpo = await generate({ systemPrompt, history, message: inboundText || '', retomada: history.length > 0,
-        persona: 'assistente', transcript: montarTranscricao(history, nomeIa) });
+        persona: 'assistente', transcript: montarTranscricao(history, nomeIa), perfil });
     } catch (e) {
       logger.warn('autoreply.generate_failed', { tenant_id: tenantId, error: e.message });
       corpo = `Oi! Recebemos sua mensagem 🙌 No momento estamos fora do horário de atendimento; a equipe humana retorna ${proxima || 'assim que abrirmos'}.`;
@@ -357,6 +382,11 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     if (barradoSaida) {
       logger.warn('autoreply.saida_barrada', { tenant_id: tenantId, tema: barradoSaida.tema, trecho: barradoSaida.trecho });
       return entregar(avisoFixo(), { encaminhado: barradoSaida.tema, fase: 'saida', trecho: barradoSaida.trecho });
+    }
+    const proibidoSaida = await travaAssunto.verificar(corpo, perfil.nao_falar, { checar: deps.checarAssunto });
+    if (proibidoSaida) {
+      logger.warn('autoreply.saida_barrada', { tenant_id: tenantId, tema: proibidoSaida.tema, trecho: proibidoSaida.trecho });
+      return entregar(avisoFixo(), { encaminhado: proibidoSaida.tema, fase: 'saida', trecho: proibidoSaida.trecho });
     }
     return entregar(corpo);
   } catch (e) {

@@ -19,6 +19,8 @@ const { pool, withTenant } = require('../db');
 const geminiDefault = require('../gemini');
 const logger = require('../logger');
 const tema = require('../temaProibido');   // toque que afirma horário/valor não sai sozinho
+const perfilIA = require('../perfilAssistente');   // perfil da assistente (comportamento, assuntos proibidos)
+const travaAssunto = require('../travaAssunto');   // assunto proibido pela empresa não sai sozinho
 
 // Marcos da régua (dias corridos até o fim do contrato). Régua completa D-45→D-2. Rascunho idempotente
 // por (contrato, marco, âncora): mais marcos = mais SUGESTÕES pra recepção, não mais mensagem ao cliente
@@ -36,7 +38,8 @@ const SUGESTAO_TTL_H = Number(process.env.RENOVACAO_SUGESTAO_TTL_H || 20); // n�
 // (habilitada=true, auto=false). school_name (tenant_lead_config) é fallback de contexto.
 async function loadRenovacaoConfig(c, tenantId) {
   const ac = (await c.query(
-    `SELECT nome_ia, contexto_ia, renovacao_habilitada, renovacao_auto_envio, renovacao_orientacao
+    `SELECT nome_ia, contexto_ia, renovacao_habilitada, renovacao_auto_envio, renovacao_orientacao,
+            ramo_atividade, objetivo_conversa, estilo_ia, comportamento_ia, nao_falar
        FROM lead_manager.automacao_config WHERE tenant_id = $1`, [tenantId])).rows[0] || {};
   const lc = (await c.query(
     `SELECT school_name FROM tenant_lead_config WHERE tenant_id = $1`, [tenantId])).rows[0] || {};
@@ -44,7 +47,9 @@ async function loadRenovacaoConfig(c, tenantId) {
     habilitada: ac.renovacao_habilitada !== false,       // default true
     autoEnvio: ac.renovacao_auto_envio === true,          // default false (Fase 2)
     nomeIa: ac.nome_ia || null,
-    schoolContext: ac.contexto_ia || lc.school_name || null,
+    // perfil da assistente entra junto do contexto: comportamento e assuntos proibidos valem no rascunho
+    schoolContext: ((ac.contexto_ia || lc.school_name || '') + perfilIA.blocoPerfil(ac, { persona: 'assistente', semContexto: true })).trim() || null,
+    perfil: perfilIA.doBanco(ac),
     orientacao: (ac.renovacao_orientacao || '').trim() || null, // Fase C2 — orientação do gestor
   };
 }
@@ -148,6 +153,7 @@ async function processarTenant(tenantId, deps = {}) {
         schoolContext: cfg.schoolContext,
         nomeIa: cfg.nomeIa,
         orientacao: cfg.orientacao,
+        perfil: cfg.perfil,
       });
       if (!sug || !sug.rascunho) {
         logger.warn('renovacao.sem_rascunho', { tenant_id: tenantId, account_id: a.account_id, marco });
@@ -331,9 +337,12 @@ async function autoEnviarTenant(tenantId, deps = {}) {
     // identidade: false — o toque é a mensagem aprovada da própria unidade (sai em nome da escola), não a
     // assistente virtual improvisando.
     const barrado = tema.bloqueio(tema.detectarSaida(tp.rascunho), { ...regras, contrato: false, identidade: false });
-    if (barrado) {
+    // Assunto que a empresa proibiu (perfil da assistente): também fica para a recepção enviar.
+    const proibido = barrado ? null : await travaAssunto.verificar(tp.rascunho, cfg.perfil && cfg.perfil.nao_falar, { checar: deps.checarAssunto });
+    if (barrado || proibido) {
+      const b = barrado || proibido;
       resumo.retidos += 1;
-      logger.warn('renovacao.auto.retido_tema', { tenant_id: tenantId, touchpoint: tp.id, tema: barrado.tema, trecho: barrado.trecho });
+      logger.warn('renovacao.auto.retido_tema', { tenant_id: tenantId, touchpoint: tp.id, tema: b.tema, trecho: b.trecho });
       continue;
     }
     try {

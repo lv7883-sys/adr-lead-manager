@@ -13,7 +13,7 @@ const { resolveSystemPrompt, normalizarCursos, blocoCursos } = require('../src/t
 test('override da unidade + cursos configurados -> a lista vai junto', () => {
   const sp = resolveSystemPrompt({ system_prompt_override: 'Você atende a escola.', available_instruments: ['Violino', 'Gaita'] });
   assert.ok(sp.startsWith('Você atende a escola.'), 'o texto da unidade fica intacto');
-  assert.match(sp, /CURSOS E AULAS OFERECIDOS[^:]*: Violino, Gaita\./);
+  assert.match(sp, /O QUE A EMPRESA OFERECE[^:]*: Violino, Gaita\./);
   assert.match(sp, /NÃO está na lista, não afirme que tem nem que não tem/);
 });
 

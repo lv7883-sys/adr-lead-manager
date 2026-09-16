@@ -50,7 +50,8 @@ done
 
 echo "[itest] config mínima (automacao_config/tenant_lead_config — shape usado pelo sweep) …"
 docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest >/dev/null <<SQL
-CREATE TABLE lead_manager.automacao_config (tenant_id uuid PRIMARY KEY, nome_ia text, contexto_ia text);
+CREATE TABLE lead_manager.automacao_config (tenant_id uuid PRIMARY KEY, nome_ia text, contexto_ia text,
+  ramo_atividade text, objetivo_conversa text, estilo_ia text, comportamento_ia text, nao_falar text[] NOT NULL DEFAULT '{}');   -- perfil da assistente (migr 119)
 CREATE TABLE lead_manager.tenant_lead_config (tenant_id uuid PRIMARY KEY, school_name text, updated_at timestamptz DEFAULT now());
 -- Contatos internos (ADR-018) + br_phone_key (espelho da migr 085) — usados pela exclusão de internos no sweep.
 CREATE TABLE lead_manager.internal_contacts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, phone text, name text, type text);

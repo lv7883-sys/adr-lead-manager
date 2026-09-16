@@ -1,5 +1,6 @@
 'use strict';
 
+const { SQL_PERFIL } = require('./perfilAssistente');   // perfil da assistente junto da config (migr. 119)
 const { withTenant, pool } = require('./db');
 const logger = require('./logger');
 const { toE164 } = require('./validation');
@@ -1617,7 +1618,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
     const cfg = (
       await c.query(
         `SELECT school_name, system_prompt_override, available_instruments,
-                business_hours, notification_whatsapp
+                business_hours, notification_whatsapp, ${SQL_PERFIL}
            FROM tenant_lead_config WHERE tenant_id = $1`,
         [tenantId]
       )
@@ -1691,7 +1692,7 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   const systemPrompt = resolveSystemPrompt(ctx.config);
   let reply;
   try {
-    reply = await generate({ systemPrompt, history, message: msg.body, clarification, retomada: history.length > 0 });
+    reply = await generate({ systemPrompt, history, message: msg.body, clarification, retomada: history.length > 0, perfil: ctx.config && ctx.config.perfil });
   } catch (err) {
     log2.error('gate2.generate_error', { gate: 2, error: err.message });
     // Anti-órfão: se o lead/conversa foram CRIADOS agora e a resposta não saiu,
@@ -1882,7 +1883,7 @@ async function generateDraftForLead(tenantId, leadId, deps = {}) {
     ).rows[0];
     const cfg = (
       await c.query(
-        `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
+        `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp, ${SQL_PERFIL}
            FROM tenant_lead_config WHERE tenant_id = $1`,
         [tenantId]
       )
@@ -1899,7 +1900,7 @@ async function generateDraftForLead(tenantId, leadId, deps = {}) {
   const systemPrompt = resolveSystemPrompt(info.config);
   let reply;
   try {
-    reply = await generate({ systemPrompt, history, message: info.lastBody, retomada: history.length > 0 });
+    reply = await generate({ systemPrompt, history, message: info.lastBody, retomada: history.length > 0, perfil: info.config && info.config.perfil });
   } catch (err) {
     log.error('draft.generate_error', { error: err.message });
     return { ok: false, reason: 'generate_error' };

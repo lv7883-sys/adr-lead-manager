@@ -1,4 +1,5 @@
 'use strict';
+const perfil = require('./perfilAssistente');   // perfil da assistente por empresa (ramo, contexto, comportamento, proibidos)
 
 // Template padrão hardcoded (ponto de partida: Academia do Rock).
 // Usado quando tenant_lead_config.system_prompt_override é null.
@@ -21,6 +22,24 @@ Diretrizes:
 - Se a mensagem fugir do tema de aulas/escola de música (assunto fora do
   escopo), NÃO tente resolver o assunto: redirecione a pessoa educadamente
   para um atendente humano.`;
+
+// Template padrão para QUALQUER ramo (usado quando a empresa configurou ramo ou objetivo no perfil da
+// assistente e não tem prompt próprio). O que é específico do negócio vem do perfil (perfilAssistente.js).
+const GENERIC_SYSTEM_PROMPT = `Você é a assistente virtual da {{school_name}}, {{empresa}}.
+
+Seu papel é atender pelo WhatsApp as pessoas que entram em contato, com tom
+cordial e humano. Responda sempre em português do Brasil, de forma objetiva e simpática.
+
+Horário de atendimento: {{business_hours}}.
+
+Diretrizes:
+- Tire dúvidas sobre o que a empresa oferece usando só as informações deste prompt.
+- Não invente valores, prazos ou condições que você não conhece; ofereça encaminhar
+  para um atendente humano quando necessário.
+- Se a pessoa demonstrar interesse real, descubra de forma natural o que ela precisa
+  e conduza para o objetivo das conversas definido pela empresa.
+- Se a mensagem fugir do que a empresa faz, NÃO tente resolver o assunto: redirecione
+  a pessoa educadamente para um atendente humano.`;
 
 const DAY_LABELS = {
   mon: 'Seg',
@@ -71,31 +90,35 @@ function normalizarCursos(lista) {
 function blocoCursos(config) {
   const cursos = normalizarCursos(config && config.available_instruments);
   if (!cursos.length) return '';
-  return '\n\nCURSOS E AULAS OFERECIDOS (lista oficial e atual da unidade — vale mais do que qualquer outra ' +
-    'menção a cursos neste texto ou no histórico da conversa): ' + cursos.join(', ') + '.' +
-    '\n- Quando perguntarem se a escola tem determinado curso ou aula, responda com base nesta lista.' +
+  return '\n\nO QUE A EMPRESA OFERECE — cursos, aulas, produtos ou serviços (lista oficial e atual — vale mais do que qualquer outra ' +
+    'menção a isso neste texto ou no histórico da conversa): ' + cursos.join(', ') + '.' +
+    '\n- Quando perguntarem se a empresa tem determinado curso, produto ou serviço, responda com base nesta lista.' +
     '\n- Se perguntarem por algo que NÃO está na lista, não afirme que tem nem que não tem: diga que vai confirmar com a equipe.';
 }
 
 function renderDefaultPrompt(config) {
   const cursos = normalizarCursos(config.available_instruments);
   const hours = formatBusinessHours(config.business_hours || {});
-  return DEFAULT_SYSTEM_PROMPT.replaceAll('{{school_name}}', config.school_name || '')
+  const base = perfil.generico(config.perfil) ? GENERIC_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT;
+  return base.replaceAll('{{school_name}}', config.school_name || '')
+    .replaceAll('{{empresa}}', perfil.descricaoEmpresa(config.perfil))
     .replaceAll('{{instruments}}', cursos.length ? cursos.join(', ') : 'diversos instrumentos')
-    .replaceAll('{{business_hours}}', hours) + blocoCursos(config);
+    .replaceAll('{{business_hours}}', hours) + blocoCursos(config) + perfil.blocoPerfil(config.perfil);
 }
 
-// Prompt efetivo: usa o override se houver; senão, renderiza o template padrão. Nos dois casos a
-// lista de cursos configurada vai no final.
+// Prompt efetivo: usa o override se houver; senão, renderiza o template padrão. Nos dois casos entram no
+// final o que a empresa oferece e o PERFIL DA ASSISTENTE (contexto, comportamento, assuntos proibidos).
+// `config.perfil` vem do fragmento SQL_PERFIL (automacao_config); sem ele, nada muda.
 function resolveSystemPrompt(config) {
   if (config.system_prompt_override != null && config.system_prompt_override !== '') {
-    return config.system_prompt_override + blocoCursos(config);
+    return config.system_prompt_override + blocoCursos(config) + perfil.blocoPerfil(config.perfil);
   }
   return renderDefaultPrompt(config);
 }
 
 module.exports = {
   DEFAULT_SYSTEM_PROMPT,
+  GENERIC_SYSTEM_PROMPT,
   blocoCursos,
   normalizarCursos,
   formatBusinessHours,

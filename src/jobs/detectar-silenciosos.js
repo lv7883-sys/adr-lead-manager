@@ -9,6 +9,7 @@
 // grava em reabordagem_tentativas com status='pendente' (aguardando aprovação
 // da recepção, que vê na fila). Idempotente: a janela de 3 dias evita repetir.
 
+const { SQL_PERFIL } = require('../perfilAssistente');   // perfil da assistente junto da config (migr. 119)
 const { pool, withTenant } = require('../db');
 const gemini = require('../gemini');
 const redisClient = require('../redisClient');
@@ -93,7 +94,7 @@ async function processarTenant(tenantId) {
   // Contexto da escola (uma vez por tenant).
   const cfg = await withTenant(tenantId, async (c) => {
     const config = (await c.query(
-      `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp
+      `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp, ${SQL_PERFIL}
          FROM tenant_lead_config WHERE tenant_id = $1`, [tenantId]
     )).rows[0];
     const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
@@ -106,7 +107,7 @@ async function processarTenant(tenantId) {
     try {
       const ident = String(lead.phone || lead.meta_psid || '').replace(/\D/g, '');
       const convo = await withTenant(tenantId, (c) => historico(c, tenantId, ident));
-      const sug = await gemini.sugestaoRetomada({ history: convo, leadName: lead.name, schoolContext });
+      const sug = await gemini.sugestaoRetomada({ history: convo, leadName: lead.name, schoolContext, perfil: cfg.config && cfg.config.perfil });
       if (!sug || !sug.rascunho) { logger.warn('silenciosos.sem_rascunho', { tenant_id: tenantId, lead_id: lead.id }); continue; }
       await withTenant(tenantId, (c) => c.query(
         // #8 Fase 2: enviado_em=NULL explícito — 'pendente' não é envio; enviado_em passa a
