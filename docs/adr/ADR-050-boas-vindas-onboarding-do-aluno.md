@@ -370,6 +370,7 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 |---|---|---|
 | Conciliações e gestão de extratos ADR-BI | `compasso.*`, `lib/compasso*`, certificado, NFS-e; talvez `bi_raw.conta_bancaria` | **Nenhuma.** Não toca `app.agenda_snapshot`, `app.cache_identidade_aula`, `app.franquia`, `tenant-franquia.js`, `routes/leads.js` nem config-leads. Sem deploy do dashboard previsto. |
 | Proposta de API para integração Regente | API Extranet / rede de franquias (só documentos, sem código) | **Nenhuma hoje.** Não usa migrations do LM e não toca `automacao_config`, `service_account`, `external_ref` nem o modelo tenant/franquia. Três impactos **futuros** incorporados em 13.3 (regras 10–12). "Onboarding" lá = implantação da unidade; no código deles vira `implantacao`. |
+| Proposta de API para integração Regente — **ADR-051** (núcleo canônico, grupos de dados sob demanda; proposto) | Migrations LM **127–139**; `plataforma.assinatura` + `pode_rodar(unidade, job)` | **Compatível.** Portão e manifesto registrados na regra 11 (13.3). A 126 não foi usada por este módulo e fica livre. |
 
 ### 13.2 Reservas e numeração
 
@@ -408,11 +409,20 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
     leitura de agenda e presença fica **atrás de uma única interface do adaptador**
     (`proximosAtendimentos(conta)`, `primeiroAtendimento(conta)`). O job e o cálculo de datas nunca
     leem tabela de agenda diretamente — trocar a fonte é trocar o adaptador.
-11. **O job respeita a assinatura da unidade.** Os módulos serão vendidos por unidade. O
+11. **O job respeita a assinatura da unidade.** *(Atualizado pelo ADR-051.)* Os módulos serão vendidos por unidade. O
     `boas-vindas-sweep` pula o tenant sem módulo ativo, pelo mesmo `gating.js`/`tenant_subscriptions`
     que já controla o `LEAD_MANAGER` — além de pular quem está em modo `desligado`. A chave nasce
     parametrizada: `LEAD_MANAGER` enquanto o módulo fizer parte do Regente base, `BOAS_VINDAS` se for
     vendido à parte (decisão comercial, não bloqueia a E17-01).
+    **Alvo (ADR-051):** a fonte única vira `plataforma.assinatura`, com o código de aplicação
+    `boas_vindas`, e o job pergunta `pode_rodar(unidade, 'boas_vindas')`. Enquanto a função não existir,
+    fica o `gating.js` parametrizado; quando existir, troca-se uma chamada. A CHECK de
+    `tenant_subscriptions` **não** é estendida por este módulo sem alinhar com o ADR-051.
+    **Manifesto do boas-vindas:** `pessoas`; `contratos` (histórico P90D); `agenda` com histórico
+    **P60D**, que inclui a presença. Os 60 dias são o teto da régua (R2): encurtar a janela da agenda
+    faz as etapas presas ao 1º atendimento perderem a âncora. Não usa `recursos` nem
+    `recebiveis_alunos`. O horário de atendimento é config da unidade (`tenants.horario_comercial`),
+    não grupo de dados.
 12. **Nada fixo de unidade.** Nenhum `tenant_id` de Valinhos, nenhum `franquia_id = 1`, nenhuma
     variável de ambiente de tenant no código de produção — só nos testes. Tenant sem franquia
     resolvida não lê agenda e registra o motivo.
