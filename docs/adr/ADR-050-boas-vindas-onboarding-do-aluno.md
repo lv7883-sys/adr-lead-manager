@@ -445,7 +445,7 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 ---
 
 **Conteúdo (atualizado na rev. 4):** a imagem do EAD (etapa 1) **já existia dentro da planilha** e foi extraída;
-o **PDF do Guia do Aluno** (etapa 5) foi gerado a partir da aba 2, sem mudar o texto. Falta só a arte da
+o **Guia rápido do Aluno** (etapa 5) virou uma imagem de uma tela de celular — o guia completo de 14 seções era longo demais para WhatsApp (decisão do dono). Falta só a arte da
 etapa 6. Os arquivos entram pela tela de configuração (E17-04).
 
 ---

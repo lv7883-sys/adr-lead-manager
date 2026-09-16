@@ -119,7 +119,7 @@ Preparamos um *Guia do Aluno* com as principais orientações sobre aulas, falta
 Vale a pena deixar salvo para consultar sempre que precisarem.
 
 Qualquer dúvida, nossa recepção está à disposição! ❤️$t$,
-'PDF do Guia do Aluno (aba 2 da planilha) — o guia traz as regras da rotina da escola', 'documento', 'regente'),
+'Imagem do Guia rápido do Aluno: as regras da rotina da escola em uma tela de celular', 'imagem', 'regente'),
 
 -- 6 ─ 25 dias depois da 1ª aula (RASCUNHO — ver cabeçalho) ────────────────────────────────────────
 ('escola-de-musica-academia-do-rock', 6, 'Projetos e eventos', 'primeiro_atendimento', '{"tipo":"dias","valor":25}', 1, false,
