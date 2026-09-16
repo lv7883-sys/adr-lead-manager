@@ -286,3 +286,30 @@ test('(19) a IA escreve como a recepcionista ("enviei") -> o texto não sai; vai
   assert.doesNotMatch(deps.spy.texto, /enviei/);
   assert.match(deps.spy.texto, AVISO);
 });
+
+// ---- CURSOS OFERECIDOS (16/09/2026) --------------------------------------------------------------------
+// A unidade abriu aulas novas e a assistente não sabia: a lista só existia no banco, fora das
+// "INFORMAÇÕES DA ESCOLA" — e a regra de ouro só deixa afirmar o que está lá dentro.
+test('(20) cursos configurados entram nas INFORMAÇÕES DA ESCOLA, mesmo sem texto de contexto', async () => {
+  await conv(); await setModo('auto', 'auto', 'Janis Joplin', null);
+  await c.query(`UPDATE tenant_lead_config SET available_instruments = $2 WHERE tenant_id = $1`, [T1, ['Guitarra', 'Violino', 'Gaita', 'violino']]);
+  try {
+    const deps = mkDeps(NOITE);
+    deps.generate = async ({ systemPrompt }) => { deps.spy.systemPrompt = systemPrompt; return 'Oi! Temos aula de violino sim. A equipe retorna amanhã às 9h.'; };
+    const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'vocês têm aula de violino?' }, deps);
+    assert.equal(out.ok, true);
+    const sp = deps.spy.systemPrompt;
+    assert.match(sp, /INFORMAÇÕES DA ESCOLA[^"]*"""Cursos e aulas oferecidos \(lista oficial e atual\): Guitarra, Violino, Gaita\./, 'lista dentro do bloco, sem repetir "violino"');
+    assert.match(sp, /NÃO está na lista de cursos, não diga que tem nem que não tem/);
+  } finally {
+    await c.query(`UPDATE tenant_lead_config SET available_instruments = '{}' WHERE tenant_id = $1`, [T1]);
+  }
+});
+
+test('(21) sem cursos e sem contexto -> nenhum bloco de INFORMAÇÕES vazio', async () => {
+  await conv(); await setModo('auto', 'auto', 'Janis Joplin', null);
+  const deps = mkDeps(NOITE);
+  const out = await autoReply.maybeAutoReply({ id: T1 }, { channel: 'whatsapp', externalId: EXT, inboundText: 'oi, tudo bem?' }, deps);
+  assert.equal(out.ok, true);
+  assert.doesNotMatch(deps.spy.systemPrompt, /INFORMAÇÕES DA ESCOLA que você PODE usar/);
+});

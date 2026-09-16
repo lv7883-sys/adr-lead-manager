@@ -21,6 +21,7 @@ const horario = require('./horario');   // FONTE ÚNICA do horário de atendimen
 const { PREFIXO_REACAO } = require('./reacao');   // marcador canônico de reação ([reação])
 const logger = require('./logger');
 const tema = require('./temaProibido');   // assuntos que só a recepção responde
+const { normalizarCursos } = require('./templates');   // lista de cursos da unidade (mesma regra das sugestões)
 
 // A Janis só responde a uma mensagem com CONTEÚDO de verdade. Reação (emoji), figurinha, mídia sem
 // legenda ou "balão" só de emoji NÃO são um turno do cliente — são um aceno (ADR-031 / reacao.js).
@@ -304,22 +305,29 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
     try { history = await loadHist(tenantId, { conversationId: info.conv.id, ident, leadId: info.leadId || null }); }
     catch (e) { logger.warn('autoreply.history_failed', { tenant_id: tenantId, error: e.message }); }
 
-    const instrs = (info.cfg && Array.isArray(info.cfg.available_instruments) && info.cfg.available_instruments.length)
-      ? ` A escola oferece aulas de: ${info.cfg.available_instruments.join(', ')}.` : '';
+    // Cursos/aulas que a unidade oferece (lista da tela Configurações de Leads). Entra DENTRO das
+    // "INFORMAÇÕES DA ESCOLA": a regra de ouro abaixo só deixa afirmar o que está lá — com a lista
+    // fora do bloco, a assistente não podia confirmar "tem aula de violino?".
+    const cursos = normalizarCursos(info.cfg && info.cfg.available_instruments);
     // Base de conhecimento que a escola preencheu (endereço, como funcionam as aulas, eventos…).
     const contexto = (info.auto && info.auto.contexto_ia && String(info.auto.contexto_ia).trim()) || '';
 
     const blocoNome = contato
       ? `Você JÁ SABE, pelo WhatsApp, que está falando com ${contato} — trate pelo primeiro nome (${primeiroNome}) e NÃO pergunte o nome dela. Se a conversa for sobre aula, pergunte de forma natural PARA QUEM seria a aula: se é para ${primeiroNome} ou para outra pessoa (e, se for outra, o nome e a idade). `
       : `Se ainda não souber o nome e a conversa for sobre aula, pergunte para quem seria a aula (a própria pessoa ou outra) — sem soar burocrática. `;
-    const blocoContexto = contexto
-      ? `INFORMAÇÕES DA ESCOLA que você PODE usar para responder (ex.: endereço, como funcionam as aulas, eventos): """${contexto}""" `
+    const infoEscola = [
+      cursos.length ? `Cursos e aulas oferecidos (lista oficial e atual): ${cursos.join(', ')}.` : '',
+      contexto,
+    ].filter(Boolean).join('\n');
+    const blocoContexto = infoEscola
+      ? `INFORMAÇÕES DA ESCOLA que você PODE usar para responder (ex.: cursos oferecidos, endereço, como funcionam as aulas, eventos): """${infoEscola}""" ` +
+        (cursos.length ? `Se perguntarem por um curso ou aula que NÃO está na lista de cursos, não diga que tem nem que não tem: a recepção confirma. ` : '')
       : '';
     const proximaFrase = proxima || 'no próximo horário de atendimento';
     const retorno = proxima ? `quando a equipe abrir (${proxima})` : 'no próximo horário de atendimento';
     const regraHorario = `REGRA DE HORÁRIO (obrigatória): ao dizer quando a equipe retorna/abre, escreva EXATAMENTE «${proximaFrase}» — NÃO troque o dia da semana nem a hora, NÃO invente outro dia (ex.: não diga "segunda-feira" se a frase for "hoje às 9h"). `;
     const systemPrompt =
-      `Você é ${nomeIa}, a ASSISTENTE VIRTUAL do atendimento de ${escola} — você NÃO é nenhuma das recepcionistas. Escreva de forma calorosa e natural (nada robótico, nada genérico).${instrs} ` +
+      `Você é ${nomeIa}, a ASSISTENTE VIRTUAL do atendimento de ${escola} — você NÃO é nenhuma das recepcionistas. Escreva de forma calorosa e natural (nada robótico, nada genérico). ` +
       blocoNome + blocoContexto +
       `AGORA é FORA do horário de atendimento. LEIA o histórico da conversa e responda de forma PERSONALIZADA e curta (1 a 3 frases), em português do Brasil, reconhecendo o assunto. ` +
       `REGRA DE OURO (obrigatória): você SÓ pode afirmar fatos que estejam ESCRITOS EXPLICITAMENTE nas "INFORMAÇÕES DA ESCOLA" acima. É TERMINANTEMENTE PROIBIDO inventar, deduzir, supor ou completar qualquer informação. ` +

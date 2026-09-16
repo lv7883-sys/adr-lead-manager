@@ -19,7 +19,7 @@ const meta = require('../meta');              // E6: envio outbound via Messenge
 const onboardingMeta = require('../onboardingMeta');   // conexão Meta por token de System User
 const { decrypt } = require('../crypto');     // E4: token Evolution do tenant
 const gemini = require('../gemini');          // D: melhorar resposta com IA
-const { resolveSystemPrompt } = require('../templates');
+const { resolveSystemPrompt, normalizarCursos } = require('../templates');
 const { computeMetrics, computeFunil, computePainel, computeKanban, kanbanColuna, KANBAN_TRANSICOES, PERDIDO_DESFECHOS, KANBAN_PERIODS, KANBAN_DEFAULT_PERIOD, PERIODS, classificarEngajamento } = require('../metrics');   // G: dashboard de gestão
 // fatia (b): dias da janela DEFAULT do Kanban — o badge de sugestões conta no MESMO período (badge == cards à vista).
 const KANBAN_BADGE_DAYS = KANBAN_PERIODS[KANBAN_DEFAULT_PERIOD];
@@ -2309,19 +2309,29 @@ function _snapshotAutomacao(row) {
     proposta_sempre_manual: row.proposta_sempre_manual, agendamento_sempre_manual: row.agendamento_sempre_manual,
   };
 }
+// Campos da ASSISTENTE que a tela edita. Ficavam FORA do GET: a tela abria "Nome da IA" e "O que a
+// IA pode responder" sempre vazios e, ao salvar qualquer outra coisa, gravava o vazio por cima.
+function _assistenteAutomacao(row) {
+  return {
+    nome_ia: row.nome_ia || '', contexto_ia: row.contexto_ia || '',
+    ia_fora_leads: row.ia_fora_leads !== false, ia_fora_nao_leads: row.ia_fora_nao_leads !== false,
+  };
+}
 
 router.get('/:tenantId/automacao', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {
     const out = await withTenant(req.tenantId, async (c) => {
       const cfg = (await c.query('SELECT * FROM automacao_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
+      const lc = (await c.query('SELECT available_instruments FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
       const historico = (await c.query(
         `SELECT usuario, modo_anterior, modo_novo, motivo, criado_em
            FROM automacao_log WHERE tenant_id = $1 ORDER BY criado_em DESC LIMIT 10`, [req.tenantId])).rows;
-      return { cfg, historico };
+      return { cfg, lc, historico };
     });
+    const cursos = normalizarCursos(out.lc && out.lc.available_instruments);
     const config = out.cfg
-      ? { ..._snapshotAutomacao(out.cfg), updated_at: out.cfg.updated_at, updated_by: out.cfg.updated_by }
-      : { ...AUTOMACAO_DEFAULTS, updated_at: null, updated_by: null };
+      ? { ..._snapshotAutomacao(out.cfg), ..._assistenteAutomacao(out.cfg), cursos, updated_at: out.cfg.updated_at, updated_by: out.cfg.updated_by }
+      : { ...AUTOMACAO_DEFAULTS, ..._assistenteAutomacao({}), cursos, updated_at: null, updated_by: null };
     res.json({ tenant_id: req.tenantId, config, historico: out.historico });
   } catch (err) {
     logger.error('tenant.automacao.error', { tenant_id: req.tenantId, error: err.message });
@@ -2344,6 +2354,8 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
     ia_fora_leads: b.ia_fora_leads !== false,          // Janis responde LEADS fora do horário
     ia_fora_nao_leads: b.ia_fora_nao_leads !== false,  // Janis responde OUTRAS conversas fora do horário
   };
+  // Cursos e aulas oferecidos (tenant_lead_config.available_instruments) — só mexe se veio no corpo.
+  const cursos = Array.isArray(b.cursos) ? normalizarCursos(b.cursos) : null;
   for (const k of ['modo_comercial', 'modo_fora_horario', 'modo_fds']) {
     if (!MODOS.includes(novo[k])) return res.status(400).json({ error: `${k} inválido` });
   }
@@ -2356,6 +2368,9 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
     const out = await withTenant(req.tenantId, async (c) => {
       const atual = (await c.query('SELECT * FROM automacao_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
       const anterior = atual ? _snapshotAutomacao(atual) : { ...AUTOMACAO_DEFAULTS };
+      // Campo ausente no corpo = mantém o que está salvo (nunca apagar nome/contexto por omissão).
+      if (novo.nome_ia == null && atual) novo.nome_ia = atual.nome_ia;
+      if (novo.contexto_ia == null && atual) novo.contexto_ia = atual.contexto_ia;
       const r = await c.query(
         `INSERT INTO automacao_config
            (tenant_id, modo_comercial, modo_fora_horario, modo_fds,
@@ -2381,12 +2396,26 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
          novo.agendamento_sempre_manual, novo.nome_ia, novo.contexto_ia,
          novo.ia_fora_leads, novo.ia_fora_nao_leads, usuario]
       );
+      let cursosSalvos = null;
+      if (cursos) {
+        // "antes" da lista vai pro log, p/ o histórico mostrar o que mudou (e não registrar à toa)
+        anterior.cursos = normalizarCursos((await c.query('SELECT available_instruments FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0]?.available_instruments);
+        const u = await c.query(
+          `UPDATE tenant_lead_config SET available_instruments = $2, updated_at = now()
+            WHERE tenant_id = $1 RETURNING available_instruments`, [req.tenantId, cursos]);
+        cursosSalvos = u.rows[0] ? u.rows[0].available_instruments : (await c.query(
+          `INSERT INTO tenant_lead_config (tenant_id, school_name, available_instruments)
+           SELECT id, name, $2 FROM tenants WHERE id = $1
+           RETURNING available_instruments`, [req.tenantId, cursos])).rows[0]?.available_instruments || null;
+      } else {
+        cursosSalvos = (await c.query('SELECT available_instruments FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0]?.available_instruments || [];
+      }
       await c.query(
         `INSERT INTO automacao_log (tenant_id, usuario, modo_anterior, modo_novo, motivo)
          VALUES ($1,$2,$3::jsonb,$4::jsonb,$5)`,
-        [req.tenantId, usuario, JSON.stringify(anterior), JSON.stringify(novo), motivo || null]
+        [req.tenantId, usuario, JSON.stringify(anterior), JSON.stringify(cursos ? { ...novo, cursos } : novo), motivo || null]
       );
-      return { row: r.rows[0], anterior };
+      return { row: r.rows[0], anterior, cursos: normalizarCursos(cursosSalvos) };
     });
     logger.info('tenant.automacao.alterada', {
       tenant_id: req.tenantId, by: usuario, anterior: out.anterior, novo, motivo: motivo || null,
@@ -2399,7 +2428,7 @@ router.put('/:tenantId/automacao', authenticate, requireTenantAccess(WRITE_ROLES
       notificarRecepcao(req.tenantId, 'automacao_alterada', { byName, mudancas, motivo: motivo || null })
         .catch((e) => logger.warn('tenant.automacao.notif_error', { tenant_id: req.tenantId, error: e.message }));
     }
-    res.json({ ok: true, config: { ..._snapshotAutomacao(out.row), updated_at: out.row.updated_at, updated_by: out.row.updated_by }, anterior: out.anterior });
+    res.json({ ok: true, config: { ..._snapshotAutomacao(out.row), ..._assistenteAutomacao(out.row), cursos: out.cursos, updated_at: out.row.updated_at, updated_by: out.row.updated_by }, anterior: out.anterior });
   } catch (err) {
     logger.error('tenant.automacao.update_error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
