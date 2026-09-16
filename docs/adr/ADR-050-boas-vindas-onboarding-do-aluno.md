@@ -1,6 +1,6 @@
 # ADR-050 — Boas-vindas / Onboarding do cliente novo (régua pós-contratação)
 
-- **Status:** 🟢 **DECISÕES TRAVADAS** — rev. 6 (2026-09-16). **E17-01 a E17-04 implementadas** — LM na branch `feat/boas-vindas-e17-01`, dashboard na branch `feat/boas-vindas-e17-03` (nenhuma mergeada, sem deploy, nada aplicado em banco real). E17-02 validada por simulação com dados reais de Valinhos (§14) — **aguarda aprovação do dono para ativar**.
+- **Status:** 🟢 **DECISÕES TRAVADAS** — rev. 7 (2026-09-16). **E17-01 a E17-05 implementadas** — LM na branch `feat/boas-vindas-e17-01`, dashboard na branch `feat/boas-vindas-e17-03` (nenhuma mergeada, sem deploy, nada aplicado em banco real). E17-02 validada por simulação com dados reais de Valinhos (§14) — **aguarda aprovação do dono para ativar**.
 - **Fonte do conteúdo:** planilha `Plano de Boas-vindas.xlsx` (OneDrive Gerencial/Recepção) — aba 1 (7 toques) e aba 2 (Guia do Aluno).
 - **Relacionados:** ADR-049 (renovação — o **espelho** deste), ADR-047 (NPS Pulse — **fecha** esta régua), ADR-042 (Central de Mensagens), ADR-006 (MANUAL/SEMI/AUTO), ADR-037 (cadastro mestre), ADR-025 (recursos genéricos, fronteira anti-vazamento de nicho), migr. 119 (perfil da assistente por ramo).
 - **Restrições do dono:**
@@ -358,7 +358,7 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 | **E17-02** ✅ | Adaptador `academia-do-rock` (agenda + presença) + job diário em modo `avisa` + simulação com dados reais (§14) | — |
 | **E17-03** ✅ | Aba **Boas-vindas** na Caixa de Entrada: toque pronto na conversa, envio com um clique, com anexo (§15) | ✅ |
 | **E17-04** ✅ | Tela de configuração: textos, **arquivo por mensagem**, momento (âncora, quando, dias, repetições), criar/apagar/reordenar, prévia, aviso de tema, variáveis, alerta, modelo (§15, §16) | ✅ |
-| **E17-05** | Modo `auto`, `seed`, uma-por-família e alerta de cliente que não começou | ✅ |
+| **E17-05** ✅ | Modo `auto`, alerta de cliente que não começou, ativação gravada e cron (§17). Seed e uma-por-família já vieram na E17-01/02 | ✅ |
 
 ---
 
@@ -379,7 +379,7 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 
 ## 13. Coordenação e proteção do que já existe
 
-**Estado em 2026-09-16:** E17-01 a E17-04 commitadas **só nas branches** `feat/boas-vindas-e17-01` (LM) e `feat/boas-vindas-e17-03` (dashboard). Nada no `main`, nada aplicado em banco real, nenhum deploy.
+**Estado em 2026-09-16:** E17-01 a E17-05 commitadas **só nas branches** `feat/boas-vindas-e17-01` (LM) e `feat/boas-vindas-e17-03` (dashboard). Nada no `main`, nada aplicado em banco real, nenhum deploy.
 
 ### 13.1 Chats consultados
 
@@ -391,7 +391,7 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 
 ### 13.2 Reservas e numeração
 
-- **Migrations 120–125 do `adr-lead-manager`: usadas por este módulo; a 126 foi liberada.** Conferir o
+- **Migrations 120–126 do `adr-lead-manager`: usadas por este módulo** (a 126 veio na E17-05: alerta e ativação; o ADR-051 reserva 127–139). Conferir o
   `origin/main` imediatamente antes de criar os arquivos — o LM e o Scheduler usam **duas sequências
   independentes no mesmo banco**, e o Scheduler já precisou renumerar migrations por colisão
   (108→110, 111→112).
@@ -565,7 +565,7 @@ Testes: `test/boas-vindas-recepcao.itest.js` (11) — total de banco 34 + 50 uni
 
 ### 15.3 Ainda não feito
 
-- Modo `auto`, alerta "não começou" na recepção (E17-05).
+- (a E17-05 entregou o modo `auto` e o alerta — §17)
 - Itest Docker no host antes do merge; L1–L3 (§14.4).
 
 ---
@@ -607,3 +607,94 @@ da transação (`SET CONSTRAINTS ... DEFERRED`).
   no Postgres local. O runner Docker registra a unidade G.
 - Dashboard: `test/boas-vindas-telas.test.js` (7). Suíte: 591/594 — as 3 falhas são de
   certificado/Compasso e já existiam no `main`.
+
+---
+
+## 17. E17-05 — envio automático, alerta de quem não começou e ativação gravada
+
+### 17.1 Envio automático (`src/boasVindas/auto.js`)
+
+Roda na mesma rodada, **logo depois do planejamento** (então prazo R6, uma por família R7 e bloqueios
+estão recém-calculados) e **fora da transação** do planejamento. Só nas unidades em `auto`.
+
+| Trava | Como |
+|---|---|
+| Pausa geral | `BOAS_VINDAS_PAUSA=1` (variável do container; também para o cron inteiro) |
+| Por unidade | `boas_vindas_modo = 'auto'` — o padrão é `desligado`; voltar para `avisa` para o automático na hora |
+| Horário | só dentro do horário de atendimento da unidade (R5) no momento do envio |
+| Volume | teto diário por unidade (`BOAS_VINDAS_AUTO_CAP_DIA`, padrão 60) e 8–15 s entre envios |
+| O que sai | só `pendente`, devida, sem erro anterior. Bloqueada (falta dado/arquivo) fica para a recepção (§7) |
+| Falha | WhatsApp fora → para a unidade na rodada; a mensagem que falhou fica com o erro para a recepção e **não é repetida sozinha**. Erro de conteúdo (campo sem valor, arquivo sumido) idem |
+| Envio duplo | mesmo envio da recepção (`recepcao.enviar`): a linha é reservada antes de ir ao WhatsApp |
+
+Texto aprovado pela gestão não passa pela trava de tema da IA (§6.4). Em troca, a tela pede confirmação
+ao ligar o automático e lista as mensagens ligadas que falam de contrato ou valores. No modo `auto` a
+aba Boas-vindas mostra só o que precisa de gente (bloqueada ou com erro, marcada "Não saiu").
+
+### 17.2 Alerta de cliente que não começou (migr. 126, `boas_vindas_alerta`)
+
+- A rotina abre um alerta por contrato novo sem o 1º atendimento em `boas_vindas_alerta_dias` (7–30,
+  padrão 21) — só com presença integrada — e atualiza os dias e o próximo horário marcado.
+- Fecha sozinha (`resolvido`, `sistema`) quando o cliente começa (`comecou`), sai do período de
+  60 dias (`fora_da_janela`) ou o prazo da unidade sobe (`abaixo_do_prazo`, reabre se voltar a valer).
+- A recepção dispensa com observação ("Já falei com a família") → `dispensado`, não reabre.
+- Aparece no topo da aba Boas-vindas: "Ainda não começaram (N)", com Abrir conversa. Etapas presas ao 1º
+  atendimento simplesmente não acontecem enquanto ele não existe.
+
+### 17.3 Ativação gravada (`automacao_config.boas_vindas_ativado_em`)
+
+Gravada quando a unidade sai de `desligado` pela tela (ou na primeira rodada, se vazia; ou pelo `--ativar`).
+O que venceu **em dias anteriores ao da ativação** e ainda não estava na fila vira `fora_da_janela`
+(`anterior_a_ativacao`) **em toda rodada**; o que vence no próprio dia segue valendo (a matrícula da manhã
+não se perde porque a gestão ligou à tarde).
+*Correção:* o `--ativar` da E17-02 só valia na rodada em que rodava — na seguinte o atraso voltaria para a fila.
+
+### 17.4 Cron
+
+`src/server.js`: `20 7-21 * * *` (SP) — minuto 20, fora do `:00` das outras rotinas. Para cada unidade de
+`tenants_active()`: desligada → uma consulta e sai; ligada → planeja, grava, sincroniza alertas e, se
+`auto`, envia.
+
+### 17.5 Testes
+
+LM: 51 unitários + 49 de banco (novos: ativação persistente e primeira rodada, alerta abre/fecha/dispensa,
+automático com horário/pausa/teto/uma por família/falha, fila no modo auto, migration 126). Dashboard:
+`boas-vindas-telas.test.js` 11; suíte 595/598 (as 3 falhas de certificado/Compasso já existiam no `main`).
+
+---
+
+## 18. Publicação sem impacto nas outras aplicações e frentes
+
+**Pedido do dono (16/09):** a publicação não pode afetar nada das outras aplicações nem dos outros chats.
+
+### 18.1 O que muda para quem NÃO liga o módulo (todas as unidades, no dia da publicação)
+
+| Onde | Muda? | Por quê |
+|---|---|---|
+| Banco | só acréscimos | migrations 120–126 criam tabelas `boas_vindas_*` e colunas `boas_vindas_*` em `automacao_config` com padrão (`desligado`); nenhuma coluna existente é alterada. `db/grants/boas_vindas_agenda_read.sql` só **dá leitura** de 3 tabelas `app.*` ao usuário do LM |
+| Scheduler / Diapasão / Compasso / BI | não | nenhum arquivo nem schema deles é tocado; a agenda é só lida |
+| LM — rotas existentes | não | rotas novas em `/tenant/:id/boas-vindas/*`; `PUT /automacao`, inbox, renovação, `temaProibido.js` intocados |
+| LM — cron | uma consulta por unidade por hora (7h–21h) | unidade desligada sai na primeira consulta; nada é gravado nem enviado |
+| Dashboard — Caixa de Entrada | não (visualmente) | a aba Boas-vindas **só aparece** para unidade com o módulo ligado; a página faz 1 chamada a mais ao LM, em paralelo, com limite de 4 s e falha silenciosa |
+| Dashboard — menu | +1 item | "Configurações → Boas-vindas" para gerente/admin (é por onde se liga) |
+| WhatsApp | não | nada sai sem unidade em `avisa` (clique da recepção) ou `auto` |
+
+### 18.2 Ordem e janela
+
+1. **Fora do expediente e dos crons** (evitar 02h–06h30 e 8h–22h; decisão do dono no ADR-051).
+2. Banco: migrations 120–126 + grants (aditivas; `ADD COLUMN ... DEFAULT` constante não reescreve a tabela).
+3. LM (antes do dashboard; LM sem as migrations geraria erro de log no cron).
+4. Dashboard: **rebasear sobre o `origin/main` do momento e avisar o chat do Compasso/BI antes** (o deploy
+   publica o `origin/main` inteiro). Em 16/09 a branch funde sem conflito com o `main` (commits do Rock Hour).
+5. Conferir: unidades seguem sem a aba; cron loga só unidades ligadas; nada em `boas_vindas_toque`.
+
+### 18.3 Reversão
+
+- Parar tudo sem deploy: `BOAS_VINDAS_PAUSA=1` no LM (reinício do container) ou voltar a unidade para `desligado`.
+- Código: `git revert` dos merges no LM e no dashboard. As migrations ficam (aditivas, ninguém mais lê);
+  o ROLLBACK de cada uma está no cabeçalho do arquivo.
+
+### 18.4 Antes do merge (pendente)
+
+- Rodar `test/run-boas-vindas-itest.sh` (Docker, PG 16) no host — hoje validado no Postgres local.
+- Decisões L1–L3 (§14.4).
