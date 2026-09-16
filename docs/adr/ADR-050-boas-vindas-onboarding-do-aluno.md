@@ -1,6 +1,6 @@
 # ADR-050 — Boas-vindas / Onboarding do cliente novo (régua pós-contratação)
 
-- **Status:** 🟢 **DECISÕES TRAVADAS** — rev. 5 (2026-09-16). **E17-01, E17-02 e E17-03/04 implementadas** — LM na branch `feat/boas-vindas-e17-01`, dashboard na branch `feat/boas-vindas-e17-03` (nenhuma mergeada, sem deploy, nada aplicado em banco real). E17-02 validada por simulação com dados reais de Valinhos (§14) — **aguarda aprovação do dono para ativar**.
+- **Status:** 🟢 **DECISÕES TRAVADAS** — rev. 6 (2026-09-16). **E17-01 a E17-04 implementadas** — LM na branch `feat/boas-vindas-e17-01`, dashboard na branch `feat/boas-vindas-e17-03` (nenhuma mergeada, sem deploy, nada aplicado em banco real). E17-02 validada por simulação com dados reais de Valinhos (§14) — **aguarda aprovação do dono para ativar**.
 - **Fonte do conteúdo:** planilha `Plano de Boas-vindas.xlsx` (OneDrive Gerencial/Recepção) — aba 1 (7 toques) e aba 2 (Guia do Aluno).
 - **Relacionados:** ADR-049 (renovação — o **espelho** deste), ADR-047 (NPS Pulse — **fecha** esta régua), ADR-042 (Central de Mensagens), ADR-006 (MANUAL/SEMI/AUTO), ADR-037 (cadastro mestre), ADR-025 (recursos genéricos, fronteira anti-vazamento de nicho), migr. 119 (perfil da assistente por ramo).
 - **Restrições do dono:**
@@ -217,6 +217,8 @@ interpolação. Portanto:
 - A tela de configuração roda `detectarSaida()` sobre o **template** e mostra um aviso ("este texto
   fala de reposição e contrato — confira antes de ligar o automático"), **sem bloquear**. O texto da
   própria matriz dispara esse aviso na etapa 2, e está certo que dispare.
+  *(E17-04)* O aviso cobre **contrato e valores**; "agenda" ficou de fora porque todo lembrete fala de
+  dia e horário por natureza ("amanhã") e o aviso tocaria em toda régua.
 - Resultado: zero risco de regressão no `autoReply`, que usa o mesmo módulo.
 
 ---
@@ -355,7 +357,7 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 | **E17-01** ✅ | Migrations 120–125 + grants de agenda + `src/boasVindasRegua.js` (cálculo de datas e travas R1–R10) com testes — branch `feat/boas-vindas-e17-01` | — |
 | **E17-02** ✅ | Adaptador `academia-do-rock` (agenda + presença) + job diário em modo `avisa` + simulação com dados reais (§14) | — |
 | **E17-03** ✅ | Aba **Boas-vindas** na Caixa de Entrada: toque pronto na conversa, envio com um clique, com anexo (§15) | ✅ |
-| **E17-04** ✅ (parte) | Tela de configuração: textos, **arquivo por mensagem**, dias, variáveis, alerta, escolha do modelo (§15). Falta: criar/apagar/reordenar etapas | ✅ |
+| **E17-04** ✅ | Tela de configuração: textos, **arquivo por mensagem**, momento (âncora, quando, dias, repetições), criar/apagar/reordenar, prévia, aviso de tema, variáveis, alerta, modelo (§15, §16) | ✅ |
 | **E17-05** | Modo `auto`, `seed`, uma-por-família e alerta de cliente que não começou | ✅ |
 
 ---
@@ -377,7 +379,7 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 
 ## 13. Coordenação e proteção do que já existe
 
-**Estado em 2026-09-16:** E17-01 a E17-03/04 commitadas **só nas branches** `feat/boas-vindas-e17-01` (LM) e `feat/boas-vindas-e17-03` (dashboard). Nada no `main`, nada aplicado em banco real, nenhum deploy.
+**Estado em 2026-09-16:** E17-01 a E17-04 commitadas **só nas branches** `feat/boas-vindas-e17-01` (LM) e `feat/boas-vindas-e17-03` (dashboard). Nada no `main`, nada aplicado em banco real, nenhum deploy.
 
 ### 13.1 Chats consultados
 
@@ -563,6 +565,45 @@ Testes: `test/boas-vindas-recepcao.itest.js` (11) — total de banco 34 + 50 uni
 
 ### 15.3 Ainda não feito
 
-- Criar, apagar e reordenar etapas pela tela (hoje: editar as que vieram do modelo).
 - Modo `auto`, alerta "não começou" na recepção (E17-05).
 - Itest Docker no host antes do merge; L1–L3 (§14.4).
+
+---
+
+## 16. E17-04 — a unidade monta a própria régua
+
+### 16.1 Regras de edição (Lead Manager, `src/boasVindas/configuracao.js`)
+
+| Ação | Regra |
+|---|---|
+| Mudar o momento (`PUT etapas/:id` com `ancora`, `quando`, `repeticoes`) | A etapa precisa ser válida sozinha (os mesmos CHECKs do banco). Repetição só em atendimento agendado; nas outras âncoras volta a 1. As mensagens dessa etapa **ainda não tratadas** (pendente, bloqueado, fora da janela) saem da fila e a rotina recria no momento novo. Enviada, aprovada, com erro ou descartada nunca é tocada |
+| Desligar | Igual: o que não foi tratado sai da fila |
+| Criar (`POST etapas`) | Entra no fim. Máximo de **10 mensagens contando as desligadas** (a posição vai de 1 a 10 no banco). Com o módulo ligado, se quebraria a régua, **nasce desligada** com os motivos — nunca se perde o que foi escrito |
+| Apagar (`DELETE etapas/:id`) | Só mensagem **sem histórico**; a que já foi enviada/tratada se desliga. As posições das outras são renumeradas |
+| Reordenar (`PUT etapas-ordem`) | Lista completa na nova ordem. A ordem desempata quem sai primeiro no mesmo dia (R7) |
+| Mensagem de outro módulo (pesquisa do Diapasão) | Só nome e ligar/desligar |
+| Módulo **desligado** | Toda mudança válida grava e devolve os avisos da régua (serve para montar com calma). A régua só liga quando estiver inteira válida (`salvarConfig`) |
+| Módulo **ligado** | Mudança que cria erro de régua **novo** é recusada; erro que já existia não impede editar outra mensagem |
+
+Criar, apagar e reordenar usam `pg_advisory_xact_lock` por unidade; a posição única é conferida no fim
+da transação (`SET CONSTRAINTS ... DEFERRED`).
+
+### 16.2 Tela (dashboard)
+
+- Em cada mensagem: **a partir de** / **quando** / **dias** / **repetições**, com a frase do momento
+  ("2 dias depois da matrícula, dentro do horário de atendimento") atualizada ao vivo; opções que a régua
+  não aceita ficam desabilitadas, e âncora sem fonte aparece como "(sem agenda integrada)".
+- **Vocabulário por ramo:** modelo de escola fala de matrícula/aula; qualquer outro, de início do
+  contrato/atendimento. Nada muda no motor.
+- **Prévia** estilo WhatsApp com dados de exemplo (versões aluno e responsável), negrito/itálico, campo
+  inexistente em vermelho e a regra do arquivo (legenda, áudio antes, texto longo em duas mensagens).
+- Subir/descer salva na hora e desfaz se o servidor recusar; apagar fica desabilitado para mensagem com
+  histórico; "Nova mensagem" recarrega e mostra no topo do cartão se ela nasceu desligada e por quê.
+- Verificado clicando num simulador local (view e regras reais, banco em memória) e no celular (390 px).
+
+### 16.3 Testes
+
+- LM: `test/boas-vindas-configuracao.itest.js` (8, unidade G). Total: 50 unitários + 42 de banco, verdes
+  no Postgres local. O runner Docker registra a unidade G.
+- Dashboard: `test/boas-vindas-telas.test.js` (7). Suíte: 591/594 — as 3 falhas são de
+  certificado/Compasso e já existiam no `main`.
