@@ -15,6 +15,7 @@ TENANT_C="cccccccc-cccc-4ccc-8ccc-cccccccccccc"   # itest da rotina (com agenda)
 TENANT_D="dddddddd-dddd-4ddd-8ddd-dddddddddddd"   # itest da rotina (sem agenda)
 TENANT_E="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"   # itest da recepção/configuração
 TENANT_F="ffffffff-ffff-4fff-8fff-ffffffffffff"   # itest da recepção (isolamento)
+TENANT_G="abababab-abab-4bab-8bab-abababababab"   # itest da configuração da régua (E17-04)
 VALINHOS="ed731a58-62e5-45ad-acba-a5502ff39e92"   # 060 semeia papéis de Valinhos
 
 cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; }
@@ -45,7 +46,7 @@ CREATE SCHEMA lead_manager;
 ALTER ROLE lead_manager_user SET search_path = lead_manager, public;
 CREATE TABLE lead_manager.tenants (id uuid PRIMARY KEY, name text, horario_comercial jsonb);
 INSERT INTO lead_manager.tenants (id, name) VALUES
-  ('${TENANT_A}','A'), ('${TENANT_B}','B'), ('${TENANT_C}','C'), ('${TENANT_D}','D'), ('${TENANT_E}','E'), ('${TENANT_F}','F'), ('${VALINHOS}','Valinhos');
+  ('${TENANT_A}','A'), ('${TENANT_B}','B'), ('${TENANT_C}','C'), ('${TENANT_D}','D'), ('${TENANT_E}','E'), ('${TENANT_F}','F'), ('${TENANT_G}','G'), ('${VALINHOS}','Valinhos');
 GRANT USAGE ON SCHEMA lead_manager TO lead_manager_user;
 GRANT SELECT ON lead_manager.tenants TO lead_manager_user;
 SQL
@@ -111,6 +112,6 @@ cd "$ROOT"
 DATABASE_URL="postgres://lead_manager_user:itest@127.0.0.1:${PORT}/lm_itest" \
 ADMIN_DATABASE_URL="postgres://postgres:itest@127.0.0.1:${PORT}/lm_itest" \
 RESOURCES_TENANT_A="$TENANT_A" RESOURCES_TENANT_B="$TENANT_B" BV_TENANT_C="$TENANT_C" BV_TENANT_D="$TENANT_D" \
-BV_TENANT_E="$TENANT_E" BV_TENANT_F="$TENANT_F" BV_ITEST_APP=1 \
+BV_TENANT_E="$TENANT_E" BV_TENANT_F="$TENANT_F" BV_TENANT_G="$TENANT_G" BV_ITEST_APP=1 \
 JWT_SECRET="itest-secret" REDIS_URL="redis://127.0.0.1:6399" \
-node --test --test-concurrency=1 test/boas-vindas-migrations.itest.js test/boas-vindas-sweep.itest.js test/boas-vindas-recepcao.itest.js
+node --test --test-concurrency=1 test/boas-vindas-migrations.itest.js test/boas-vindas-sweep.itest.js test/boas-vindas-recepcao.itest.js test/boas-vindas-configuracao.itest.js

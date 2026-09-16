@@ -12,7 +12,10 @@
 //     GET  /tenant/:tenantId/boas-vindas/config
 //     PUT  /tenant/:tenantId/boas-vindas/config                     { modo, alerta_dias, variaveis }
 //     POST /tenant/:tenantId/boas-vindas/copiar-modelo              { slug, por? }
-//     PUT  /tenant/:tenantId/boas-vindas/etapas/:etapaId            { nome, texto_titular, texto_responsavel, ativo, contrato_curto, quando_dias, por? }
+//     POST /tenant/:tenantId/boas-vindas/etapas                     { nome, ancora, quando, repeticoes, texto_titular, texto_responsavel, contrato_curto, por? }
+//     PUT  /tenant/:tenantId/boas-vindas/etapas-ordem               { ids: [...] }   (lista completa, na nova ordem)
+//     PUT  /tenant/:tenantId/boas-vindas/etapas/:etapaId            { nome, texto_titular, texto_responsavel, ativo, contrato_curto, ancora, quando, repeticoes, por? }
+//     DELETE /tenant/:tenantId/boas-vindas/etapas/:etapaId          só mensagem sem histórico
 //     POST /tenant/:tenantId/boas-vindas/etapas/:etapaId/anexo      multipart: file (+ por)
 //     DELETE /tenant/:tenantId/boas-vindas/etapas/:etapaId/anexo
 //
@@ -107,6 +110,24 @@ router.post('/:tenantId/boas-vindas/copiar-modelo', authenticate, requireTenantA
     if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) return res.status(400).json({ error: 'invalid_slug' });
     res.json(await configuracao.copiarModelo(req.tenantId, slug, _por(req)));
   } catch (err) { _falha(res, err, 'boas_vindas.copiar_modelo.error', req.tenantId); }
+});
+
+router.post('/:tenantId/boas-vindas/etapas', authenticate, requireTenantAccess(ADMIN_ROLES), async (req, res) => {
+  try { res.json(await configuracao.criarEtapa(req.tenantId, req.body || {}, _por(req))); }
+  catch (err) { _falha(res, err, 'boas_vindas.etapa_criar.error', req.tenantId); }
+});
+
+router.put('/:tenantId/boas-vindas/etapas-ordem', authenticate, requireTenantAccess(ADMIN_ROLES), async (req, res) => {
+  try {
+    const ids = (req.body && req.body.ids) || [];
+    if (!Array.isArray(ids) || !ids.every(isUuid)) return res.status(400).json({ error: 'invalid_ids' });
+    res.json(await configuracao.reordenarEtapas(req.tenantId, ids));
+  } catch (err) { _falha(res, err, 'boas_vindas.etapa_ordem.error', req.tenantId); }
+});
+
+router.delete('/:tenantId/boas-vindas/etapas/:etapaId', authenticate, requireTenantAccess(ADMIN_ROLES), _uuid('etapaId'), async (req, res) => {
+  try { res.json(await configuracao.apagarEtapa(req.tenantId, req.params.etapaId, _por(req))); }
+  catch (err) { _falha(res, err, 'boas_vindas.etapa_apagar.error', req.tenantId); }
 });
 
 router.put('/:tenantId/boas-vindas/etapas/:etapaId', authenticate, requireTenantAccess(ADMIN_ROLES), _uuid('etapaId'), async (req, res) => {
