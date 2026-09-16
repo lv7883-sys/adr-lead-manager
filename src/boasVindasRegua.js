@@ -171,6 +171,7 @@ function variaveisUsadas(texto) {
 // Limpa o espaço que sobra no fim da linha.
 function interpolar(texto, valores = {}) {
   return String(texto || '')
+    .replace(/\r\n?/g, '\n')   // fim de linha do Windows nunca vai para o WhatsApp
     .replace(VAR_RE, (_, k) => {
       const v = valores[k];
       return v == null ? '' : String(v).trim();

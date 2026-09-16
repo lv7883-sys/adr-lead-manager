@@ -274,6 +274,7 @@ test('textos: interpolação da versão do responsável, com dia e horário da a
 
 test('textos: variável sem valor some, nunca vaza {chave} para o cliente', () => {
   assert.equal(R.interpolar('Oi, {cliente}!\nProfessor: {profissional}\nFim', { cliente: 'Ana' }), 'Oi, Ana!\nProfessor:\nFim');
+  assert.equal(R.interpolar('linha 1\r\nlinha 2\rlinha 3'), 'linha 1\nlinha 2\nlinha 3', 'fim de linha do Windows não vai para o WhatsApp');
 });
 
 test('R8: mensagem com dia, horário ou profissional não sai sem o dado', () => {

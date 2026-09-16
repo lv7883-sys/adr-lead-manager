@@ -96,6 +96,9 @@ app.use('/tenant', tenantLimiter, require('./routes/resources'));
 // ADR-042 — Central de Mensagens ("Regente"): inbox omnichannel. Mesmo namespace/escopo.
 app.use('/tenant', tenantLimiter, require('./routes/inbox'));
 
+// ADR-050 — Boas-vindas: fila da recepção (aba da Caixa de Entrada) e configuração da unidade.
+app.use('/tenant', tenantLimiter, require('./routes/boas-vindas'));
+
 // ADR-016 — arquivos de mídia recebidos (autenticado por tenant).
 app.use('/media', require('./routes/media'));
 

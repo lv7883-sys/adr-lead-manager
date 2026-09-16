@@ -146,4 +146,12 @@ Poderiam nos contar como está sendo essa experiência por esse link abaixo?
 NULL, NULL, 'externo')
 ON CONFLICT (modelo_slug, ordem) DO NOTHING;
 
+-- Fim de linha: um checkout no Windows (core.autocrlf) grava CRLF dentro dos textos acima; o WhatsApp deve
+-- receber só LF. chr(13) = CR. Idempotente.
+UPDATE lead_manager.boas_vindas_modelo_etapa
+   SET texto_titular = replace(texto_titular, chr(13), ''),
+       texto_responsavel = replace(texto_responsavel, chr(13), '')
+ WHERE modelo_slug = 'escola-de-musica-academia-do-rock'
+   AND (strpos(texto_titular, chr(13)) > 0 OR strpos(coalesce(texto_responsavel, ''), chr(13)) > 0);
+
 COMMIT;

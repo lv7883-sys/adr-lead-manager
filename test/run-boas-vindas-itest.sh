@@ -13,6 +13,8 @@ TENANT_A="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"   # itest das migrations
 TENANT_B="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 TENANT_C="cccccccc-cccc-4ccc-8ccc-cccccccccccc"   # itest da rotina (com agenda)
 TENANT_D="dddddddd-dddd-4ddd-8ddd-dddddddddddd"   # itest da rotina (sem agenda)
+TENANT_E="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"   # itest da recepção/configuração
+TENANT_F="ffffffff-ffff-4fff-8fff-ffffffffffff"   # itest da recepção (isolamento)
 VALINHOS="ed731a58-62e5-45ad-acba-a5502ff39e92"   # 060 semeia papéis de Valinhos
 
 cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; }
@@ -43,7 +45,7 @@ CREATE SCHEMA lead_manager;
 ALTER ROLE lead_manager_user SET search_path = lead_manager, public;
 CREATE TABLE lead_manager.tenants (id uuid PRIMARY KEY, name text, horario_comercial jsonb);
 INSERT INTO lead_manager.tenants (id, name) VALUES
-  ('${TENANT_A}','A'), ('${TENANT_B}','B'), ('${TENANT_C}','C'), ('${TENANT_D}','D'), ('${VALINHOS}','Valinhos');
+  ('${TENANT_A}','A'), ('${TENANT_B}','B'), ('${TENANT_C}','C'), ('${TENANT_D}','D'), ('${TENANT_E}','E'), ('${TENANT_F}','F'), ('${VALINHOS}','Valinhos');
 GRANT USAGE ON SCHEMA lead_manager TO lead_manager_user;
 GRANT SELECT ON lead_manager.tenants TO lead_manager_user;
 SQL
@@ -69,6 +71,16 @@ CREATE OR REPLACE FUNCTION lead_manager.br_phone_key(x text) RETURNS text LANGUA
   SELECT CASE WHEN length(v)=11 AND substr(v,3,1)='9' THEN left(v,2)||substr(v,4) ELSE v END FROM loc
 \$fn\$;
 GRANT SELECT, INSERT, UPDATE, DELETE ON lead_manager.automacao_config, lead_manager.tenant_lead_config, lead_manager.internal_contacts TO lead_manager_user;
+-- Conversas: só o shape que a fila da recepção lê (br_key gerada, como na migr. 112).
+CREATE TABLE lead_manager.conversations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL,
+  channel text NOT NULL DEFAULT 'whatsapp', external_id text NOT NULL, conversation_kind text DEFAULT 'DIRECT',
+  last_activity_at timestamptz, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now(),
+  br_key text GENERATED ALWAYS AS (lead_manager.br_phone_key(external_id)) STORED, UNIQUE (tenant_id, channel, external_id));
+ALTER TABLE lead_manager.conversations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON lead_manager.conversations
+  USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
+GRANT SELECT, INSERT, UPDATE ON lead_manager.conversations TO lead_manager_user;
 SQL
 
 echo "[itest] grants SEM schema app (deve só avisar)…"
@@ -98,6 +110,7 @@ echo "[itest] rodando node --test…"
 cd "$ROOT"
 DATABASE_URL="postgres://lead_manager_user:itest@127.0.0.1:${PORT}/lm_itest" \
 ADMIN_DATABASE_URL="postgres://postgres:itest@127.0.0.1:${PORT}/lm_itest" \
-RESOURCES_TENANT_A="$TENANT_A" RESOURCES_TENANT_B="$TENANT_B" BV_TENANT_C="$TENANT_C" BV_TENANT_D="$TENANT_D" BV_ITEST_APP=1 \
+RESOURCES_TENANT_A="$TENANT_A" RESOURCES_TENANT_B="$TENANT_B" BV_TENANT_C="$TENANT_C" BV_TENANT_D="$TENANT_D" \
+BV_TENANT_E="$TENANT_E" BV_TENANT_F="$TENANT_F" BV_ITEST_APP=1 \
 JWT_SECRET="itest-secret" REDIS_URL="redis://127.0.0.1:6399" \
-node --test --test-concurrency=1 test/boas-vindas-migrations.itest.js test/boas-vindas-sweep.itest.js
+node --test --test-concurrency=1 test/boas-vindas-migrations.itest.js test/boas-vindas-sweep.itest.js test/boas-vindas-recepcao.itest.js
