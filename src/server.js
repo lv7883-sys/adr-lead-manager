@@ -173,6 +173,25 @@ if (require.main === module) {
     { timezone: 'America/Sao_Paulo' }
   );
 
+  // ADR-050 (E17-05): boas-vindas do cliente novo — de hora em hora das 7h às 21h (minuto 20, fora do :00
+  // das outras rotinas). Planeja a régua e os alertas SÓ das unidades que ligaram o módulo (padrão:
+  // desligado → a rodada não faz nada) e envia sozinho SÓ nas que escolheram "auto", dentro do horário
+  // de atendimento. Pausa geral sem deploy: BOAS_VINDAS_PAUSA=1.
+  const { runBoasVindasSweep } = require('./jobs/boas-vindas-sweep');
+  cron.schedule(
+    '20 7-21 * * *',
+    () => {
+      if (process.env.BOAS_VINDAS_PAUSA === '1') return;
+      runBoasVindasSweep()
+        .then((r) => {
+          const ativos = r.filter((x) => !x.pulado && !x.erro);
+          if (ativos.length || r.some((x) => x.erro)) logger.info('cron.boas_vindas.done', { unidades: ativos.length, erros: r.filter((x) => x.erro).length });
+        })
+        .catch((e) => logger.error('cron.boas_vindas.error', { error: e.message }));
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+
   // Resiliência a 503 — reprocessa o buffer "aguardando classificação" a cada 2 min.
   // Gatilho por TEMPO (o por EVENTO está no ingest). Reclassifica pela conversa inteira
   // e, esgotada a janela de 15min, manda pra Revisar com alerta ativo.

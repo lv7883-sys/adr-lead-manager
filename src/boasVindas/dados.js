@@ -69,6 +69,7 @@ SELECT a.*,
 const SQL_CONFIG = `
 SELECT t.name AS tenant_nome, t.horario_comercial,
        ac.boas_vindas_modo, ac.boas_vindas_alerta_dias, ac.boas_vindas_variaveis, ac.boas_vindas_modelo,
+       ac.boas_vindas_ativado_em,
        lc.school_name
   FROM lead_manager.tenants t
   LEFT JOIN lead_manager.automacao_config ac ON ac.tenant_id = t.id
@@ -130,6 +131,7 @@ function configDaLinha(row) {
     alertaDias: r.boas_vindas_alerta_dias || 21,
     variaveis: _jsonb(r.boas_vindas_variaveis, {}) || {},
     modelo: r.boas_vindas_modelo || null,
+    ativadoEm: r.boas_vindas_ativado_em ? new Date(r.boas_vindas_ativado_em).getTime() : null,
     empresa: r.school_name || r.tenant_nome || null,
   };
 }
@@ -180,9 +182,57 @@ async function gravarToque(c, tenantId, t) {
   return rows[0].criado ? 'criado' : 'atualizado';
 }
 
+// ── Alerta de cliente que não começou (E17-05) ───────────────────────────────────────────────────
+// Abre ou atualiza. Fechado pelo sistema (ex.: o prazo da unidade subiu) reabre; DISPENSADO pela recepção
+// só tem os números atualizados e continua dispensado.
+const SQL_UPSERT_ALERTA = `
+INSERT INTO lead_manager.boas_vindas_alerta
+  (tenant_id, account_id, tipo, ini_vigencia, dias, phone, destinatario_nome, cliente_nome, proximo_atendimento)
+VALUES ($1, $2, 'sem_primeiro_atendimento', $3::date, $4, $5, $6, $7, $8)
+ON CONFLICT (tenant_id, account_id, tipo) DO UPDATE SET
+  dias = EXCLUDED.dias, phone = EXCLUDED.phone, destinatario_nome = EXCLUDED.destinatario_nome,
+  cliente_nome = EXCLUDED.cliente_nome, proximo_atendimento = EXCLUDED.proximo_atendimento,
+  status = CASE WHEN boas_vindas_alerta.status = 'resolvido' AND boas_vindas_alerta.resolvido_por = 'sistema'
+                THEN 'aberto' ELSE boas_vindas_alerta.status END,
+  resolvido_em = CASE WHEN boas_vindas_alerta.status = 'resolvido' AND boas_vindas_alerta.resolvido_por = 'sistema'
+                THEN NULL ELSE boas_vindas_alerta.resolvido_em END,
+  resolvido_por = CASE WHEN boas_vindas_alerta.status = 'resolvido' AND boas_vindas_alerta.resolvido_por = 'sistema'
+                THEN NULL ELSE boas_vindas_alerta.resolvido_por END,
+  observacao = CASE WHEN boas_vindas_alerta.status = 'resolvido' AND boas_vindas_alerta.resolvido_por = 'sistema'
+                THEN NULL ELSE boas_vindas_alerta.observacao END,
+  atualizado_em = now()
+RETURNING id, (xmax = 0) AS criado`;
+
+// Fecha os abertos que não precisam mais de alerta. motivo: 'comecou' | 'fora_da_janela' | 'abaixo_do_prazo'.
+const SQL_FECHAR_ALERTA = `
+UPDATE lead_manager.boas_vindas_alerta
+   SET status = 'resolvido', resolvido_em = now(), resolvido_por = 'sistema', observacao = $3, atualizado_em = now()
+ WHERE tenant_id = $1 AND account_id = $2 AND tipo = 'sem_primeiro_atendimento' AND status = 'aberto'
+RETURNING id`;
+
+const SQL_ALERTAS_ABERTOS = `
+SELECT account_id FROM lead_manager.boas_vindas_alerta
+ WHERE tenant_id = $1 AND tipo = 'sem_primeiro_atendimento' AND status = 'aberto'`;
+
+async function gravarAlerta(c, tenantId, a) {
+  const { rows } = await c.query(SQL_UPSERT_ALERTA, [
+    tenantId, a.accountId, a.iniVigencia, a.dias, a.phone || null, a.destinatarioNome || null, a.clienteNome || null,
+    a.proximoAtendimento ? new Date(a.proximoAtendimento).toISOString() : null,
+  ]);
+  return rows[0].criado ? 'criado' : 'atualizado';
+}
+async function fecharAlerta(c, tenantId, accountId, motivo) {
+  return (await c.query(SQL_FECHAR_ALERTA, [tenantId, accountId, motivo])).rows.length > 0;
+}
+async function carregarAlertasAbertos(c, tenantId) {
+  return (await c.query(SQL_ALERTAS_ABERTOS, [tenantId])).rows.map((r) => r.account_id);
+}
+
 module.exports = {
   MODELO_PADRAO, RENOVACAO_PRIMEIRO_MARCO_DIAS,
   SQL_CONTRATOS, SQL_CONFIG, SQL_ETAPAS, SQL_MODELO, SQL_TOQUES, SQL_UPSERT_TOQUE,
+  SQL_UPSERT_ALERTA, SQL_FECHAR_ALERTA, SQL_ALERTAS_ABERTOS,
   configDaLinha, etapaDaLinha, contratoDaLinha,
   carregarConfig, carregarEtapas, carregarModelo, carregarContratos, carregarToques, gravarToque,
+  gravarAlerta, fecharAlerta, carregarAlertasAbertos,
 };

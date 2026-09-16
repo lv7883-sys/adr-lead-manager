@@ -12,6 +12,7 @@ const { RENOVACAO_PRIMEIRO_MARCO_DIAS } = require('./dados');
 
 // Estados que a recepção (ou o envio) já tratou: o planejamento nunca mais mexe neles.
 const FINAIS = new Set(['aprovado', 'enviado', 'descartado', 'erro']);
+const NA_FILA = new Set(['pendente', 'bloqueado']);
 
 // "MARIA DA SILVA" → "Maria"; "Pedro Henrique" → "Pedro".
 function nomeCurto(nome) {
@@ -173,8 +174,12 @@ function _acao(t, existente) {
 //   contratos       saída de dados.carregarContratos
 //   fatosPorConta   Map accountId → { atendimentos, primeiroAtendimento }
 //   existentes      linhas de boas_vindas_toque desses contratos
-//   ativacao        true só no PRIMEIRO dia da unidade: tudo que já está devido vira fora_da_janela
-//                   (motivo anterior_a_ativacao) — a família não recebe de uma vez o atraso acumulado (R6)
+//   ativacao        true = trata AGORA como o instante da ativação (simulação --dry --ativar)
+//   config.ativadoEm instante (ms) em que a unidade saiu de 'desligado' (E17-05). O que venceu em DIAS ANTERIORES
+//                   ao da ativação e ainda não estava na fila vira fora_da_janela (motivo anterior_a_ativacao)
+//                   em TODA rodada — a família não recebe de uma vez o atraso acumulado (R6). O que vence no
+//                   próprio dia da ativação segue valendo: a matrícula da manhã não se perde porque a gestão
+//                   ligou à tarde.
 function planejarUnidade({ contratos, etapas, fatosPorConta = new Map(), fonteAgenda = false, config, agora, feriados = [], existentes = [], ativacao = false } = {}) {
   const planos = contratos.map((ct) => planejarContrato({
     contrato: ct, etapas, fatos: fatosPorConta.get(ct.accountId) || {}, fonteAgenda, config, agora, feriados,
@@ -188,11 +193,16 @@ function planejarUnidade({ contratos, etapas, fatosPorConta = new Map(), fonteAg
       if (ex && FINAIS.has(ex.status)) { t.status = ex.status; t.momento = null; t.bloqueado_pela_recepcao = true; }
     }
   }
-  if (ativacao) {
+  const agoraMs = typeof agora === 'number' ? agora : Date.parse(agora);
+  const ativadoEm = ativacao ? agoraMs : (config && Number.isFinite(config.ativadoEm) ? config.ativadoEm : null);
+  const corte = ativadoEm == null ? null : R.inicioDoDiaSP(R.dataSP(ativadoEm));
+  if (corte != null) {
     for (const p of planos) for (const t of p.toques) {
-      if (!t.bloqueado_pela_recepcao && (t.status === 'pendente' || t.status === 'bloqueado') && t.momento === 'devida') {
-        t.status = 'fora_da_janela'; t.bloqueio = null; t.motivo = 'anterior_a_ativacao';
-      }
+      if (t.bloqueado_pela_recepcao || !(t.status === 'pendente' || t.status === 'bloqueado') || t.momento !== 'devida') continue;
+      if (!(t.dueAt < corte)) continue;
+      const ex = existentesPorChave.get(t.chave);
+      if (!ativacao && ex && NA_FILA.has(ex.status)) continue;   // já estava na fila antes: segue valendo
+      t.status = 'fora_da_janela'; t.bloqueio = null; t.motivo = 'anterior_a_ativacao';
     }
   }
   const r7 = _umaPorFamilia(planos, existentes, { config, agora, feriados });

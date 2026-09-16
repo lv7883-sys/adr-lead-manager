@@ -87,10 +87,10 @@ SQL
 echo "[itest] grants SEM schema app (deve só avisar)…"
 psql_db < "$ROOT/db/grants/boas_vindas_agenda_read.sql"
 
-echo "[itest] migrations 120–125, duas vezes (idempotência)…"
+echo "[itest] migrations 120–126, duas vezes (idempotência)…"
 for rodada in 1 2; do
   for m in 120_boas_vindas_config 121_boas_vindas_modelo 122_boas_vindas_anexo 123_boas_vindas_etapa \
-           124_boas_vindas_toque 125_boas_vindas_modelo_escola_musica; do
+           124_boas_vindas_toque 125_boas_vindas_modelo_escola_musica 126_boas_vindas_alerta_e_ativacao; do
     psql_db < "$ROOT/db/migrations/${m}.sql" >/dev/null
   done
 done

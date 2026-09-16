@@ -43,7 +43,7 @@ test('sem régua: a tela mostra os modelos e não deixa ligar', async () => {
   const cfg = await configuracao.obter(E);
   assert.equal(cfg.etapas.length, 0);
   assert.ok(cfg.modelos.some((m) => m.slug === MODELO && m.etapas === 7));
-  assert.deepEqual(cfg.modos, ['desligado', 'avisa']);
+  assert.deepEqual(cfg.modos, ['desligado', 'avisa', 'auto']);
   await assert.rejects(configuracao.salvarConfig(E, { modo: 'avisa' }), codigo('config_invalida', 'modelo'));
 });
 
@@ -55,13 +55,18 @@ test('copiar o modelo cria a régua; copiar de novo não sobrescreve', async () 
   assert.equal(cfg.etapas.length, 7);
 });
 
-test('ligar em "avisa" exige a variável {link_ead}; "auto" ainda não existe; resto da automação intacto', async () => {
+test('ligar em "avisa" exige a variável {link_ead}; modo desconhecido é recusado; resto da automação intacto; grava o instante da ativação', async () => {
   await assert.rejects(configuracao.salvarConfig(E, { modo: 'avisa' }), codigo('config_invalida', '{link_ead}'));
-  await assert.rejects(configuracao.salvarConfig(E, { modo: 'auto', variaveis: { link_ead: 'https://x' } }), codigo('config_invalida', 'automático'));
+  await assert.rejects(configuracao.salvarConfig(E, { modo: 'turbo', variaveis: { link_ead: 'https://x' } }), codigo('config_invalida', 'Modo inválido'));
   await assert.rejects(configuracao.salvarConfig(E, { variaveis: { cliente: 'x' } }), codigo('config_invalida', 'sistema'));
   await configuracao.salvarConfig(E, { modo: 'avisa', alertaDias: 14, variaveis: { link_ead: 'https://ead.exemplo.com' } });
   const row = (await admin('SELECT nome_ia, contexto_ia, boas_vindas_modo, boas_vindas_alerta_dias, boas_vindas_variaveis FROM lead_manager.automacao_config WHERE tenant_id = $1', [E])).rows[0];
   assert.deepEqual(row, { nome_ia: 'Janis', contexto_ia: 'Escola E', boas_vindas_modo: 'avisa', boas_vindas_alerta_dias: 14, boas_vindas_variaveis: { link_ead: 'https://ead.exemplo.com' } });
+  // saiu de 'desligado' → instante da ativação; salvar de novo ligado não mexe nele
+  const ativ1 = (await admin('SELECT boas_vindas_ativado_em AS t FROM lead_manager.automacao_config WHERE tenant_id = $1', [E])).rows[0].t;
+  assert.ok(ativ1 instanceof Date);
+  await configuracao.salvarConfig(E, { alertaDias: 15 });
+  assert.equal((await admin('SELECT boas_vindas_ativado_em AS t FROM lead_manager.automacao_config WHERE tenant_id = $1', [E])).rows[0].t.getTime(), ativ1.getTime());
 });
 
 test('editar mensagem: texto e dias salvam; erro NOVO é recusado; momento preso à aula não se edita', async () => {
@@ -178,6 +183,20 @@ test('enviar com WhatsApp desconectado: nada é marcado e a mensagem volta para 
   assert.equal(r.erro, 'instancia=close');
   const row = (await admin('SELECT status, bloqueio, erro FROM lead_manager.boas_vindas_toque WHERE id = $1', [id])).rows[0];
   assert.deepEqual(row, { status: 'bloqueado', bloqueio: 'sem_profissional', erro: 'instancia=close' });
+});
+
+test('modo automático: a fila da recepção mostra só o que precisa de gente (falta dado ou já falhou)', async () => {
+  await configuracao.salvarConfig(E, { modo: 'auto' });
+  const pronta = await toque(6, { due: '-5 minutes', texto: 'Sai sozinha.', rep: 1, phone: '5519977770000' });
+  const fila = await recepcao.listarFila(E);
+  assert.ok(!fila.some((i) => i.id === pronta), 'pendente sem erro sai sozinha: não aparece');
+  assert.ok(fila.every((i) => i.status === 'bloqueado' || i.erro), JSON.stringify(fila.map((i) => [i.status, i.erro])));
+  assert.ok(fila.every((i) => i.automatico === true));
+  await admin(`UPDATE lead_manager.boas_vindas_toque SET erro = 'anexo_nao_encontrado' WHERE id = $1`, [pronta]);
+  const comErro = (await recepcao.listarFila(E)).find((i) => i.id === pronta);
+  assert.match(comErro.erro, /arquivo desta mensagem não foi encontrado/);
+  await configuracao.salvarConfig(E, { modo: 'avisa' });
+  await admin('DELETE FROM lead_manager.boas_vindas_toque WHERE id = $1', [pronta]);
 });
 
 test('descartar tira da fila; módulo desligado esconde a fila inteira', async () => {

@@ -22,7 +22,7 @@ const temaProibido = require('../temaProibido');
 const dados = require('./dados');
 const agendaAdR = require('./agendaAcademiaDoRock');
 
-const MODOS_DISPONIVEIS = ['desligado', 'avisa'];   // 'auto' é a E17-05
+const MODOS_DISPONIVEIS = ['desligado', 'avisa', 'auto'];
 const TIPO_POR_MIDIA = { image: 'imagem', video: 'video', audio: 'audio', document: 'documento' };
 
 const SQL_ETAPAS_COM_ANEXO = `
@@ -133,7 +133,7 @@ async function salvarConfig(tenantId, { modo, alertaDias, variaveis } = {}, { fo
     };
     const erros = [];
     if (!MODOS_DISPONIVEIS.includes(novo.modo)) {
-      erros.push(novo.modo === 'auto' ? 'O envio automático ainda não está disponível. Use "avisa".' : 'Modo inválido.');
+      erros.push('Modo inválido.');
     }
     erros.push(...R.validarAlertaDias(novo.alertaDias), ...R.validarVariaveisLivres(novo.variaveis));
     if (!erros.length && novo.modo !== 'desligado') {
@@ -144,7 +144,10 @@ async function salvarConfig(tenantId, { modo, alertaDias, variaveis } = {}, { fo
     await c.query('INSERT INTO lead_manager.automacao_config (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING', [tenantId]);
     await c.query(
       `UPDATE lead_manager.automacao_config
-          SET boas_vindas_modo = $2, boas_vindas_alerta_dias = $3, boas_vindas_variaveis = $4::jsonb
+          SET boas_vindas_modo = $2, boas_vindas_alerta_dias = $3, boas_vindas_variaveis = $4::jsonb,
+              -- saiu de 'desligado': o que já venceu antes de agora não vai para ninguém (R6, E17-05)
+              boas_vindas_ativado_em = CASE WHEN $2 <> 'desligado' AND boas_vindas_modo = 'desligado' THEN now()
+                                            ELSE boas_vindas_ativado_em END
         WHERE tenant_id = $1`,
       [tenantId, novo.modo, novo.alertaDias, JSON.stringify(novo.variaveis)]);
     return { ok: true, config: novo };

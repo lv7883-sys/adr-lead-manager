@@ -1,5 +1,5 @@
 'use strict';
-// boas-vindas-migrations.itest.js — ADR-050 (E17-01): migrations 120–125 + db/grants/boas_vindas_agenda_read.sql.
+// boas-vindas-migrations.itest.js — ADR-050 (E17-01/05): migrations 120–126 + db/grants/boas_vindas_agenda_read.sql.
 // PG DESCARTÁVEL (ver test/run-boas-vindas-itest.sh), conectado como lead_manager_user — o mesmo papel
 // do app em produção, para que RLS e permissões valham de verdade. Cobre: padrões da config (nenhuma
 // unidade muda sem configurar), CHECKs, catálogo somente leitura, cópia do modelo, isolamento entre
@@ -153,6 +153,20 @@ test('RLS: a unidade B não lê nem grava toques da unidade A', async () => {
   await assert.rejects(withTenant(B, (c) => c.query(
     `INSERT INTO lead_manager.boas_vindas_toque (tenant_id, account_id, person_id, etapa_id, ancora_data, due_at, versao, phone)
      VALUES ($1,$2,$3,$4, DATE '2026-09-18', now(), 'titular', '55')`, [A, acc, pid, etapaA])), codigo('42501'));
+});
+
+test('126: alerta — um por contrato, fechado sempre com data, isolado por unidade; ativação nasce vazia', async () => {
+  const { acc } = await seedConta(A);
+  const ins = (t, extra = '') => withTenant(t, (c) => c.query(
+    `INSERT INTO lead_manager.boas_vindas_alerta (tenant_id, account_id, ini_vigencia, dias${extra ? ', status' : ''})
+     VALUES ($1, $2, DATE '2026-08-25', 27${extra ? `, '${extra}'` : ''})`, [A, acc]));
+  await ins(A);
+  await assert.rejects(ins(A), codigo('23505'));
+  await assert.rejects(withTenant(A, (c) => c.query(`UPDATE lead_manager.boas_vindas_alerta SET status = 'dispensado' WHERE account_id = $1`, [acc])), codigo('23514'));
+  assert.equal(await withTenant(B, async (c) => (await c.query('SELECT count(*)::int n FROM lead_manager.boas_vindas_alerta')).rows[0].n), 0);
+  await assert.rejects(ins(B), codigo('42501'));
+  const ativ = await withTenant(A, async (c) => (await c.query('SELECT boas_vindas_ativado_em FROM lead_manager.automacao_config WHERE tenant_id = $1', [A])).rows[0]);
+  assert.equal(ativ.boas_vindas_ativado_em, null);
 });
 
 test('grants: agenda do Scheduler legível; da franquia, só id e lead_tenant_id', { skip: process.env.BV_ITEST_APP !== '1' }, async () => {

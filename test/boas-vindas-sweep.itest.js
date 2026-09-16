@@ -5,10 +5,14 @@
 // mensagens com dia/horário/professor da agenda; renovação e contato interno ficam de fora; segunda
 // rodada não muda nada; mensagem já enviada é intocável; aula remarcada atualiza o lembrete pendente;
 // ativação não manda o atraso; unidade sem agenda só tem as etapas do início do contrato.
+// E17-05: o instante da ativação vale em toda rodada; alerta de cliente que não começou (abre, fecha sozinho,
+// dispensado não reabre); modo automático envia só o devido, dentro do horário, com pausa geral, teto diário
+// e parada na primeira falha do WhatsApp.
 const { test, after, before } = require('node:test');
 const assert = require('node:assert/strict');
 const { pool, withTenant } = require('../src/db');
 const sweep = require('../src/jobs/boas-vindas-sweep');
+const recepcao = require('../src/boasVindas/recepcao');
 
 const A = process.env.BV_TENANT_C;   // tem franquia (agenda) no schema app
 const B = process.env.BV_TENANT_D;   // sem franquia
@@ -115,8 +119,10 @@ test('régua inválida (falta a variável {link_ead}): a rotina não roda e diz 
 });
 
 test('matrícula nova: grava as mensagens com a aula da agenda; renovação e contato interno ficam de fora', async () => {
+  // unidade ligada antes da matrícula (o corte da ativação não pega a boas-vindas do dia 18)
   await withTenant(A, (c) => c.query(
-    `UPDATE lead_manager.automacao_config SET boas_vindas_variaveis = '{"link_ead":"https://ead.exemplo.com"}' WHERE tenant_id = $1`, [A]));
+    `UPDATE lead_manager.automacao_config SET boas_vindas_variaveis = '{"link_ead":"https://ead.exemplo.com"}',
+            boas_vindas_ativado_em = '2026-09-10T09:00:00-03:00' WHERE tenant_id = $1`, [A]));
   const r = await sweep.processarTenant(A, { agora: AGORA });
   assert.equal(r.pulado, undefined);
   assert.ok(r.gravacao.criado > 0);
@@ -165,6 +171,26 @@ test('ativação: o que já venceu não vai para a recepção', async () => {
   assert.ok(ts.length > 0);
   assert.ok(ts.every((t) => t.status !== 'pendente' || new Date(t.due_at).getTime() > AGORA), 'nada atrasado pendente');
   assert.ok(ts.some((t) => t.motivo === 'anterior_a_ativacao'));
+  const gravado = (await admin('SELECT boas_vindas_ativado_em AS t FROM lead_manager.automacao_config WHERE tenant_id = $1', [A])).rows[0].t;
+  assert.equal(gravado.getTime(), AGORA, '--ativar grava o instante');
+});
+
+test('ativação gravada: na rodada seguinte, sem --ativar, o atraso continua fora da fila', async () => {
+  await sweep.processarTenant(A, { agora: AGORA + 3600000 });
+  const antigos = await withTenant(A, async (c) => (await c.query(
+    `SELECT bt.status, bt.motivo FROM lead_manager.boas_vindas_toque bt
+       JOIN lead_manager.external_ref er ON er.entity_id = bt.account_id AND er.external_type = 'contrato'
+      WHERE er.external_id = '1180'`)).rows);
+  assert.ok(antigos.length > 0);
+  assert.ok(antigos.every((t) => t.status !== 'pendente'), JSON.stringify(antigos));
+});
+
+test('unidade ligada pela primeira vez sem instante gravado: a primeira rodada grava (nunca manda o atraso)', async () => {
+  await admin('UPDATE lead_manager.automacao_config SET boas_vindas_ativado_em = NULL WHERE tenant_id = $1', [A]);
+  await sweep.processarTenant(A, { agora: AGORA + 7200000 });
+  const t = (await admin('SELECT boas_vindas_ativado_em AS t FROM lead_manager.automacao_config WHERE tenant_id = $1', [A])).rows[0].t;
+  assert.equal(t.getTime(), AGORA + 7200000);
+  await admin('UPDATE lead_manager.automacao_config SET boas_vindas_ativado_em = $2 WHERE tenant_id = $1', [A, new Date(AGORA).toISOString()]);
 });
 
 test('unidade sem agenda integrada: a simulação aponta a régua inválida e o motivo', async () => {
@@ -180,4 +206,130 @@ test('runBoasVindasSweep: percorre as unidades ativas e isola erro de uma unidad
   assert.equal(r.length, 3);
   assert.equal(r[1].pulado, 'modo_desligado');
   assert.ok(r[2].erro || r[2].pulado, 'unidade inexistente não derruba as outras');
+});
+
+// ── E17-05 ─────────────────────────────────────────────────────────────────────────────────────
+test('alerta: quem passou do prazo sem a 1ª aula abre alerta; começou → fecha sozinho; dispensado não reabre', async () => {
+  const sumido = await contrato(A, { ini: '2026-08-25', ext: '1190', aluno: await pessoa(A, 'Caio Sumido', '5519988880000', '810') });
+  const viajou = await contrato(A, { ini: '2026-08-20', ext: '1195', aluno: await pessoa(A, 'Duda Viajou', '5519988881111', '820') });
+  const r = await sweep.processarTenant(A, { agora: AGORA });
+  assert.equal(r.alertas.abertos, 2, JSON.stringify(r.alertas));
+  let alertas = await recepcao.listarAlertas(A);
+  assert.deepEqual(alertas.map((a) => a.accountId).sort(), [sumido, viajou].sort(), 'Pedro (3 dias) e Bia (20 dias) ainda estão no prazo');
+  const caio = alertas.find((a) => a.accountId === sumido);
+  assert.equal(caio.dias, 27);
+  assert.equal(caio.clienteNome, 'Caio Sumido');
+  assert.equal(caio.phone, '5519988880000');
+
+  const duda = alertas.find((a) => a.accountId === viajou);
+  assert.deepEqual(await recepcao.dispensarAlerta(A, duda.id, { observacao: 'viajou, começa dia 05/10', por: 'Késsia' }), { ok: true });
+  assert.equal((await recepcao.dispensarAlerta(A, duda.id, {})).status, 404, 'já dispensado');
+
+  // Caio fez a 1ª aula
+  await agenda('2026-09-14', [{ id: '9', data: '2026-09-15', aluno: 810, contrato: 1190, status: 'Realizada' }]);
+  const r2 = await sweep.processarTenant(A, { agora: AGORA + 3600000 });
+  assert.equal(r2.alertas.fechados, 1);
+  assert.equal(r2.alertas.abertos, 0);
+  assert.equal((await recepcao.listarAlertas(A)).length, 0);
+  const linhas = (await admin('SELECT account_id, status, resolvido_por, observacao, dias FROM lead_manager.boas_vindas_alerta WHERE tenant_id = $1', [A])).rows;
+  const porConta = Object.fromEntries(linhas.map((l) => [l.account_id, l]));
+  assert.deepEqual([porConta[sumido].status, porConta[sumido].resolvido_por, porConta[sumido].observacao], ['resolvido', 'sistema', 'comecou']);
+  assert.deepEqual([porConta[viajou].status, porConta[viajou].resolvido_por], ['dispensado', 'Késsia'], 'dispensado não reabre');
+  assert.equal(porConta[viajou].dias, 32, 'os números seguem atualizados');
+  // outra unidade não vê nem dispensa
+  assert.equal((await recepcao.listarAlertas(B)).length, 0);
+});
+
+function inboxFalso({ falharEm } = {}) {
+  const chamadas = [];
+  const out = (tipo) => (falharEm === tipo ? { reason: 'instancia=close' } : { ok: true, message_id: `m-${tipo}` });
+  return {
+    chamadas,
+    ensureConversation: async (_c, _t, phone) => { chamadas.push(['ensure', phone]); return { conversation_id: '00000000-0000-4000-8000-00000000c0de', created: true }; },
+    sendMessage: async (t, conv, { text, sender }) => { chamadas.push(['texto', text, sender]); return out('texto'); },
+    sendInboxMedia: async () => { chamadas.push(['arquivo']); return out('arquivo'); },
+    sendInboxAudio: async () => { chamadas.push(['audio']); return out('audio'); },
+  };
+}
+const semEspera = (inbox, extra = {}) => ({ inbox, sleep: async () => {}, intervalo: () => 0, ...extra });
+const toqueDaConta = async (ext, ordem) => (await admin(
+  `SELECT bt.* FROM lead_manager.boas_vindas_toque bt
+     JOIN lead_manager.boas_vindas_etapa e ON e.id = bt.etapa_id
+     JOIN lead_manager.external_ref er ON er.entity_id = bt.account_id AND er.external_type = 'contrato'
+    WHERE er.external_id = $1 AND e.ordem = $2 AND bt.repeticao = 1`, [ext, ordem])).rows[0];
+
+test('modo automático: envia sozinho o devido, marca auto, uma por família; fora do horário, pausa e teto não enviam', async () => {
+  const lia = await pessoa(A, 'Lia Mendes', '5519966660000', '830');
+  await contrato(A, { ini: '2026-09-21', ext: '1200', aluno: lia });
+  // a agenda lida vai só até 7 dias à frente (como a raspagem real): aula na semana corrente
+  await agenda('2026-09-21', [
+    { id: '1', data: '2026-09-25', hora: '10:00', fim: '11:00', aluno: 540, contrato: 1154, prof: 'Ana Costa' },
+    { id: '2', data: '2026-09-25', aluno: 600, contrato: 1160 },
+    { id: '5', data: '2026-09-24', aluno: 830, contrato: 1200 },
+  ]);
+  await admin(`UPDATE lead_manager.automacao_config SET boas_vindas_modo = 'auto' WHERE tenant_id = $1`, [A]);
+  const AGORA_AUTO = sp('2026-09-21', '10:00');
+
+  // 22h: planeja, mas não envia
+  const noite = inboxFalso();
+  const [rn] = await sweep.runBoasVindasSweep({ agora: sp('2026-09-21', '22:00'), portao: async () => [A], autoDeps: semEspera(noite) });
+  assert.equal(rn.auto.pulado, 'fora_do_horario_de_atendimento');
+  assert.equal(noite.chamadas.length, 0);
+
+  // pausa geral
+  process.env.BOAS_VINDAS_PAUSA = '1';
+  const pausa = inboxFalso();
+  const [rp] = await sweep.runBoasVindasSweep({ agora: AGORA_AUTO, portao: async () => [A], autoDeps: semEspera(pausa) });
+  delete process.env.BOAS_VINDAS_PAUSA;
+  assert.equal(rp.auto.pulado, 'pausa_geral');
+  assert.equal(pausa.chamadas.length, 0);
+
+  // teto diário zerado
+  const teto = inboxFalso();
+  const [rt] = await sweep.runBoasVindasSweep({ agora: AGORA_AUTO, portao: async () => [A], autoDeps: semEspera(teto, { capDia: 0 }) });
+  assert.equal(rt.auto.pulado, 'teto_diario');
+
+  // horário de atendimento: envia a boas-vindas da Lia com a aula de quinta 24/09
+  const dia = inboxFalso();
+  const [r] = await sweep.runBoasVindasSweep({ agora: AGORA_AUTO, portao: async () => [A], autoDeps: semEspera(dia) });
+  assert.ok(r.auto.enviados >= 1, JSON.stringify(r.auto));
+  const bv1 = await toqueDaConta('1200', 1);
+  assert.equal(bv1.status, 'enviado');
+  assert.equal(bv1.auto, true);
+  const textos = dia.chamadas.filter((c) => c[0] === 'texto');
+  assert.ok(textos.some((c) => /quinta-feira, 24\/09/.test(c[1]) && c[2] === 'boas-vindas-auto'));
+  const fones = dia.chamadas.filter((c) => c[0] === 'ensure').map((c) => c[1]);
+  assert.equal(new Set(fones).size, fones.length, 'uma mensagem por família na rodada');
+  assert.ok(!fones.includes('5519922220000'), 'a família do Pedro já recebeu hoje (09:35)');
+
+  // segunda rodada no mesmo horário: nada sai de novo
+  const de_novo = inboxFalso();
+  const [r2] = await sweep.runBoasVindasSweep({ agora: AGORA_AUTO + 60000, portao: async () => [A], autoDeps: semEspera(de_novo) });
+  assert.equal(r2.auto.enviados, 0);
+  assert.equal(de_novo.chamadas.length, 0);
+});
+
+test('modo automático: WhatsApp fora para a rodada; a mensagem que falhou fica para a recepção e não é repetida', async () => {
+  const teo = await pessoa(A, 'Téo Alves', '5519966661111', '840');
+  await contrato(A, { ini: '2026-09-22', ext: '1210', aluno: teo });
+  await agenda('2026-09-21', [
+    { id: '1', data: '2026-09-25', hora: '10:00', fim: '11:00', aluno: 540, contrato: 1154, prof: 'Ana Costa' },
+    { id: '2', data: '2026-09-25', aluno: 600, contrato: 1160 },
+    { id: '5', data: '2026-09-24', aluno: 830, contrato: 1200 },
+    { id: '6', data: '2026-09-26', hora: '10:00', fim: '11:00', aluno: 840, contrato: 1210 },
+  ]);
+  const QUANDO = sp('2026-09-22', '10:00');
+  const fora = inboxFalso({ falharEm: 'texto' });
+  const [r] = await sweep.runBoasVindasSweep({ agora: QUANDO, portao: async () => [A], autoDeps: semEspera(fora) });
+  assert.equal(r.auto.falhas, 1);
+  assert.equal(fora.chamadas.filter((c) => c[0] === 'texto').length, 1, 'parou na primeira falha');
+  const t = await toqueDaConta('1210', 1);
+  assert.equal(t.status, 'pendente');
+  assert.equal(t.erro, 'instancia=close');
+
+  const volta = inboxFalso();
+  const [r2] = await sweep.runBoasVindasSweep({ agora: QUANDO + 3600000, portao: async () => [A], autoDeps: semEspera(volta) });
+  assert.ok(!volta.chamadas.some((c) => c[0] === 'ensure' && c[1] === '5519966661111'), 'não repete sozinho');
+  assert.equal(r2.auto.falhas, 0);
+  await admin(`UPDATE lead_manager.automacao_config SET boas_vindas_modo = 'avisa' WHERE tenant_id = $1`, [A]);
 });

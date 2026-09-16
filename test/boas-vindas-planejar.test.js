@@ -238,17 +238,42 @@ test('planejar: sem nenhum professor na aula, cai no professor do contrato', () 
 });
 
 test('planejar: ATIVAÇÃO — o que já venceu não vai para a recepção; o futuro segue normal', () => {
-  const aulas = [aula({ aula_id: '1', data: '2026-09-24', status: 'Realizada' }), aula({ aula_id: '2', data: '2026-10-01' })];
-  const agora = sp('2026-09-29', '10:00');
+  // 2ª aula em 06/10: a véspera dela não disputa o dia 30/09 com o Guia (R7)
+  const aulas = [aula({ aula_id: '1', data: '2026-09-24', status: 'Realizada' }), aula({ aula_id: '2', data: '2026-10-06' })];
+  const agora = sp('2026-09-30', '10:00');
   const normal = planoDe({ aulas, agora });
   assert.ok(normal.toques.some((x) => x.status === 'pendente' && x.momento === 'devida'), 'sem ativação haveria atraso acumulado');
   const ativ = planejarUnidade({ contratos: [contrato()], etapas: MODELO,
     fatosPorConta: new Map([['acc-1', A.fatosDoContrato(A.aulasDoContrato(aulas, { idContrato: '1154' }), { iniVigencia: '2026-09-18', agora })]]),
     fonteAgenda: true, config: CONFIG, agora, ativacao: true });
-  assert.equal(ativ.toques.filter((x) => x.status === 'pendente' && x.momento === 'devida').length, 0);
+  // o que venceu em dias anteriores sai; o que vence no próprio dia da ativação continua
+  const devidas = ativ.toques.filter((x) => x.status === 'pendente' && x.momento === 'devida');
+  assert.ok(devidas.every((x) => R.dataSP(x.dueAt) === '2026-09-30'), JSON.stringify(devidas.map((x) => [x.etapaNome, new Date(x.dueAt)])));
   assert.ok(ativ.toques.some((x) => x.motivo === 'anterior_a_ativacao'));
-  assert.equal(toqueDe(ativ.planos[0], 3, 2).status, 'pendente', 'o lembrete da aula de 01/10 continua');
+  assert.equal(toqueDe(ativ.planos[0], 3, 2).status, 'pendente', 'o lembrete da aula de 06/10 continua');
   assert.equal(toqueDe(ativ.planos[0], 3, 2).momento, 'futura');
+});
+
+test('planejar: instante da ativação GRAVADO vale em toda rodada; o que já estava na fila segue valendo', () => {
+  const aulas = [aula({ aula_id: '1', data: '2026-09-24', status: 'Realizada' }), aula({ aula_id: '2', data: '2026-10-01' })];
+  const fatos = (agora) => new Map([['acc-1', A.fatosDoContrato(A.aulasDoContrato(aulas, { idContrato: '1154' }), { iniVigencia: '2026-09-18', agora })]]);
+  const plano = (agora, config, existentes = []) => planejarUnidade({ contratos: [contrato()], etapas: MODELO, fatosPorConta: fatos(agora), fonteAgenda: true, config, agora, existentes });
+
+  // ligada em 30/09 às 15h: dois dias depois, sem --ativar, o atraso de antes do dia 30 continua fora
+  const cfg = { ...CONFIG, ativadoEm: sp('2026-09-30', '15:00') };
+  const depois = plano(sp('2026-10-02', '10:00'), cfg);
+  const fora = depois.toques.filter((x) => x.motivo === 'anterior_a_ativacao');
+  assert.ok(fora.length > 0);
+  assert.ok(fora.every((x) => x.dueAt < sp('2026-09-30', '00:00')));
+
+  // a mesma mensagem, se já estava pendente na fila antes (unidade ligada antes), não é cortada
+  const alvo = fora[0];
+  const naFila = plano(sp('2026-10-02', '10:00'), cfg, [{ account_id: 'acc-1', etapa_id: alvo.etapaId, repeticao: alvo.repeticao, status: 'pendente', due_at: new Date(alvo.dueAt).toISOString() }]);
+  const mesma = naFila.toques.find((x) => x.chave === alvo.chave);
+  assert.notEqual(mesma.motivo, 'anterior_a_ativacao');
+
+  // sem ativadoEm (unidade antiga / simulação): nada é cortado
+  assert.equal(plano(sp('2026-10-02', '10:00'), CONFIG).toques.filter((x) => x.motivo === 'anterior_a_ativacao').length, 0);
 });
 
 test('planejar: família com mensagens atrasadas recebe uma por vez', () => {

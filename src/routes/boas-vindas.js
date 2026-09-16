@@ -7,6 +7,7 @@
 //     GET  /tenant/:tenantId/boas-vindas/toques/:toqueId            uma mensagem (inclui as futuras em aberto)
 //     POST /tenant/:tenantId/boas-vindas/toques/:toqueId/enviar     { texto?, com_anexo? }
 //     POST /tenant/:tenantId/boas-vindas/toques/:toqueId/descartar  { motivo?, por? }
+//     POST /tenant/:tenantId/boas-vindas/alertas/:alertaId/dispensar { observacao?, por? }   (E17-05)
 //
 //   Gestão da unidade (tela de configuração)
 //     GET  /tenant/:tenantId/boas-vindas/config
@@ -57,7 +58,9 @@ router.get('/:tenantId/boas-vindas/fila', authenticate, requireTenantAccess(READ
   try {
     const conversationId = isUuid(req.query.conversation_id) ? req.query.conversation_id : null;
     const itens = await recepcao.listarFila(req.tenantId, { limite: Number(req.query.limite) || 200, conversationId });
-    res.json({ itens, total: itens.length });
+    // Alertas de cliente que não começou só na lista geral (não no cartão de uma conversa).
+    const alertas = conversationId ? [] : await recepcao.listarAlertas(req.tenantId);
+    res.json({ itens, total: itens.length, alertas });
   } catch (err) { _falha(res, err, 'boas_vindas.fila.error', req.tenantId); }
 });
 
@@ -88,6 +91,15 @@ router.post('/:tenantId/boas-vindas/toques/:toqueId/descartar', authenticate, re
     if (out.erro) return res.status(out.status || 400).json({ error: out.erro });
     res.json(out);
   } catch (err) { _falha(res, err, 'boas_vindas.descartar.error', req.tenantId); }
+});
+
+router.post('/:tenantId/boas-vindas/alertas/:alertaId/dispensar', authenticate, requireTenantAccess(WRITE_ROLES), _uuid('alertaId'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const r = await recepcao.dispensarAlerta(req.tenantId, req.params.alertaId, { observacao: b.observacao, por: _por(req) });
+    if (r.erro) return res.status(r.status).json({ error: r.erro });
+    res.json(r);
+  } catch (err) { _falha(res, err, 'boas_vindas.alerta_dispensar.error', req.tenantId); }
 });
 
 // ── Gestão da unidade ───────────────────────────────────────────────────────────────────────────
