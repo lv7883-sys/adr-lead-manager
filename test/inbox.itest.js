@@ -355,7 +355,7 @@ test('(5c) filtro NÃO LIDAS: só quem tem mensagem não lida (reação não con
   await msg(cReacao, { body: '[reação] 👍' });                                                            // só reação depois da leitura
   const cLead = await conv(tenant, H(703)); await msg(cLead); await lead(tenant, { phone: H(703) });
   const cArq = await conv(tenant, H(704)); await msg(cArq);
-  await c.query('UPDATE conversations SET arquivada_em = now() WHERE id = ', [cArq]);
+  await c.query('UPDATE conversations SET arquivada_em = now() WHERE id = $1', [cArq]);
 
   for (const fonte of [null, 'whatsapp']) {   // caminho rápido e caminho completo
     const nl = (await list(tenant, { naoLidas: true, fonte, limit: 50 })).items;
