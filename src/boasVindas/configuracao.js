@@ -53,8 +53,9 @@ function _etapa(row) {
 }
 
 // §6.4 — o texto aprovado pela gestão NÃO passa pela trava da IA; a tela só avisa quando ele fala de
-// agenda, contrato ou valores, para a gestão conferir antes de ligar o envio automático.
-const TEMA_ROTULO = { agenda: 'agenda', contrato: 'contrato', valores: 'valores' };
+// contrato ou valores, para a gestão conferir antes de ligar o envio automático. "Agenda" fica de fora de
+// propósito: lembrete de aula fala de dia e horário por natureza (o aviso tocaria em toda régua).
+const TEMA_ROTULO = { contrato: 'contrato', valores: 'valores' };
 function temasSensiveis(etapa) {
   if (!etapa || etapa.entregue_por === 'externo') return [];
   const achados = new Map();
