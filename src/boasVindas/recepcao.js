@@ -240,6 +240,14 @@ async function listarAlertas(tenantId, { limite = 100 } = {}) {
   return withTenant(tenantId, async (c) => (await c.query(SQL_ALERTAS, [tenantId, Math.min(Math.max(1, limite | 0), 500)])).rows.map(alertaDaLinha));
 }
 
+// Modo da unidade (desligado | avisa | auto) — a aba explica o que a recepção está vendo.
+async function modoDaUnidade(tenantId) {
+  return withTenant(tenantId, async (c) => {
+    const r = (await c.query('SELECT boas_vindas_modo FROM lead_manager.automacao_config WHERE tenant_id = $1', [tenantId])).rows[0];
+    return (r && r.boas_vindas_modo) || 'desligado';
+  });
+}
+
 // A recepção já falou com a família (ou sabe o motivo): o alerta sai da fila e não reabre.
 async function dispensarAlerta(tenantId, alertaId, { observacao, por } = {}) {
   const ok = await withTenant(tenantId, async (c) => (await c.query(
@@ -250,4 +258,4 @@ async function dispensarAlerta(tenantId, alertaId, { observacao, por } = {}) {
   return ok ? { ok: true } : { erro: 'alerta_nao_encontrado', status: 404 };
 }
 
-module.exports = { listarFila, detalhe, enviar, descartar, MOTIVO_BLOQUEIO, SQL_FILA, listarAlertas, dispensarAlerta };
+module.exports = { listarFila, detalhe, enviar, descartar, MOTIVO_BLOQUEIO, SQL_FILA, listarAlertas, dispensarAlerta, modoDaUnidade };

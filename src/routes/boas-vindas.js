@@ -59,8 +59,11 @@ router.get('/:tenantId/boas-vindas/fila', authenticate, requireTenantAccess(READ
     const conversationId = isUuid(req.query.conversation_id) ? req.query.conversation_id : null;
     const itens = await recepcao.listarFila(req.tenantId, { limite: Number(req.query.limite) || 200, conversationId });
     // Alertas de cliente que não começou só na lista geral (não no cartão de uma conversa).
-    const alertas = conversationId ? [] : await recepcao.listarAlertas(req.tenantId);
-    res.json({ itens, total: itens.length, alertas });
+    const [alertas, modo] = await Promise.all([
+      conversationId ? [] : recepcao.listarAlertas(req.tenantId),
+      recepcao.modoDaUnidade(req.tenantId),
+    ]);
+    res.json({ itens, total: itens.length, alertas, modo });
   } catch (err) { _falha(res, err, 'boas_vindas.fila.error', req.tenantId); }
 });
 

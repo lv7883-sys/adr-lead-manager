@@ -238,6 +238,8 @@ test('alerta: quem passou do prazo sem a 1ª aula abre alerta; começou → fech
   assert.equal(porConta[viajou].dias, 32, 'os números seguem atualizados');
   // outra unidade não vê nem dispensa
   assert.equal((await recepcao.listarAlertas(B)).length, 0);
+  assert.equal(await recepcao.modoDaUnidade(A), 'avisa');
+  assert.equal(await recepcao.modoDaUnidade(B), 'desligado');
 });
 
 function inboxFalso({ falharEm } = {}) {
