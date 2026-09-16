@@ -92,7 +92,7 @@ function foldAcentoSql(expr) {
 
 // Monta { sql, params } da listagem (E12-03). `cursor` = objeto decodificado {ts,id} | null.
 // FONTE ÚNICA da query — usada pelo handler (sob withTenant/RLS) e pelo itest (como postgres).
-function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = null, limit = 30, cursor = null, grupos = null, arquivadas = false, fixadas = null } = {}) {
+function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = null, limit = 30, cursor = null, grupos = null, arquivadas = false, fixadas = null, naoLidas = false, manter = null } = {}) {
   const v = VIEWS.has(view) ? view : 'todas';
   const lim = Math.min(Math.max(parseInt(limit, 10) || 30, 1), 50);
 
@@ -165,6 +165,14 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   // projected reusa os MESMOS (calculados uma vez só). Nas demais abas continuam depois, escopados.
   const renovAntes = fastPath && v === 'renovacoes';
   const leadselAntes = fastPath && (v === 'leads' || v === 'nao_lead');
+  // NÃO LIDAS (pedido da recepção, 16/09/2026 — o filtro "Não lidas" do WhatsApp): combina com qualquer aba.
+  // `manter` = a conversa ABERTA agora: ao abrir ela vira lida, mas continua na lista até a pessoa sair do
+  // filtro (igual ao WhatsApp) — senão sumiria debaixo do dedo no próximo auto-refresh.
+  let pManter = null;
+  if (naoLidas) {
+    if (manter && /^[0-9a-f-]{36}$/i.test(String(manter))) { params.push(String(manter)); pManter = params.length; }
+    extra.push(pManter ? `(nao_lidas > 0 OR conversation_id = $${pManter}::uuid)` : 'nao_lidas > 0');
+  }
   let pTs = null; let pId = null;
   // Keyset entra como MAIS UM predicado do WHERE (não como cláusula solta — senão vira
   // "FROM projected AND ..." quando não há filtros). No caminho rápido ele vai no corte de cima.
@@ -301,6 +309,9 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       else if (v === 'nao_lead') cortePre.push('NOT EXISTS (SELECT 1 FROM leadsel ls WHERE ls.id = cv.id)');
     }
     if (condBusca) cortePre.push('cv.id IN (SELECT id FROM busca)');
+    // ⚠ MESMA régua do nao_lidas do projected (entrada do cliente, sem reação, depois do last_read_at).
+    if (naoLidas) cortePre.push(`(EXISTS (SELECT 1 FROM messages um WHERE um.conversation_id = cv.id AND um.role = 'USER'
+                AND ${naoEhReacaoSql('um')} AND (cv.last_read_at IS NULL OR um.received_at > cv.last_read_at))${pManter ? ` OR cv.id = $${pManter}::uuid` : ''})`);
     if (cursor) cortePre.push(`(cv.last_activity_at, cv.id) < ($${pTs}::timestamptz, $${pId}::uuid)`);
   }
   const cortaCedo = fastPath
@@ -1113,12 +1124,14 @@ router.get('/:tenantId/inbox/conversations', authenticate, requireTenantAccess(R
   const grupos = typeof req.query.grupos === 'string' && req.query.grupos ? req.query.grupos.split(',') : null;
   const arquivadas = req.query.arquivadas === '1';
   const fixadas = ['so', 'fora'].includes(req.query.fixadas) ? req.query.fixadas : null;
+  const naoLidas = req.query.nao_lidas === '1';   // filtro "Não lidas"
+  const manter = isUuid(req.query.manter) ? req.query.manter : null;   // conversa aberta fica na lista filtrada
   const cursor = req.query.cursor ? decodeCursor(req.query.cursor) : null;
   if (req.query.cursor && !cursor) return res.status(400).json({ error: 'invalid_cursor' });
 
   try {
     const { items, next_cursor } = await withTenant(req.tenantId, (c) =>
-      listConversations(c, req.tenantId, { view, fonte, q, grupos, arquivadas, fixadas, limit: req.query.limit, cursor }));
+      listConversations(c, req.tenantId, { view, fonte, q, grupos, arquivadas, fixadas, naoLidas, manter, limit: req.query.limit, cursor }));
     res.json({ tenant_id: req.tenantId, view, count: items.length, items, next_cursor });
   } catch (err) {
     logger.error('tenant.inbox.conversations.error', { tenant_id: req.tenantId, error: err.message });
@@ -1202,12 +1215,15 @@ router.post('/:tenantId/inbox/conversations/:conversationId/arquivar', authentic
 // GET /tenant/:tenantId/inbox/nao-lidas — total de mensagens não-lidas (soma), p/ o badge do nav.
 router.get('/:tenantId/inbox/nao-lidas', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {
-    const total = await withTenant(req.tenantId, async (c) => (await c.query(
-      `SELECT COALESCE(SUM(n), 0)::int AS total FROM (
+    const r = await withTenant(req.tenantId, async (c) => (await c.query(
+      `SELECT COALESCE(SUM(n), 0)::int AS total,
+              count(*) FILTER (WHERE n > 0 AND arquivada_em IS NULL)::int AS conversas   -- botão "Não lidas" da lista
+         FROM (
          SELECT (SELECT count(*) FROM messages m
                   WHERE m.conversation_id = cv.id AND m.role = 'USER'
                     AND ${naoEhReacaoSql('m')}   -- reação não é turno (idem lista, src/reacao.js)
-                    AND (cv.last_read_at IS NULL OR m.received_at > cv.last_read_at)) AS n
+                    AND (cv.last_read_at IS NULL OR m.received_at > cv.last_read_at)) AS n,
+                cv.arquivada_em
            FROM conversations cv
           -- PARIDADE COM O WHATSAPP (decisão do Leo 2026-08-26): o badge conta o MESMO universo
           -- que a aba "Todas" mostra, para recepção e gestão terem a mesma impressão de uso do
@@ -1218,11 +1234,11 @@ router.get('/:tenantId/inbox/nao-lidas', authenticate, requireTenantAccess(READ_
           -- WhatsApp e só aparece na aba Renovação.
           WHERE cv.tenant_id = $1
             AND cv.renovacao_draft IS NOT TRUE
-       ) u`, [req.tenantId])).rows[0].total);
-    res.json({ total });
+       ) u`, [req.tenantId])).rows[0]);
+    res.json({ total: r.total, conversas: r.conversas });
   } catch (err) {
     logger.error('tenant.inbox.nao_lidas.error', { tenant_id: req.tenantId, error: err.message });
-    res.json({ total: 0 });
+    res.json({ total: 0, conversas: 0 });
   }
 });
 

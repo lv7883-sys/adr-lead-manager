@@ -346,6 +346,32 @@ test('(5b) arquivadas saem da lista e aparecem em Arquivadas; fixadas separadas;
   assert.ok(!byExt((await list(tenant, { fonte: 'whatsapp', limit: 50 })).items, H(600)), 'fora do caminho rápido também');
 });
 
+test('(5c) filtro NÃO LIDAS: só quem tem mensagem não lida (reação não conta), combina com a aba e mantém a conversa aberta', async () => {
+  // pedido da recepção (16/09/2026): o filtro "Não lidas" do WhatsApp, junto de Todas/Leads/Outras/Renovações
+  const tenant = '00000000-0000-0000-0000-0000000000e7'; await cfg(tenant, 7);
+  const cNova = await conv(tenant, H(700)); await msg(cNova);                                            // nunca lida
+  const cLida = await conv(tenant, H(701), { last_read_at: new Date(Date.now() + 60000) }); await msg(cLida);   // já lida
+  const cReacao = await conv(tenant, H(702), { last_read_at: new Date(Date.now() - 86400000) });
+  await msg(cReacao, { body: '[reação] 👍' });                                                            // só reação depois da leitura
+  const cLead = await conv(tenant, H(703)); await msg(cLead); await lead(tenant, { phone: H(703) });
+  const cArq = await conv(tenant, H(704)); await msg(cArq);
+  await c.query('UPDATE conversations SET arquivada_em = now() WHERE id = ', [cArq]);
+
+  for (const fonte of [null, 'whatsapp']) {   // caminho rápido e caminho completo
+    const nl = (await list(tenant, { naoLidas: true, fonte, limit: 50 })).items;
+    assert.ok(byExt(nl, H(700)) && byExt(nl, H(703)), 'não lidas aparecem');
+    assert.ok(!byExt(nl, H(701)), 'lida não aparece');
+    assert.ok(!byExt(nl, H(702)), 'reação não é mensagem não lida');
+    assert.ok(!byExt(nl, H(704)), 'arquivada continua fora');
+    assert.ok(nl.every((i) => i.nao_lidas > 0));
+    const leads = (await list(tenant, { naoLidas: true, view: 'leads', fonte, limit: 50 })).items;
+    assert.deepEqual(leads.map((i) => i.external_id), [H(703)], 'combina com a aba Leads');
+    const aberta = (await list(tenant, { naoLidas: true, manter: cLida, fonte, limit: 50 })).items;
+    assert.ok(byExt(aberta, H(701)), 'a conversa ABERTA fica na lista mesmo lida');
+  }
+  assert.ok(byExt((await list(tenant, { limit: 50 })).items, H(701)), 'sem o filtro, tudo como antes');
+});
+
 test('(6) keyset pagination sem sobreposição', async () => {
   const tenant = '00000000-0000-0000-0000-0000000000e6'; await cfg(tenant, 7);
   for (let i = 0; i < 5; i++) { const cv = await conv(tenant, H(500 + i)); await msg(cv, { diasAtras: i }); }
