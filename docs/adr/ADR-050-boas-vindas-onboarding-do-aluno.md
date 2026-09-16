@@ -1,6 +1,6 @@
 # ADR-050 — Boas-vindas / Onboarding do cliente novo (régua pós-contratação)
 
-- **Status:** 🟢 **DECISÕES TRAVADAS** — rev. 4 (2026-09-16). **E17-01 e E17-02 implementadas** na branch `feat/boas-vindas-e17-01` (não mergeada, sem deploy, nada aplicado em banco real). E17-02 validada por simulação com dados reais de Valinhos (§14) — **aguarda aprovação do dono para ativar**.
+- **Status:** 🟢 **DECISÕES TRAVADAS** — rev. 5 (2026-09-16). **E17-01, E17-02 e E17-03/04 implementadas** — LM na branch `feat/boas-vindas-e17-01`, dashboard na branch `feat/boas-vindas-e17-03` (nenhuma mergeada, sem deploy, nada aplicado em banco real). E17-02 validada por simulação com dados reais de Valinhos (§14) — **aguarda aprovação do dono para ativar**.
 - **Fonte do conteúdo:** planilha `Plano de Boas-vindas.xlsx` (OneDrive Gerencial/Recepção) — aba 1 (7 toques) e aba 2 (Guia do Aluno).
 - **Relacionados:** ADR-049 (renovação — o **espelho** deste), ADR-047 (NPS Pulse — **fecha** esta régua), ADR-042 (Central de Mensagens), ADR-006 (MANUAL/SEMI/AUTO), ADR-037 (cadastro mestre), ADR-025 (recursos genéricos, fronteira anti-vazamento de nicho), migr. 119 (perfil da assistente por ramo).
 - **Restrições do dono:**
@@ -354,8 +354,8 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 |---|---|---|
 | **E17-01** ✅ | Migrations 120–125 + grants de agenda + `src/boasVindasRegua.js` (cálculo de datas e travas R1–R10) com testes — branch `feat/boas-vindas-e17-01` | — |
 | **E17-02** ✅ | Adaptador `academia-do-rock` (agenda + presença) + job diário em modo `avisa` + simulação com dados reais (§14) | — |
-| **E17-03** | Aba **Boas-vindas** na Caixa de Entrada: toque pronto na conversa, envio com um clique, com anexo | ✅ |
-| **E17-04** | Tela de configuração: etapas, textos, anexos, variáveis, alerta, escolha do modelo | ✅ |
+| **E17-03** ✅ | Aba **Boas-vindas** na Caixa de Entrada: toque pronto na conversa, envio com um clique, com anexo (§15) | ✅ |
+| **E17-04** ✅ (parte) | Tela de configuração: textos, **arquivo por mensagem**, dias, variáveis, alerta, escolha do modelo (§15). Falta: criar/apagar/reordenar etapas | ✅ |
 | **E17-05** | Modo `auto`, `seed`, uma-por-família e alerta de cliente que não começou | ✅ |
 
 ---
@@ -377,7 +377,7 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
 
 ## 13. Coordenação e proteção do que já existe
 
-**Estado em 2026-09-16:** E17-01 commitada **só na branch** `feat/boas-vindas-e17-01`. Nada no `main`, nada aplicado em banco real, nenhum deploy.
+**Estado em 2026-09-16:** E17-01 a E17-03/04 commitadas **só nas branches** `feat/boas-vindas-e17-01` (LM) e `feat/boas-vindas-e17-03` (dashboard). Nada no `main`, nada aplicado em banco real, nenhum deploy.
 
 ### 13.1 Chats consultados
 
@@ -403,10 +403,12 @@ O teste unitário lê a própria migration 125 e valida o modelo contra as regra
    lista as colunas explicitamente, por isso não apaga colunas novas — conferido; e é o mesmo
    endpoint onde houve o bug de apagar nome/contexto, então não deve ganhar mais responsabilidade.
 2. **`temaProibido.js`: intocado** (§6.4).
-3. **Caixa de Entrada.** A aba nova entra no `Set VIEWS` (`inbox.js:53`) com filtro próprio. O
-   rascunho de boas-vindas **não aparece** em Todas/Leads/Outras, igual ao `renovacao_draft`.
-   Nenhuma query das abas existentes muda de forma. Teste de regressão das 4 abas atuais antes do
-   merge.
+3. **Caixa de Entrada.** *(Como ficou na E17-03.)* A aba **não** entra no `Set VIEWS` do `inbox.js`:
+   tem consulta própria (`GET /boas-vindas/fila`), e a consulta pesada da lista (incidente de
+   performance de agosto) não mudou. As mensagens de boas-vindas não aparecem em Todas/Leads/Outras/
+   Renovações. Os links da aba usam `bv=`/`conversa=` para não cair no `?c=` da navegação sem
+   recarregar. Testes das abas atuais seguem verdes (dashboard: 584/587, as 3 falhas são de
+   certificado/Compasso e já existiam no `main`).
 4. **Renovação: intocada.** O módulo só **lê** o primeiro marco da renovação para o teto R2.
 5. **Diapasão: intocado.** O NPS só depende de configuração na tela dele.
 6. **Deploy neutro.** O modo padrão é `desligado`: subir o código não muda o comportamento de
@@ -511,4 +513,56 @@ momento e supondo que a recepção envia assim que a mensagem fica pronta.
 3. Configurar Valinhos: `boas_vindas_modo = 'avisa'`, copiar o modelo, variável `link_ead`.
 4. `node src/jobs/boas-vindas-sweep.js --tenant=<valinhos> --dry` → conferir; depois `--ativar` uma vez.
 5. Cron diário (e de hora em hora no expediente, para véspera e "como foi").
-6. As mensagens só ficam **visíveis** para a recepção com a aba Boas-vindas (E17-03).
+6. As mensagens só ficam **visíveis** para a recepção com a aba Boas-vindas (E17-03) — deploy do
+   dashboard junto, avisando antes o chat do Compasso/BI (regra 8).
+7. Pela tela **Configurações → Boas-vindas**, subir a imagem do EAD (etapa 1) e o Guia rápido (etapa 5).
+
+**Janela de publicação (decisão do dono no chat do ADR-051):** toda publicação precisa ser reversível,
+testada e comparada com o que roda hoje, e sai **fora do expediente da recepção e dos crons** — evitar
+02h–06h30 e 8h–22h. Reverter = voltar o modo para `desligado` (código) e `git revert` do deploy; as
+migrations são aditivas e ficam.
+
+**Grupos do ADR-051:** as tabelas `boas_vindas_*` pertencem ao grupo `relacionamento`; as colunas
+`boas_vindas_*` de `automacao_config` ao grupo `unidade`. Boas-vindas faz parte de **Atendimento e
+Leads** (chave `LEAD_MANAGER` hoje; `pode_rodar(unidade, 'boas_vindas')` quando existir). Quando
+`plataforma.catalogo_objeto` existir, as migrations 120–125 precisam das linhas de catálogo.
+
+---
+
+## 15. E17-03/04 — a recepção envia e cada unidade monta as suas mensagens
+
+### 15.1 Lead Manager (branch `feat/boas-vindas-e17-01`)
+
+| Rota (`/tenant/:id/boas-vindas/...`) | Quem | O que faz |
+|---|---|---|
+| `GET fila` | leitura | Mensagens prontas/bloqueadas de hoje, com conversa (por `br_phone_key`), texto já preenchido e arquivo atual da etapa |
+| `GET toques/:id` | leitura | Uma mensagem |
+| `POST toques/:id/enviar` `{texto, com_anexo}` | escrita | Reserva (`aprovado`), envia pelo mesmo caminho da Caixa de Entrada (mídia com legenda; áudio antes do texto — R10), grava `enviado` com o texto final e o arquivo usado; se falhar, volta com `erro` |
+| `POST toques/:id/descartar` | escrita | Descarta com motivo |
+| `GET/PUT config` | leitura / gestão | Modo (`desligado`/`avisa`; `auto` recusado), alerta, campos da unidade. Só `UPDATE` das colunas `boas_vindas_*` (regra 1) |
+| `POST copiar-modelo` | gestão | Copia o modelo para a unidade (uma vez) |
+| `PUT etapas/:id` | gestão | Nome, textos, ligada, contrato curto, dias (só etapa do tipo "dias"). Recusa só erro **novo** de régua |
+| `POST/DELETE etapas/:id/anexo` | gestão | Sobe o arquivo (limites do WhatsApp por tipo, sha256, pasta de mídia do tenant) ou tira da mensagem. O arquivo antigo fica — é o histórico do que já foi enviado |
+
+Código: `src/boasVindas/recepcao.js`, `src/boasVindas/configuracao.js`, `src/routes/boas-vindas.js`.
+Testes: `test/boas-vindas-recepcao.itest.js` (11) — total de banco 34 + 50 unitários, verdes no Postgres local.
+
+### 15.2 Dashboard (branch `feat/boas-vindas-e17-03`)
+
+- **Caixa de Entrada → aba Boas-vindas** (com contador): lista das mensagens, cartão acima da conversa
+  com texto editável, prévia do arquivo (imagem, vídeo, áudio, documento), "Enviar com o arquivo",
+  Enviar e Descartar. Sem conversa ainda, o cartão ocupa o centro e o envio abre a conversa. Gerente e
+  admin veem o atalho "Configurar mensagens".
+- **Configurações → Boas-vindas** (gerente/admin): escolher modelo; modo; campos da unidade
+  (`{link_ead}` etc.); dias do alerta; e em **cada mensagem**: nome, dias, ligada, contrato curto,
+  texto do aluno e do responsável com botões dos campos, e o **arquivo** (anexar, trocar, tirar) com
+  prévia, data de envio e a sugestão do modelo. Assim cada unidade faz o seu Guia rápido e a sua arte.
+- O upload vai cru do navegador ao LM (mesmo padrão do `/midia` da Caixa de Entrada); a prévia usa a
+  ponte `/media/:tenant/:arquivo` que já existe.
+- Testes: `dashboard/test/boas-vindas-telas.test.js` (5).
+
+### 15.3 Ainda não feito
+
+- Criar, apagar e reordenar etapas pela tela (hoje: editar as que vieram do modelo).
+- Modo `auto`, alerta "não começou" na recepção (E17-05).
+- Itest Docker no host antes do merge; L1–L3 (§14.4).
