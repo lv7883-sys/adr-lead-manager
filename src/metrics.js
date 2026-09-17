@@ -740,6 +740,21 @@ async function computeFunil(tenantId, { funilPeriod = '6m' } = {}) {
             -- O denominador segue sendo "leads criados no período" — quem nasceu no Regente —, e o
             -- veterano que só apareceu no WhatsApp não entra nem como lead nem como matrícula.
             AND coalesce(desfecho, '') <> 'cliente'
+            -- CONTATO INTERNO NÃO É LEAD (2026-09-17, decisão do Leo: "o funil precisa retratar a
+            -- realidade"). O dono fez uma aula experimental de canto sem nunca trocar mensagem; um
+            -- professor avaliou aula para o filho; uma funcionária tem aula registrada. Os três
+            -- tinham FATO na Extranet, e o OR temFatoExtranetSql acima os trazia de volta ao
+            -- funil como se fossem captação — inflando junho em 3 leads, 3 agendadas e 1 realizada.
+            -- (⚠ sem crases neste comentário: ele vive dentro de um template literal.)
+            --
+            -- O engine já barra contato interno na ENTRADA (internal_contacts); estes são registros
+            -- anteriores a essa barreira. Casa por DÍGITOS porque internal_contacts guarda o
+            -- telefone em formato livre (uns com '+', outros sem).
+            AND NOT EXISTS (
+                  SELECT 1 FROM internal_contacts ic
+                   WHERE ic.tenant_id = leads.tenant_id
+                     AND regexp_replace(ic.phone, '\\D', '', 'g')
+                       = regexp_replace(coalesce(leads.phone, ''), '\\D', '', 'g'))
           GROUP BY 1`,
         [start, end]
       )
