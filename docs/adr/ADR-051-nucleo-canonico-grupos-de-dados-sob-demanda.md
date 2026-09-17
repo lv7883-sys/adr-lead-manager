@@ -138,7 +138,8 @@ CREATE SCHEMA IF NOT EXISTS plataforma;
 
 CREATE TABLE plataforma.unidade (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  nome        text NOT NULL,
+  nome_publico text NOT NULL,            -- marca para clientes (editável; usada em mensagens e boletins). Decisão do Leo, 17/09/2026
+                                         -- razão social NÃO fica aqui: é dado fiscal (grupo financeiro_f1), só leitura na tela "Dados da empresa"
   slug        text UNIQUE NOT NULL,
   criada_em   timestamptz NOT NULL DEFAULT now()
 );
@@ -448,6 +449,11 @@ Exclusões operacionais de baixo risco que ficam como estão: documentos órfão
 - Roteiro: `deploy/fase0/RUNBOOK-J0A.md` (domingo 20/09, 13h–19h). Scripts: `deploy/fase0/backup-v2.sh`, `restore-test.sh`, `contagem-referencia.sh`, `contagem.sql`, `impressoes.sql`, `verifica-cifra.js` (sintaxe verificada).
 - `contagem.sql` e `impressoes.sql` foram testados em produção, só leitura: 310 tabelas em `adr_scheduler`. O banco `evolution` tem **151.122 mensagens (`public.Message`)** e hoje **não está em backup nenhum**. Baseline das impressões em 16/09: 0 mensagens removidas, 0 leads/conversas anonimizados, 45 contratos sem professor, 798 contratos sem tipo de saída.
 - O restic roda por imagem Docker (`restic/restic:0.17.3`), sem instalar pacote no host. Senha do repositório gerada no servidor, com guarda do Leo.
+
+## 10d. Identidade da empresa e implantação guiada (17/09/2026)
+- **Dois nomes (decisão do Leo):** `plataforma.unidade.nome_publico` é a marca para clientes, editável e usada em mensagens e boletins. A **razão social** é dado fiscal (grupo `financeiro_f1`, vinda da API da Extranet ou do checkout) e aparece só para leitura em "Dados da empresa". Os nomes atuais (`app.franquia.nome`, `app.franquia.nome_publico`, `lead_manager.tenants.name`, `tenant_lead_config.school_name`) viram espelhos, com **um único caminho de escrita**.
+- **Valinhos:** nome público = **"Academia do Rock de Valinhos"** (Leo, 17/09/2026).
+- **ADR-052 (implantação guiada):** consome este ADR. Lê "contratado" pela assinatura (até lá `tenant_modules`, via função adaptadora). Os passos de implantação são declarados nos manifestos, e o roteiro é a união deduplicada. O passo "Fonte dos dados" tem as variantes `api_rede` | `credencial_legada` | `nenhuma`. O ADR-051 entrega `provisionar_unidade()`; o ADR-052 orquestra "criar empresa" e usa as migrations LM **140–149**.
 
 ## 12. Regras de implementação (Leo, 16/09/2026)
 1. **Tudo reversível.** Cada passo tem rollback escrito e **testado antes** de ir ao ar. Migrations são aditivas, e o rollback é desligar a flag, reverter o código ou remover só o objeto novo; nunca mexe em dado existente.
