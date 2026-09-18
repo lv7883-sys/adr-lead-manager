@@ -1,4 +1,9 @@
-# Migr 129 — Cron das AULAS EXPERIMENTAIS da agenda da Extranet: 1x por dia, 07:00 America/Sao_Paulo.
+# Migr 129 — Cron das AULAS EXPERIMENTAIS da agenda da Extranet: 1x por dia, 07:00 de São Paulo.
+#
+# ⚠ HORÁRIO EM UTC: `0 10` = 07:00 em São Paulo. O host roda em UTC com o `cron` do Ubuntu (3.0pl1),
+#   que NÃO suporta CRON_TZ (isso é do cronie). Conferido em 2026-09-18: o scrape do dashboard está em
+#   `0 5` com CRON_TZ=America/Sao_Paulo e o log mostra que ele roda às 05:02 UTC = 02:02 de SP. Por isso
+#   este arquivo NÃO usa CRON_TZ — escrever a linha e ela ser ignorada seria pior que não escrever.
 # Antes do expediente, depois do scrape noturno do dashboard (02:00) e antes do 1º sync de leads (08:00).
 #
 # O QUE FAZ: lê a grade mensal (mod_agenda ?experimental=1) de mês-2 a mês+1 e o DETALHE só das aulas
@@ -20,5 +25,4 @@
 #
 # Conferir:  crontab -l | grep extranet-experimentais-sync
 # Log:       /var/log/extranet-experimentais-sync.log
-CRON_TZ=America/Sao_Paulo
-0 7 * * * docker exec adr-lead-manager node /app/src/cadastro/daily-sync-experimentais.js >> /var/log/extranet-experimentais-sync.log 2>&1
+0 10 * * * docker exec adr-lead-manager node /app/src/cadastro/daily-sync-experimentais.js >> /var/log/extranet-experimentais-sync.log 2>&1
