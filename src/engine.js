@@ -904,9 +904,25 @@ async function captureRoutedEstablished(tenantId, channel, externalId, msg, rawB
   const signals = JSON.stringify([route.intent].filter(Boolean));
   // Em conflito, status/review_queue só mudam se o lead não tiver decisão humana/desfecho.
   // O estado da conversa (observação da IA) é sempre atualizado.
+  //
+  // ⚠ E SE NÃO TIVER FATO NA EXTRANET (2026-09-18). Este roteador tira do funil (NOT_LEAD /
+  // REVIEW_QUEUE) quem manda uma mensagem que "não parece de lead novo". Quem já marcou aula,
+  // fez aula ou matriculou manda EXATAMENTE esse tipo de mensagem: "avisa o professor que vou
+  // chegar atrasada", "dá pra remarcar a aula do meu filho?". O classificador lê isso como
+  // conversa de aluno — e está certo sobre a conversa — mas NOT_LEAD significa "nunca foi lead",
+  // e a pessoa some de Leads, Kanban e Reativação.
+  //
+  // Aconteceu com 4 dos 36 que a migração 127 devolveu ao funil em 2026-09-17: menos de 24h
+  // depois, cada um voltou a NOT_LEAD no SEGUNDO EXATO em que mandou mensagem (Ana Cristina
+  // "Anual" 10:35:47, Wagner 11:07:46, ~helo 19:00:23). A 127 tinha limpado review_result — que
+  // era a única trava deste CASE — e os deixou sem proteção.
+  //
+  // Mesma régua do funil do BI e do alerta do Plantão: FATO VENCE CLASSIFICAÇÃO. O caminho de
+  // PENDING acima já não rebaixa o funil; este era o único que rebaixava.
+  const protegido = `(leads.review_result IS NOT NULL OR leads.desfecho IS NOT NULL OR ${stages.temFatoExtranetSql('leads')})`;
   const onConflictSet =
-    `status = CASE WHEN leads.review_result IS NULL AND leads.desfecho IS NULL THEN EXCLUDED.status ELSE leads.status END,
-     review_queue = CASE WHEN leads.review_result IS NULL AND leads.desfecho IS NULL THEN EXCLUDED.review_queue ELSE leads.review_queue END,
+    `status = CASE WHEN NOT ${protegido} THEN EXCLUDED.status ELSE leads.status END,
+     review_queue = CASE WHEN NOT ${protegido} THEN EXCLUDED.review_queue ELSE leads.review_queue END,
      classification_confidence = EXCLUDED.classification_confidence,
      classification_reasoning = EXCLUDED.classification_reasoning,
      classification_signals = EXCLUDED.classification_signals,
