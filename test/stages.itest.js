@@ -5,8 +5,10 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { Client } = require('pg');
+const fs = require('node:fs');
+const path = require('node:path');
 const {
-  stageKey, stageOfLead, isStage, stageSql, funilBucketSql, temFatoExtranetSql, loadStages,
+  stageKey, stageOfLead, isStage, stageSql, funilBucketSql, temFatoExtranetSql, renovacaoSql, loadStages,
   KANBAN_TRANSICOES, STATUS_TO_KEY, KEY_TO_STATUS, PERDIDO_DESFECHOS,
 } = require('../src/stages');
 
@@ -48,7 +50,7 @@ before(async () => {
   await c.query(`
     CREATE SCHEMA IF NOT EXISTS lead_manager;
     CREATE TABLE leads (id serial PRIMARY KEY, tenant_id uuid, status text, desfecho text,
-                        intent text, desfecho_em timestamptz);
+                        intent text, desfecho_em timestamptz, phone text, created_at timestamptz DEFAULT now());
     CREATE TABLE lead_manager.extranet_lead (
       id serial PRIMARY KEY, tenant_id uuid, extranet_id text, lead_id int,
       situacao text, exp_agendada_em timestamptz, exp_realizada_em timestamptz);
@@ -56,7 +58,14 @@ before(async () => {
     -- migr 129: os baldes do funil passaram a consultar a agenda da Extranet. Sem esta tabela o SQL
     -- gerado morre com 42P01 no setup — a mesma armadilha descrita logo acima.
     CREATE TABLE lead_manager.aula_experimental (
-      id serial PRIMARY KEY, tenant_id uuid, aula_id text, lead_id int, status_cod int);`);
+      id serial PRIMARY KEY, tenant_id uuid, aula_id text, lead_id int, status_cod int, aluno text);
+    -- regra dos 60 dias (renovação não é matrícula): o bucket convertido consulta os contratos.
+    CREATE TABLE lead_manager.person (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), display_name text);
+    CREATE TABLE lead_manager.contact_point (id serial PRIMARY KEY, tenant_id uuid, person_id uuid, kind text, value_raw text, br_key text);
+    CREATE TABLE lead_manager.service_account (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), ini_vigencia date, fim_vigencia date);
+    CREATE TABLE lead_manager.account_member (id serial PRIMARY KEY, account_id uuid, person_id uuid, bond text);`);
+  await c.query("DO $$ BEGIN CREATE ROLE lead_manager_user; EXCEPTION WHEN duplicate_object THEN NULL; END $$");   // a 085 dá GRANT
+  await c.query(fs.readFileSync(path.join(__dirname, '..', 'db', 'migrations', '085_br_phone_key.sql'), 'utf8'));
   // todas as combinações status×desfecho×intent → cobertura total da partição e do funil.
   for (const s of STATUSES) for (const d of DESFECHOS) for (const i of INTENTS) {
     await c.query('INSERT INTO leads (tenant_id, status, desfecho, intent) VALUES ($1,$2,$3,$4)', [T1, s, d, i]);
@@ -378,4 +387,69 @@ test('(3m) invariante segue valendo com a agenda: realizadas ⊆ agendadas', asy
       `SELECT count(*)::int n FROM leads WHERE (${funilBucketSql('realizada')}) AND NOT (${funilBucketSql('experimental')})`)).rows[0].n;
     assert.equal(fora, 0);
   } finally { for (const l of ls) await limpa(l); }
+});
+
+// ---- renovação não é matrícula (regra dos 60 dias do BI) --------------------------------------
+// Uma família: telefone do responsável, com um ou mais alunos. contrato(aluno, ini, fim).
+const pessoa = async (nome) => (await c.query('INSERT INTO lead_manager.person (display_name) VALUES ($1) RETURNING id', [nome])).rows[0].id;
+const contrato = async (aluno, responsavel, ini, fim) => {
+  const { rows: [sa] } = await c.query('INSERT INTO lead_manager.service_account (ini_vigencia, fim_vigencia) VALUES ($1,$2) RETURNING id', [ini, fim]);
+  await c.query("INSERT INTO lead_manager.account_member (account_id, person_id, bond) VALUES ($1,$2,'beneficiario')", [sa.id, aluno]);
+  if (responsavel) await c.query("INSERT INTO lead_manager.account_member (account_id, person_id, bond) VALUES ($1,$2,'responsavel')", [sa.id, responsavel]);
+};
+const fone = (p, tel) => c.query("INSERT INTO lead_manager.contact_point (tenant_id, person_id, kind, value_raw, br_key) VALUES ($1,$2,'phone',$3,lead_manager.br_phone_key($3))", [T1, p, tel]);
+const leadMatriculado = async (tel, criado) => (await c.query(
+  "INSERT INTO leads (tenant_id, status, desfecho, phone, created_at) VALUES ($1,'CONVERTED','matriculado',$2,$3) RETURNING id", [T1, tel, criado])).rows[0].id;
+
+test('(4a) renovação dentro de 60 dias NÃO é matrícula; reativação (> 60) é', async () => {
+  const mae = await pessoa('Mae Um'); const filho = await pessoa('Filho Um');
+  await fone(mae, '(19)99111-0001');
+  await contrato(filho, mae, '2026-01-10', '2026-07-10');
+  await contrato(filho, mae, '2026-08-20', '2027-02-20');          // 41 dias depois: renovação
+  const l = await leadMatriculado('+5519991110001', '2026-07-01');
+  assert.equal(await contaLead(l, 'convertido'), 0, 'renovou o filho que já era aluno');
+
+  const mae2 = await pessoa('Mae Dois'); const filho2 = await pessoa('Filho Dois');
+  await fone(mae2, '(19)99111-0002');
+  await contrato(filho2, mae2, '2025-06-01', '2026-01-31');
+  await contrato(filho2, mae2, '2026-05-01', '2026-11-01');        // 90 dias depois: reativação
+  const l2 = await leadMatriculado('+5519991110002', '2026-04-20');
+  assert.equal(await contaLead(l2, 'convertido'), 1, 'voltou depois de 60 dias = matrícula');
+});
+
+test('(4b) julga o PRIMEIRO contrato novo: curso paralelo depois da renovação não vira matrícula', async () => {
+  const a = await pessoa('Aluno Paralelo'); await fone(a, '(19)99111-0003');
+  await contrato(a, null, '2025-05-17', '2026-05-20');
+  await contrato(a, null, '2026-06-17', '2026-12-09');             // renovação (28 dias)
+  await contrato(a, null, '2026-07-29', '2026-10-29');             // 2º curso, sobreposto
+  const l = await leadMatriculado('+5519991110003', '2026-06-15');
+  assert.equal(await contaLead(l, 'convertido'), 0);
+});
+
+test('(4c) aluno NOVO na família é matrícula, mesmo com irmão renovando', async () => {
+  const mae = await pessoa('Mae Tres'); const velho = await pessoa('Irmao Velho'); const novo = await pessoa('Irmao Novo');
+  await fone(mae, '(19)99111-0004');
+  await contrato(velho, mae, '2026-01-01', '2026-07-01');
+  await contrato(velho, mae, '2026-07-15', '2027-01-15');          // renovação
+  await contrato(novo, mae, '2026-07-20', '2027-01-20');           // 1º contrato da vida
+  const l = await leadMatriculado('+5519991110004', '2026-07-05');
+  assert.equal(await contaLead(l, 'convertido'), 1);
+});
+
+test('(4d) aula 220 diz QUEM matriculou: a mãe que fez aula não vira renovação pelo contrato do filho', async () => {
+  const mae = await pessoa('Mae Aluna'); const filho = await pessoa('Filho Da Mae Aluna');
+  await fone(mae, '(19)99111-0005');
+  await contrato(filho, mae, '2026-01-01', '2026-07-01');
+  await contrato(filho, mae, '2026-07-10', '2027-01-10');          // o filho renovou
+  const l = await leadMatriculado('+5519991110005', '2026-06-20');
+  await c.query("INSERT INTO lead_manager.aula_experimental (tenant_id, aula_id, lead_id, status_cod, aluno) VALUES ($1,'a-mae',$2,220,'Mãe Aluna')", [T1, l]);
+  assert.equal(await contaLead(l, 'convertido'), 1, 'quem matriculou foi a mãe (acento ignorado no nome); o contrato dela ainda não chegou');
+});
+
+test('(4e) sem contrato novo nenhum não dá para julgar: conta como matrícula; telefone vazio não casa', async () => {
+  const l = await leadMatriculado('+5519991119999', '2026-08-01');
+  assert.equal(await contaLead(l, 'convertido'), 1);
+  const semFone = await leadMatriculado('', '2026-08-01');
+  assert.equal(await contaLead(semFone, 'convertido'), 1);
+  assert.equal(typeof renovacaoSql, 'function');
 });

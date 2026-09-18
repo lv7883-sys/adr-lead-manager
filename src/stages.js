@@ -115,6 +115,51 @@ const temFatoExtranetSql = (a) =>
                 OR ${_situacaoNorm('el.situacao')} IN ('ganhou', 'matricula', 'matriculado')))
     OR ${_fatoAula(a)})`;   // aula na agenda também é fato: quem marcou aula É lead (migr 129)
 
+// ---- RENOVAÇÃO não é matrícula (regra dos 60 dias, 2026-09-18) --------------------------------
+// Decisão do Leo: "renovação não conta como matrícula se ficar dentro da regra dos 60 dias". É a
+// MESMA regra do BI (dashboard/lib/bi-contratos.js temSucessor, qualidade-snapshot): contrato novo
+// do MESMO aluno que começa até 60 dias depois do fim do anterior = renovação; mais que isso =
+// reativação (conta); sobreposição de 30 dias ou mais = curso paralelo (não é sucessor).
+//
+// Qual contrato julgar: o PRIMEIRO de cada aluno ligado ao telefone do lead, iniciado a partir do
+// lead (menos 7 dias, a mesma folga do contractConvert). Não os seguintes: o Eduardo renovou em
+// 17/06 e abriu um 2º curso em 29/07 — o 2º é paralelo, e julgá-lo diria "matrícula nova" para
+// quem só renovou.
+// Mesmo aluno = mesmo person_id (o cadastro já deduplica pessoa; em 2026-09-18 só 1 nome de aluno
+// aparecia com dois ids). Sem o casamento por nome do BI: custava 14 s por consulta do funil.
+// Qual aluno: pelo telefone (contact_point de qualquer membro da conta). Se a aula experimental com
+// matrícula (220) diz QUEM matriculou, só esse aluno — senão a mãe que fez aula ela mesma viraria
+// "renovação" por causa do contrato do filho.
+// É renovação só se TODOS os primeiros contratos novos têm antecessor: um aluno novo na família já
+// é matrícula. Sem contrato novo nenhum (ainda não entrou no cadastro), não há como julgar — conta.
+// Medido em 2026-09-18: Christiane (Olivia), Eduardo Parma, Karina (Klara/Theodoro/Gustavo), Yohana
+// (Carlo) e Leandro (João Lucas) — gap de 11 a 56 dias, todos alunos que já estavam na escola.
+const _nomeNorm = (x) => `lower(translate(btrim(coalesce(${x}, '')), 'áàâãéêíóôõúüçÁÀÂÃÉÊÍÓÔÕÚÜÇ', 'aaaaeeioooouucaaaaeeioooouuc'))`;
+const _contratosNovosDoLead = (a) => `
+  SELECT DISTINCT ON (ben.person_id) novo.id, novo.ini_vigencia, ben.person_id
+    FROM lead_manager.contact_point cp
+    JOIN lead_manager.account_member am  ON am.person_id = cp.person_id
+    JOIN lead_manager.account_member ben ON ben.account_id = am.account_id AND ben.bond = 'beneficiario'
+    JOIN lead_manager.person pb          ON pb.id = ben.person_id
+    JOIN lead_manager.service_account novo ON novo.id = am.account_id
+   WHERE cp.kind = 'phone' AND cp.tenant_id = ${leadRef(a, 'tenant_id')}
+     AND cp.br_key <> ''
+     AND cp.br_key = lead_manager.br_phone_key(${leadRef(a, 'phone')})   -- br_key ≡ br_phone_key(value_raw), indexado
+     AND novo.ini_vigencia >= (${leadRef(a, 'created_at')} AT TIME ZONE 'America/Sao_Paulo')::date - 7
+     AND (NOT ${_fatoAula(a, AULA_COM_MATRICULA)}
+          OR ${_nomeNorm('pb.display_name')} IN (SELECT ${_nomeNorm('ae.aluno')} FROM lead_manager.aula_experimental ae
+                                                   WHERE ae.lead_id = ${leadRef(a, 'id')} AND ae.status_cod = 220))
+   ORDER BY ben.person_id, novo.ini_vigencia, novo.id`;
+const _temAntecessor = (n) => `EXISTS (
+  SELECT 1 FROM lead_manager.account_member b2
+    JOIN lead_manager.service_account ant ON ant.id = b2.account_id
+   WHERE b2.bond = 'beneficiario' AND b2.person_id = ${n}.person_id
+     AND ant.id <> ${n}.id AND ant.ini_vigencia < ${n}.ini_vigencia AND ant.fim_vigencia IS NOT NULL
+     AND ant.fim_vigencia - ${n}.ini_vigencia < 30
+     AND ${n}.ini_vigencia - ant.fim_vigencia <= 60)`;
+const renovacaoSql = (a) => `(EXISTS (SELECT 1 FROM (${_contratosNovosDoLead(a)}) n WHERE ${_temAntecessor('n')})
+   AND NOT EXISTS (SELECT 1 FROM (${_contratosNovosDoLead(a)}) n WHERE NOT ${_temAntecessor('n')}))`;
+
 // Proxy da coluna "experimental" / bucket "agendada" do funil (Fatia E, preservado). Extraído p/
 // função porque "realizada" o referencia (composição, sem re-declarar a string).
 //
@@ -181,7 +226,9 @@ const STAGES = [
     // experimental à matrícula (migr 129).
     sourceOfTruth: (a) => `(${_fatoMatricula(a)} OR ${_fatoAula(a, AULA_COM_MATRICULA)})`,
     iaSuggestion: null,
-    proxyFallback: (a) => `${col(a, 'desfecho')} = 'matriculado'` },
+    proxyFallback: (a) => `${col(a, 'desfecho')} = 'matriculado'`,
+    // Vale sobre TODAS as fontes (Ganhou, aula 220, desfecho à mão): renovação não é matrícula.
+    exclui: renovacaoSql },
   { ordinal: 6, key: 'perdido',       status: 'PERDIDO',               emoji: '❌', label: 'Perdido',
     requerMotivo: true, column: true },
   // ⚠ 'cliente' (079) NÃO é coluna do kanban nem bucket do funil: é o terminal do PRÉ-EXISTENTE
@@ -250,8 +297,9 @@ function detectSql(stage, alias = 'l') {
   const fontes = [stage.sourceOfTruth, stage.iaSuggestion, stage.proxyFallback]
     .filter(Boolean).map((f) => f(alias)).filter(Boolean);
   if (!fontes.length) return null;
-  if (stage.combina === 'uniao') return `(${fontes.map((f) => `(${f})`).join(' OR ')})`;
-  return `(${fontes[0]})`;
+  const base = stage.combina === 'uniao' ? `(${fontes.map((f) => `(${f})`).join(' OR ')})` : `(${fontes[0]})`;
+  // `exclui`: o que NUNCA conta no bucket, venha de qual fonte vier (ex.: renovação em 'convertido').
+  return stage.exclui ? `(${base} AND NOT ${stage.exclui(alias)})` : base;
 }
 // Fragmento do bucket do funil por key ('experimental'=agendada, 'realizada', 'convertido'=matrícula).
 // alias '' (default aqui) = colunas cruas, como no computeFunil (FROM leads sem alias).
@@ -315,6 +363,6 @@ module.exports = {
   STAGES, KANBAN_STAGES, KANBAN_KEYS, ETAPAS_TRABALHO,
   PERDIDO_DESFECHOS, CLIENTE_DESFECHO, MOTIVOS_PERDA, AULA_REALIZADA, AULA_COM_MATRICULA, KANBAN_TRANSICOES, KEY_TO_STATUS, STATUS_TO_KEY,
   stageKey, stageOfLead, isStage, stageSql,
-  detectSql, funilBucketSql, temFatoExtranetSql, stageCatalog, loadStages,
+  detectSql, funilBucketSql, temFatoExtranetSql, renovacaoSql, stageCatalog, loadStages,
   terminalParaSugestaoSql, sugestaoAtivaSql, isSugestaoAtiva,
 };
