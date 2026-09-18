@@ -11,5 +11,8 @@
 #
 # Conferir:  crontab -l | grep plantao-noturno
 # Log:       /var/log/plantao.log   (grep 'plantao.resumo' — alert:true = precisa de olho)
-CRON_TZ=America/Sao_Paulo
-0 21 * * * docker exec adr-lead-manager node /app/src/jobs/plantao-noturno.js >> /var/log/plantao.log 2>&1
+# ⚠ HORÁRIO EM UTC (2026-09-18): o host roda em UTC com o cron do Ubuntu (3.0pl1), que IGNORA
+#   CRON_TZ. Até esta data a linha CRON_TZ=America/Sao_Paulo estava aqui e o job rodava 3h ANTES do
+#   que este cabeçalho dizia. SP = UTC-3 (sem horário de verão desde 2019).
+#   `0 0` UTC = 21:00 de SP (o resumo lê o banco, não depende da data do relógio).
+0 0 * * * docker exec adr-lead-manager node /app/src/jobs/plantao-noturno.js >> /var/log/plantao.log 2>&1

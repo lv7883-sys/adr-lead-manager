@@ -1,4 +1,4 @@
-# ADR-026 §2.4 — Sincronizador de Recursos: run DIÁRIO às 03:00 (America/Sao_Paulo).
+# ADR-026 §2.4 — Sincronizador de Recursos: run DIÁRIO às 00:00 de SP (03:00 UTC).
 #
 # Madrugada = FORA da janela do scheduler (checagem 07h–22h) → sem contenção na Extranet.
 # Ainda assim, o pg_advisory_lock(2037495811) serializa contra QUALQUER acesso concorrente
@@ -11,6 +11,9 @@
 # Conferir:  crontab -l | grep resources-sync
 # Log:       /var/log/resources-sync.log
 #
-# CRON_TZ garante 03:00 horário de Brasília independente do TZ do host.
-CRON_TZ=America/Sao_Paulo
+# ⚠ HORÁRIO EM UTC (2026-09-18): o host roda em UTC com o cron do Ubuntu (3.0pl1), que IGNORA
+#   CRON_TZ. Até esta data a linha CRON_TZ=America/Sao_Paulo estava aqui e o job rodava 3h ANTES do
+#   que este cabeçalho dizia. SP = UTC-3 (sem horário de verão desde 2019).
+#   MANTIDO em `0 3` UTC = 00:00 de SP, que é o horário em que ele DE FATO sempre rodou. Passar
+#   para 03:00 de SP empurraria o cadastro (que vem 1h depois e leva ~11h30) para dentro da tarde.
 0 3 * * * docker exec adr-lead-manager node /app/src/resources/daily-sync.js >> /var/log/resources-sync.log 2>&1

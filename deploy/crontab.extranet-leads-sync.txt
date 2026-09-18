@@ -17,5 +17,8 @@
 #
 # Conferir:  crontab -l | grep extranet-leads-sync
 # Log:       /var/log/extranet-leads-sync.log
-CRON_TZ=America/Sao_Paulo
-0 8-20/3 * * * docker exec adr-lead-manager node /app/src/cadastro/daily-sync-leads.js >> /var/log/extranet-leads-sync.log 2>&1
+# ⚠ HORÁRIO EM UTC (2026-09-18): o host roda em UTC com o cron do Ubuntu (3.0pl1), que IGNORA
+#   CRON_TZ. Até esta data a linha CRON_TZ=America/Sao_Paulo estava aqui e o job rodava 3h ANTES do
+#   que este cabeçalho dizia. SP = UTC-3 (sem horário de verão desde 2019).
+#   `11-23/3` UTC = 08h, 11h, 14h, 17h, 20h de SP.
+0 11-23/3 * * * docker exec adr-lead-manager node /app/src/cadastro/daily-sync-leads.js >> /var/log/extranet-leads-sync.log 2>&1
