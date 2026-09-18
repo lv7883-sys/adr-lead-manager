@@ -69,9 +69,12 @@ async function processBinding(tenantId, binding, meses) {
         await sync.registrarAulas(c, tenantId, aulas);
         return sync.idsParaDetalhar(c, tenantId, aulas.map((a) => a.aulaId));
       }),
+      // grava cada detalhe na hora (transação curta por aula) — ver o adapter
+      aoDetalhar: (d) => withTenant(tenantId, (c) => sync.aplicarDetalhes(c, tenantId, [d])),
     });
     const stats = await withTenant(tenantId, async (c) => {
-      const detalhadas = await sync.aplicarDetalhes(c, tenantId, snapshot.detalhes);
+      // os detalhes já foram gravados um a um pelo aoDetalhar; aqui só a ligação e o retrato
+      const detalhadas = snapshot.detalhes.length;
       const ligadas = await sync.ligarLeads(c, tenantId);
       return { ...snapshot.stats, meses_lidos: meses, detalhadas, ligadas_agora: ligadas, espelho: await sync.resumo(c, tenantId) };
     });

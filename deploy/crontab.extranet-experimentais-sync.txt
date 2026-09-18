@@ -4,7 +4,7 @@
 #   que NÃO suporta CRON_TZ (isso é do cronie). Conferido em 2026-09-18: o scrape do dashboard está em
 #   `0 5` com CRON_TZ=America/Sao_Paulo e o log mostra que ele roda às 05:02 UTC = 02:02 de SP. Por isso
 #   este arquivo NÃO usa CRON_TZ — escrever a linha e ela ser ignorada seria pior que não escrever.
-# Antes do expediente, depois do scrape noturno do dashboard (02:00) e antes do 1º sync de leads (08:00).
+# Antes do expediente e depois do scrape noturno do dashboard (02:00 de SP).
 #
 # O QUE FAZ: lê a grade mensal (mod_agenda ?experimental=1) de mês-2 a mês+1 e o DETALHE só das aulas
 # novas ou cujo rótulo mudou (ex.: 'Realizada' → 'Realizada com matrícula posterior'). Liga cada aula

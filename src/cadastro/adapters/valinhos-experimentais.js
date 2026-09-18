@@ -107,8 +107,9 @@ function parseDetalhe(html) {
 // coletar: lê as páginas mensais e, das aulas encontradas, detalha as que o sync pedir.
 //   meses          — ['YYYY-MM', …]
 //   precisaDetalhe — async (aulas) => [aulaId…]  (o sync consulta o banco e decide)
+//   aoDetalhar     — async (detalhe) => void      (grava NA HORA; ver abaixo)
 // Snapshot = { aulas: [{ aulaId, rotulo, competencia }], detalhes: [{ aulaId, …parseDetalhe }], stats }
-async function coletar(binding, { meses = [], precisaDetalhe = async () => [] } = {}) {
+async function coletar(binding, { meses = [], precisaDetalhe = async () => [], aoDetalhar = null } = {}) {
   const cfg = binding.config || {};
   const senha = require('../../crypto').decrypt(cfg.credential_enc);
   if (!senha) throw new Error('valinhos-experimentais: credencial vazia/indecifrável no binding');
@@ -156,7 +157,13 @@ async function coletar(binding, { meses = [], precisaDetalhe = async () => [] } 
     const html = await get(`/mod_agenda/detalhar_aula.php?id=${encodeURIComponent(id)}`);
     const d = parseDetalhe(html);
     if (!d) { stats.detalhes_invalidos++; continue; }
-    detalhes.push({ aulaId: String(id), ...d });
+    const det = { aulaId: String(id), ...d };
+    // ⚠ GRAVA CADA DETALHE ASSIM QUE LÊ. A primeira versão juntava todos e o runner gravava no fim:
+    // numa carga inicial de ~110 detalhes (≈45 min de fila), uma queda no minuto 40 jogava fora
+    // tudo. Com o callback, uma queda perde no máximo UMA aula, e o próximo run retoma de onde parou
+    // (idsParaDetalhar só devolve o que ainda não foi lido).
+    if (aoDetalhar) await aoDetalhar(det);
+    detalhes.push(det);
     stats.detalhes_lidos++;
   }
   return { aulas, detalhes, stats };
