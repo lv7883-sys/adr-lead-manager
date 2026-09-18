@@ -1,0 +1,65 @@
+"#" method="post" autocomplete="off">
+			<div class="modal-body">
+				<div class="row">
+																								<div class="col-sm-12">
+								<div class="form-group mb-3">
+									<h5 class="mb-3">Aula experimental</h5>
+								</div>
+							</div>
+															<div class="col-sm-12">
+									<div class="form-group mb-3">
+										<p class="mb-1"><strong>Nome respons&aacute;vel:</strong> Responsavel Ficticio</p>
+										<p class="mb-1"><strong>Nome aluno:</strong> Aluno Ficticio</p>
+										<p class="mb-1"><strong>Idade aluno:</strong> 30 anos</p>
+										<p class="mb-1"><strong>Telefone 1:</strong> (19)99999-0001</p>
+										<p class="mb-1"><strong>Telefone 2:</strong> </p>
+										<p class="mb-1"><strong>E-mail:</strong> ficticio@exemplo.com</p>
+										<p class="mb-1"><strong>Como chegou at&eacute; a escola:</strong> WhatsApp</p>
+									</div>
+								</div>
+																						</div>
+				<div class="row">
+					<div class="col-sm-12">
+						<div class="form-group mb-3">
+							<p class="mb-1"><strong>Data:</strong> 06/08/2026</p>
+							<p class="mb-1"><strong>Curso:</strong> Piano</p>
+						</div>
+					</div>
+				</div>
+				<div class="row">
+					<div class="col-sm-6">
+						<div class="form-group mb-3">
+							<label class="form-label">Professor:</label>
+							<select name="id_prof_subs" id="id_prof_subs" class="form-select" onChange="javascript:mudaProfessorAula();">
+								<option value='56' selected >Denise Damas de Oliveira Morelli</option><option value='56'>Denise Damas de Oliveira Morelli</option><option value='4'>César de Macedo Haddad</option><option value='50'>Thomas de Brito Soares</option><option value='59'>Rafael Leandro Gouveia do Carmo</option><option value='14'>Vitor Mendes Melo Silva</option><option value='40'>Vinícius Santana Arães</option>							</select>
+						</div>
+					</div>
+					<div class="col-sm-6">
+						<div class="form-group mb-3">
+							<label class="form-label">Sala:</label>
+							<select name="sala_avulsa" id="sala_avulsa" class="form-select" onChange="javascript:alteraSala(this.value);">
+								<option value="">Selecione</option>
+								<option value='1' selected >Sala 1 ( Rita Lee - Canto e Teclas )</option><option value='2'>Sala 2 ( Yellow Submarine - Musicalização Infantil )</option><option value='3'>Sala 3 ( Freddie Mercury - Canto e Teclas )</option><option value='4'>Sala 4 ( Mark Knopfler - Cordas )</option><option value='5'>Sala 5 ( Van Halen - Cordas )</option><option value='6'>Sala 6 ( Paul McCartney - Cordas )</option><option value='7'>Sala 7 ( Estúdio Slash )</option><option value='8'>Sala 8 ( Estúdio John Bonham )</option><option value='9'>Sala 9 ( Estúdio Principal )</option>							</select>
+						</div>
+					</div>
+				</div>
+				<div class="row">
+											<div class="col-sm-6">
+							<div class="form-group mb-3">
+								<label class="form-label">In&iacute;cio &agrave;s (hh:mm): <i class="uil uil-asterisk text-danger"></i></label>
+								<input name="ini_novo" type="text" id="ini_novo" class="form-control hora" value="10:00" data-validation="required" data-validation-error-msg="Campo de preenchimento obrigat&oacute;rio" onFocus="javascript:cancelaHorarioSavePendente();" onBlur="javascript:novoHorario(this.value);">
+							</div>
+						</div>
+						<div class="col-sm-6">
+							<div class="form-group mb-3">
+								<label class="form-label">Fim &agrave;s (hh:mm): <i class="uil uil-asterisk text-danger"></i></label>
+								<input name="fim_novo" type="text" id="fim_novo" class="form-control hora" value="11:00" data-validation="required" data-validation-error-msg="Campo de preenchimento obrigat&oacute;rio"  onFocus="javascript:cancelaHorarioSavePendente();" onBlur="javascript:salvaHorarioFim(this.value);" >
+							</div>
+						</div>
+									</div>
+				<div class="row">
+											<div class="col-sm-12">
+							<div class="form-group mb-3">
+								<label class="form-label">Status:</label>
+								<select name="status" id="statusA" class="form-select" onChange="javascript:habilitaReagendamento(this.value);">
+									<option value='0'>Prevista</option><option value='99'>Prevista Online</option><option value='100'>Confirmada pelo aluno</option><option value='200'>Realizada</option><option value='210'>Realizada sem matrícula</option><option value='220'>Realizada com matrícula posterior</option><option value='230'>Realizada Online</option><option value='300'>Falta do aluno</option><option value='305'>Falta do professor</option><option value='310' selected >Cancelada pelo aluno</option><option value='320'>Cancelada pelo professor</option>								</select>

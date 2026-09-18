@@ -52,7 +52,11 @@ before(async () => {
     CREATE TABLE lead_manager.extranet_lead (
       id serial PRIMARY KEY, tenant_id uuid, extranet_id text, lead_id int,
       situacao text, exp_agendada_em timestamptz, exp_realizada_em timestamptz);
-    CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, stage_definitions jsonb);`);
+    CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, stage_definitions jsonb);
+    -- migr 129: os baldes do funil passaram a consultar a agenda da Extranet. Sem esta tabela o SQL
+    -- gerado morre com 42P01 no setup — a mesma armadilha descrita logo acima.
+    CREATE TABLE lead_manager.aula_experimental (
+      id serial PRIMARY KEY, tenant_id uuid, aula_id text, lead_id int, status_cod int);`);
   // todas as combinações status×desfecho×intent → cobertura total da partição e do funil.
   for (const s of STATUSES) for (const d of DESFECHOS) for (const i of INTENTS) {
     await c.query('INSERT INTO leads (tenant_id, status, desfecho, intent) VALUES ($1,$2,$3,$4)', [T1, s, d, i]);
@@ -297,4 +301,81 @@ test('(3h) marcou aula E matriculou = aula realizada, mesmo sem o carimbo de rea
     await c.query('DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1', [lead.id]);
     await c.query('DELETE FROM leads WHERE id=$1', [lead.id]);
   }
+});
+
+// ---- AGENDA DA EXTRANET (migr 129, 2026-09-18) -------------------------------------------------
+// A fonte que não deduz: uma linha por aula experimental, com o resultado em código.
+const aula = (leadId, cod) => c.query(
+  `INSERT INTO lead_manager.aula_experimental (tenant_id, aula_id, lead_id, status_cod) VALUES ($1,$2,$3,$4)`,
+  [T1, `itest-aula-${leadId}-${cod}`, leadId, cod]);
+const umLead = async () => (await c.query(
+  `INSERT INTO leads (tenant_id, status) VALUES ($1,'QUALIFYING') RETURNING id`, [T1])).rows[0].id;
+const contaLead = async (id, k) => (await c.query(
+  `SELECT count(*)::int n FROM leads WHERE id=$1 AND (${funilBucketSql(k)})`, [id])).rows[0].n;
+const limpa = async (id) => {
+  await c.query('DELETE FROM lead_manager.aula_experimental WHERE lead_id=$1', [id]);
+  await c.query('DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1', [id]);
+  await c.query('DELETE FROM leads WHERE id=$1', [id]);
+};
+
+test('(3i) agenda: aula realizada conta como agendada E realizada; cancelada só como agendada', async () => {
+  const realizou = await umLead(); const cancelou = await umLead();
+  try {
+    await aula(realizou, 200);
+    await aula(cancelou, 310);
+    assert.equal(await contaLead(realizou, 'experimental'), 1, 'realizada é agendada');
+    assert.equal(await contaLead(realizou, 'realizada'), 1, '200 = realizada');
+    assert.equal(await contaLead(cancelou, 'experimental'), 1, 'cancelou, mas MARCOU: é agendada');
+    assert.equal(await contaLead(cancelou, 'realizada'), 0, '310 (cancelada pelo aluno) não é realizada');
+    for (const cod of [210, 220, 230]) {
+      const l = await umLead();
+      try { await aula(l, cod); assert.equal(await contaLead(l, 'realizada'), 1, `${cod} é realizada`); }
+      finally { await limpa(l); }
+    }
+  } finally { await limpa(realizou); await limpa(cancelou); }
+});
+
+test('(3j) agenda MANDA sobre a presunção "marcou + matriculou"', async () => {
+  // A presunção da correção rápida existe para quem não tem registro na agenda. Havendo registro, o
+  // código decide — aqui a pessoa cancelou a aula e matriculou mesmo assim: NÃO houve aula.
+  const l = await umLead();
+  try {
+    await c.query(`INSERT INTO lead_manager.extranet_lead (tenant_id, extranet_id, lead_id, situacao, exp_agendada_em)
+      VALUES ($1,$2,$3,'Ganhou', now())`, [T1, `itest-pres-${l}`, l]);
+    assert.equal(await contaLead(l, 'realizada'), 1, 'sem agenda: vale a presunção');
+    await aula(l, 310);
+    assert.equal(await contaLead(l, 'realizada'), 0, 'com agenda dizendo cancelada: não é realizada');
+  } finally { await limpa(l); }
+});
+
+test('(3k) agenda: "Realizada com matrícula posterior" (220) é matrícula', async () => {
+  const l = await umLead();
+  try {
+    assert.equal(await contaLead(l, 'convertido'), 0);
+    await aula(l, 220);
+    assert.equal(await contaLead(l, 'convertido'), 1, '220 = a própria Extranet ligando aula → matrícula');
+    await c.query('DELETE FROM lead_manager.aula_experimental WHERE lead_id=$1', [l]);
+    await aula(l, 200);
+    assert.equal(await contaLead(l, 'convertido'), 0, '200 (realizada sem matrícula) não é matrícula');
+  } finally { await limpa(l); }
+});
+
+test('(3l) agenda: aula registrada também é FATO que tira o lead do descarte', async () => {
+  const { rows: [l] } = await c.query(`INSERT INTO leads (tenant_id, status) VALUES ($1,'NOT_LEAD') RETURNING id`, [T1]);
+  try {
+    const fato = async () => (await c.query(`SELECT count(*)::int n FROM leads WHERE id=$1 AND ${temFatoExtranetSql('leads')}`, [l.id])).rows[0].n;
+    assert.equal(await fato(), 0);
+    await aula(l.id, 100);
+    assert.equal(await fato(), 1, 'quem marcou aula É lead, mesmo que o classificador tenha descartado');
+  } finally { await limpa(l.id); }
+});
+
+test('(3m) invariante segue valendo com a agenda: realizadas ⊆ agendadas', async () => {
+  const ls = [];
+  try {
+    for (const cod of [0, 100, 200, 210, 220, 230, 300, 305, 310, 320]) { const l = await umLead(); ls.push(l); await aula(l, cod); }
+    const fora = (await c.query(
+      `SELECT count(*)::int n FROM leads WHERE (${funilBucketSql('realizada')}) AND NOT (${funilBucketSql('experimental')})`)).rows[0].n;
+    assert.equal(fora, 0);
+  } finally { for (const l of ls) await limpa(l); }
 });

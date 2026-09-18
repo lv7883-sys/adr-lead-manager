@@ -1,0 +1,24 @@
+# Migr 129 — Cron das AULAS EXPERIMENTAIS da agenda da Extranet: 1x por dia, 07:00 America/Sao_Paulo.
+# Antes do expediente, depois do scrape noturno do dashboard (02:00) e antes do 1º sync de leads (08:00).
+#
+# O QUE FAZ: lê a grade mensal (mod_agenda ?experimental=1) de mês-2 a mês+1 e o DETALHE só das aulas
+# novas ou cujo rótulo mudou (ex.: 'Realizada' → 'Realizada com matrícula posterior'). Liga cada aula
+# ao lead pelo telefone. É a fonte das barras "aulas agendadas" e "aulas realizadas" do funil do BI.
+#
+# CUSTO: ~25s de fila por busca na Extranet (throttle compartilhado). Rotina típica: 4 grades + poucos
+# detalhes ≈ 2–5 min. LOCK: advisory lock POR FETCH, o mesmo do cadastro/leads/dashboard.
+#
+# IDEMPOTENTE: upsert por (tenant_id, aula_id). Kill-switch: extranet_lead_mode='off' no tenant pula.
+#
+# Instalar no HOST (crontab do root) — idempotente:
+#   ( crontab -l 2>/dev/null | grep -v 'extranet-experimentais-sync'; \
+#     grep -vE '^\s*#' /apps/lead-manager/deploy/crontab.extranet-experimentais-sync.txt ) | crontab -
+#
+# Carga inicial / reprocessar (roda UMA vez, ~50 min para jun–set):
+#   docker exec -e EXTRANET_EXP_MAX_DETALHES=200 adr-lead-manager \
+#     node /app/src/cadastro/daily-sync-experimentais.js --desde=2026-06
+#
+# Conferir:  crontab -l | grep extranet-experimentais-sync
+# Log:       /var/log/extranet-experimentais-sync.log
+CRON_TZ=America/Sao_Paulo
+0 7 * * * docker exec adr-lead-manager node /app/src/cadastro/daily-sync-experimentais.js >> /var/log/extranet-experimentais-sync.log 2>&1

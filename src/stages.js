@@ -95,12 +95,25 @@ const _fatoMatricula = (a) =>
 // A regra é a mesma da régua toda: FATO vence classificação. Quem marcou aula na Extranet É lead,
 // independentemente do que o gate decidiu. E de quebra torna o falso-positivo do Filtro MENSURÁVEL
 // — o Plantão dizia "falso-positivo não verificável com o gate ligado"; este EXISTS é a verificação.
+// ---- FATO da AGENDA da Extranet (migr 129, 2026-09-18) --------------------------------------
+// Uma linha por aula experimental, com o resultado em CÓDIGO e o lead ligado pelo telefone. É a
+// fonte que não deduz: os carimbos do extranet_lead dependem de o sync de 3h FLAGRAR a situação na
+// tela de leads, e perdiam a aula de quem matriculava logo depois (dos 15 que marcaram e
+// matricularam, só 4 tinham a aula registrada). A agenda registra cada aula, com resultado.
+//   200 Realizada · 210 Realizada sem matrícula · 220 Realizada com matrícula posterior · 230 Online
+const AULA_REALIZADA = [200, 210, 220, 230];
+const AULA_COM_MATRICULA = [220];
+const _fatoAula = (a, codigos) =>
+  `EXISTS (SELECT 1 FROM lead_manager.aula_experimental ae
+            WHERE ae.lead_id = ${leadRef(a, 'id')}${codigos ? ` AND ae.status_cod IN (${codigos.join(', ')})` : ''})`;
+
 const temFatoExtranetSql = (a) =>
-  `EXISTS (SELECT 1 FROM lead_manager.extranet_lead el
+  `(EXISTS (SELECT 1 FROM lead_manager.extranet_lead el
             WHERE el.lead_id = ${leadRef(a, 'id')}
               AND (el.exp_agendada_em IS NOT NULL
                 OR el.exp_realizada_em IS NOT NULL
-                OR ${_situacaoNorm('el.situacao')} IN ('ganhou', 'matricula', 'matriculado')))`;
+                OR ${_situacaoNorm('el.situacao')} IN ('ganhou', 'matricula', 'matriculado')))
+    OR ${_fatoAula(a)})`;   // aula na agenda também é fato: quem marcou aula É lead (migr 129)
 
 // Proxy da coluna "experimental" / bucket "agendada" do funil (Fatia E, preservado). Extraído p/
 // função porque "realizada" o referencia (composição, sem re-declarar a string).
@@ -132,7 +145,10 @@ const STAGES = [
     dica: 'Aula experimental agendada', column: true,
     // bucket "agendada" do funil. Passo 2 LIGADO: FATO da Extranet unido ao proxy.
     combina: 'uniao',           // ver detectSql — decisão do Leo 2026-08-26 (cobertura)
-    sourceOfTruth: (a) => _fatoExp(a, 'exp_agendada_em'),
+    // FATO = carimbo da tela de leads OU aula registrada na agenda (qualquer resultado, inclusive
+    // cancelada: a pessoa MARCOU). A agenda é a fonte forte; o carimbo segue na união para quem tem
+    // aula anterior ao espelho da agenda (migr 129 começa em jun/2026).
+    sourceOfTruth: (a) => `(${_fatoExp(a, 'exp_agendada_em')} OR ${_fatoAula(a)})`,
     iaSuggestion:  null,        // futuro: suggested_stage='experimental' acima de limiar de confiança
     proxyFallback: (a) => _experimentalProxy(a) },
   { ordinal: 4, key: 'realizada',     status: null,                    emoji: '🎯', label: 'Experimental realizada',
@@ -143,7 +159,11 @@ const STAGES = [
     // carimbo só nasce se o sync de 3h FLAGRAR a situação 'Exp. Realizada' — e quem matricula logo
     // depois da aula pula direto para 'Ganhou'. Medido em 2026-09-18: dos 15 leads que marcaram aula
     // e matricularam, só 4 tinham o carimbo de realizada. Marcou + matriculou = a aula aconteceu.
-    sourceOfTruth: (a) => `(${_fatoExp(a, 'exp_realizada_em')} OR (${_fatoExp(a, 'exp_agendada_em')} AND ${_fatoMatricula(a)}))`,
+    // A agenda (migr 129) é a prova direta: código 200/210/220/230. A presunção "marcou E matriculou"
+    // (correção rápida de 2026-09-18) fica só para quem NÃO tem aula na agenda — quando há registro,
+    // o código manda, inclusive se disser que a aula foi cancelada e a pessoa matriculou mesmo assim.
+    sourceOfTruth: (a) => `(${_fatoExp(a, 'exp_realizada_em')} OR ${_fatoAula(a, AULA_REALIZADA)}
+      OR (${_fatoExp(a, 'exp_agendada_em')} AND ${_fatoMatricula(a)} AND NOT ${_fatoAula(a)}))`,
     iaSuggestion:  null,
     // Proxy negativo (Fatia E): dentro de "agendada" E chegou a um desfecho que não é no-show. Ele
     // COLAPSA quando o lead converte (o move sobrescreve status e o lead sai de _experimentalProxy)
@@ -157,7 +177,9 @@ const STAGES = [
     // preenchido (44 de 49 em 'Exp. Agendada', 18 de 21 em 'Exp. Realizada'). A recepção atende e
     // não fecha o registro — o funil estava medindo quem lembrou de preencher, não quem converteu.
     combina: 'uniao',
-    sourceOfTruth: (a) => _fatoMatricula(a),
+    // + 'Realizada com matrícula posterior' (código 220) na agenda: a própria Extranet ligando a aula
+    // experimental à matrícula (migr 129).
+    sourceOfTruth: (a) => `(${_fatoMatricula(a)} OR ${_fatoAula(a, AULA_COM_MATRICULA)})`,
     iaSuggestion: null,
     proxyFallback: (a) => `${col(a, 'desfecho')} = 'matriculado'` },
   { ordinal: 6, key: 'perdido',       status: 'PERDIDO',               emoji: '❌', label: 'Perdido',
@@ -291,7 +313,7 @@ async function loadStages(tenantId, deps = {}) {
 
 module.exports = {
   STAGES, KANBAN_STAGES, KANBAN_KEYS, ETAPAS_TRABALHO,
-  PERDIDO_DESFECHOS, CLIENTE_DESFECHO, MOTIVOS_PERDA, KANBAN_TRANSICOES, KEY_TO_STATUS, STATUS_TO_KEY,
+  PERDIDO_DESFECHOS, CLIENTE_DESFECHO, MOTIVOS_PERDA, AULA_REALIZADA, AULA_COM_MATRICULA, KANBAN_TRANSICOES, KEY_TO_STATUS, STATUS_TO_KEY,
   stageKey, stageOfLead, isStage, stageSql,
   detectSql, funilBucketSql, temFatoExtranetSql, stageCatalog, loadStages,
   terminalParaSugestaoSql, sugestaoAtivaSql, isSugestaoAtiva,
