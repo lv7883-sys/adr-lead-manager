@@ -69,8 +69,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON lead_manager.leads, lead_manager.lead_ev
   lead_manager.tenant_lead_config, lead_manager.stage_autoapply_log TO lead_manager_user;
 SQL
 
-echo "[itest] migrations 085 (br_phone_key) + 102 (extranet_lead)…"
-for m in 085_br_phone_key 102_extranet_leads; do
+echo "[itest] migrations 085 (br_phone_key) + 102 (extranet_lead) + 106 (carimbos exp_*) + 130 (created_at do cadastro)…"
+for m in 085_br_phone_key 102_extranet_leads 106_extranet_exp_carimbos 130_lead_extranet_nasce_no_cadastro; do
   docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest < "$ROOT/db/migrations/${m}.sql" >/dev/null
 done
 

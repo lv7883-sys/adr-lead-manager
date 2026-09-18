@@ -101,13 +101,18 @@ async function matchOuCria(c, tenantId, r, stats) {
     const phone = telBR.toE164BR(r.foneRaw);
     if (!phone) { stats.sem_telefone++; return null; }
     // blindagem de corrida com o webhook (molde engine.js:1576) — conflito exato de phone
+    //
+    // NASCE NA DATA DO CADASTRO NA EXTRANET (migr 130). O funil do BI conta o lead no mês de
+    // created_at; com o default now(), a 1ª execução do sync (11/08/2026) criou de uma vez 33 leads
+    // que a recepção tinha cadastrado em mai/jun/jul — e agosto ganhou 21 leads, 6 agendadas e 2
+    // realizadas que eram de outros meses. LEAST: nunca no futuro (relógio da Extranet adiantado).
     const ins = await c.query(
-      `INSERT INTO lead_manager.leads (tenant_id, name, phone, status, origem)
-       VALUES ($1,$2,$3,'NEW','extranet')
+      `INSERT INTO lead_manager.leads (tenant_id, name, phone, status, origem, created_at)
+       VALUES ($1,$2,$3,'NEW','extranet', LEAST(now(), COALESCE($4::timestamptz, now())))
        ON CONFLICT (tenant_id, phone) WHERE phone IS NOT NULL
        DO UPDATE SET updated_at=now()
        RETURNING id, (xmax = 0) AS inserted`,
-      [tenantId, r.nome || phone, phone]);
+      [tenantId, r.nome || phone, phone, r.dataCadastro || null]);
     leadId = ins.rows[0].id;
     if (ins.rows[0].inserted) stats.leads_criados++; else stats.linkados++;
   }

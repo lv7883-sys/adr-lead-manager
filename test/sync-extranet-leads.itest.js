@@ -204,3 +204,28 @@ test('(i) CROSS-TENANT = 0: espelho e leads de A invisíveis a B', async () => {
   assert.equal(eB, null, 'X2 (só de A) invisível a B');
   assert.equal((await leadsPorFone(B, '%99630755%')).length, 0, 'lead de A invisível a B');
 });
+
+test('(n) lead CRIADO pelo sync nasce na data do cadastro da Extranet (migr 130)', async () => {
+  // Bug de 11/08/2026: a 1ª execução criou com now() 33 leads cadastrados em mai–jul, e o funil do
+  // BI (que conta no mês de created_at) jogou todos em agosto.
+  await sync(A, [row('X30', { foneRaw: '(19)99888-0030', dataCadastro: '2026-05-20T10:00:00-03:00' })]);
+  const e = await espelho(A, 'X30');
+  const criado = await withTenant(A, async (c) => (await c.query(
+    `SELECT to_char(created_at AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD HH24:MI') d FROM lead_manager.leads WHERE id=$1`,
+    [e.lead_id])).rows[0].d);
+  assert.equal(criado, '2026-05-20 10:00', 'mês do cadastro, não o do sync');
+
+  // cadastro "no futuro" (relógio da Extranet adiantado) nunca empurra o lead para frente
+  await sync(A, [row('X31', { foneRaw: '(19)99888-0031', dataCadastro: '2099-01-01T10:00:00-03:00' })]);
+  const e2 = await espelho(A, 'X31');
+  const futuro = await withTenant(A, async (c) => (await c.query(
+    'SELECT created_at <= now() ok FROM lead_manager.leads WHERE id=$1', [e2.lead_id])).rows[0].ok);
+  assert.equal(futuro, true);
+
+  // lead que JÁ EXISTIA (WhatsApp) e só é ligado pelo sync: created_at intocado
+  const pre = await mkLead(A, { phone: '+5519998880032' });
+  const antes = await withTenant(A, async (c) => (await c.query('SELECT created_at FROM lead_manager.leads WHERE id=$1', [pre])).rows[0].created_at);
+  await sync(A, [row('X32', { foneRaw: '(19)99888-0032', dataCadastro: '2026-01-10T10:00:00-03:00' })]);
+  const depois = await withTenant(A, async (c) => (await c.query('SELECT created_at FROM lead_manager.leads WHERE id=$1', [pre])).rows[0].created_at);
+  assert.equal(depois.getTime(), antes.getTime());
+});
