@@ -104,8 +104,15 @@ const temFatoExtranetSql = (a) =>
 
 // Proxy da coluna "experimental" / bucket "agendada" do funil (Fatia E, preservado). Extraído p/
 // função porque "realizada" o referencia (composição, sem re-declarar a string).
+//
+// ⚠ SEM intent='SCHEDULE_INTEREST' desde 2026-09-18. Esse intent é a IA percebendo que a pessoa
+// QUER marcar ("queria agendar uma aula"), não que marcou. Contá-lo como aula agendada inflava o
+// denominador de "agendada → realizada": dos 123 leads que o funil chamava de "agendados" nos
+// últimos 6 meses, 35 só tinham dito que queriam — e a taxa caía para 33%, enquanto a agenda da
+// Extranet mostrava 63–78% das aulas acontecendo. O Leo olhou e disse que o número parecia irreal.
+// Interesse em marcar é sinal de temperatura (metrics.js ainda usa para "quente"), não de funil.
 const _experimentalProxy = (a) =>
-  `${col(a, 'intent')} = 'SCHEDULE_INTEREST' OR ${col(a, 'status')} = 'EXPERIMENTAL_AGENDADA' OR ${col(a, 'desfecho')} = 'nao_compareceu_aula'`;
+  `${col(a, 'status')} = 'EXPERIMENTAL_AGENDADA' OR ${col(a, 'desfecho')} = 'nao_compareceu_aula'`;
 
 // ================================================================================================
 // STAGES — a régua ordenada. `column:true` = é coluna do kanban (partição). Estágios de funil
@@ -132,7 +139,11 @@ const STAGES = [
     column: false, funilOnly: true,
     // bucket "realizada" do funil. FATO = aula aconteceu de verdade ('Exp. Realizada' na Extranet).
     combina: 'uniao',
-    sourceOfTruth: (a) => _fatoExp(a, 'exp_realizada_em'),
+    // FATO = carimbo 'Exp. Realizada' OU (marcou aula E matriculou). O segundo termo existe porque o
+    // carimbo só nasce se o sync de 3h FLAGRAR a situação 'Exp. Realizada' — e quem matricula logo
+    // depois da aula pula direto para 'Ganhou'. Medido em 2026-09-18: dos 15 leads que marcaram aula
+    // e matricularam, só 4 tinham o carimbo de realizada. Marcou + matriculou = a aula aconteceu.
+    sourceOfTruth: (a) => `(${_fatoExp(a, 'exp_realizada_em')} OR (${_fatoExp(a, 'exp_agendada_em')} AND ${_fatoMatricula(a)}))`,
     iaSuggestion:  null,
     // Proxy negativo (Fatia E): dentro de "agendada" E chegou a um desfecho que não é no-show. Ele
     // COLAPSA quando o lead converte (o move sobrescreve status e o lead sai de _experimentalProxy)

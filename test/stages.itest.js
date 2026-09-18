@@ -81,12 +81,24 @@ test('(2) stageSql ≡ stageOfLead (SQL == JS) linha a linha na base', async () 
   }
 });
 
-test('(3) funilBucketSql: Passo 2 UNE fato+proxy — nunca conta menos que o proxy antigo', async () => {
+test('(3) funilBucketSql: Passo 2 UNE fato+proxy — nunca conta menos que o proxy SEM o intent', async () => {
   const cnt = async (frag) => (await c.query(`SELECT count(*)::int n FROM leads WHERE ${frag}`)).rows[0].n;
-  // A união é MONOTÔNICA: quem contava pelo proxy continua contando. Não vale igualdade — o carimbo
-  // da Extranet ADICIONA justamente os leads que a conversão apagava do proxy.
-  assert.ok(await cnt(funilBucketSql('experimental')) >= await cnt(OLD_AGENDADA), 'agendadas ⊇ proxy');
-  assert.ok(await cnt(funilBucketSql('realizada')) >= await cnt(OLD_REALIZADA), 'realizadas ⊇ proxy');
+  // A união é MONOTÔNICA em relação ao proxy de AGENDAMENTO REAL (status/no-show): quem contava por
+  // ele continua contando, e o carimbo da Extranet adiciona quem a conversão apagou.
+  //
+  // ⚠ Até 2026-09-18 a comparação era com OLD_AGENDADA, que incluía intent='SCHEDULE_INTEREST'. Esse
+  // intent é a IA percebendo que a pessoa QUER marcar — não que marcou. Ele saiu do proxy (35 dos 123
+  // "agendados" de 6 meses eram só interesse, e a taxa agendada→realizada caía para 33% contra os
+  // 63–78% da agenda da Extranet). Então aqui a régua antiga é comparada SEM esse termo, e o (3g)
+  // trava o contrário: interesse sozinho NÃO conta.
+  const AGENDAMENTO_REAL = "status = 'EXPERIMENTAL_AGENDADA' OR desfecho = 'nao_compareceu_aula'";
+  const REALIZADA_REAL = `(${AGENDAMENTO_REAL}) AND desfecho IS NOT NULL AND desfecho <> 'nao_compareceu_aula'`;
+  assert.ok(await cnt(funilBucketSql('experimental')) >= await cnt(AGENDAMENTO_REAL), 'agendadas ⊇ agendamento real');
+  assert.ok(await cnt(funilBucketSql('realizada')) >= await cnt(REALIZADA_REAL), 'realizadas ⊇ proxy real');
+  // E o antigo CONTAVA MAIS — exatamente os leads só com intent. A diferença tem de existir,
+  // senão o teste não está exercitando a mudança.
+  assert.ok(await cnt(OLD_AGENDADA) > await cnt(funilBucketSql('experimental')),
+    'o proxy antigo contava mais (o intent inflava) — sem diferença, a base não cobre o caso');
   // 'convertido' TAMBÉM une desde 2026-08-28 (fato 'Ganhou' da Extranet ∪ desfecho preenchido).
   // Sem linha no espelho a união colapsa no proxy, então aqui a igualdade ainda vale — o caso com
   // fato é exercitado no (3d), que semeia o 'Ganhou'.
@@ -240,4 +252,49 @@ test('(6) loadStages sem tabela/erro → default puro (degrada elegante)', async
   assert.equal(out.length, 8, 'régua completa (inclui realizada funil-only e cliente pré-existente/079)');
   for (const s of out) assert.equal(s.definition, null);
   assert.deepEqual(PERDIDO_DESFECHOS.includes('nao_compareceu_aula'), true);
+});
+
+test('(3g) INTERESSE em marcar não é aula agendada (2026-09-18)', async () => {
+  // intent='SCHEDULE_INTEREST' é a IA percebendo "quero marcar uma aula". Até 2026-09-18 isso
+  // contava como aula agendada, e 35 dos 123 "agendados" de 6 meses eram só interesse. A taxa
+  // agendada→realizada caía para 33% contra 63–78% da agenda real da Extranet.
+  const { rows: [lead] } = await c.query(
+    `INSERT INTO leads (tenant_id, status, intent) VALUES ($1,'QUALIFYING','SCHEDULE_INTEREST') RETURNING id`, [T1]);
+  const conta = async (k) => (await c.query(
+    `SELECT count(*)::int n FROM leads WHERE id=$1 AND (${funilBucketSql(k)})`, [lead.id])).rows[0].n;
+  try {
+    assert.equal(await conta('experimental'), 0, 'só interesse, sem aula marcada: NÃO é agendada');
+    // quando a aula é marcada de verdade (fato da Extranet), passa a contar
+    await c.query(
+      `INSERT INTO lead_manager.extranet_lead (tenant_id, extranet_id, lead_id, situacao, exp_agendada_em)
+       VALUES ($1,$2,$3,'Exp. Agendada', now())`, [T1, `itest-int-${lead.id}`, lead.id]);
+    assert.equal(await conta('experimental'), 1, 'com aula marcada na Extranet: é agendada');
+  } finally {
+    await c.query('DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1', [lead.id]);
+    await c.query('DELETE FROM leads WHERE id=$1', [lead.id]);
+  }
+});
+
+test('(3h) marcou aula E matriculou = aula realizada, mesmo sem o carimbo de realizada', async () => {
+  // O carimbo exp_realizada_em só nasce se o sync de 3h FLAGRAR 'Exp. Realizada'; quem matricula logo
+  // depois da aula pula direto para 'Ganhou'. Medido: dos 15 que marcaram e matricularam, só 4
+  // tinham o carimbo. Marcou + matriculou prova que a aula aconteceu.
+  const { rows: [lead] } = await c.query(
+    `INSERT INTO leads (tenant_id, status) VALUES ($1,'QUALIFYING') RETURNING id`, [T1]);
+  const conta = async (k) => (await c.query(
+    `SELECT count(*)::int n FROM leads WHERE id=$1 AND (${funilBucketSql(k)})`, [lead.id])).rows[0].n;
+  try {
+    // marcou, ainda não matriculou, sem carimbo de realizada: NÃO é realizada
+    await c.query(
+      `INSERT INTO lead_manager.extranet_lead (tenant_id, extranet_id, lead_id, situacao, exp_agendada_em)
+       VALUES ($1,$2,$3,'Exp. Agendada', now())`, [T1, `itest-mr-${lead.id}`, lead.id]);
+    assert.equal(await conta('realizada'), 0, 'só marcou: não dá para afirmar que a aula aconteceu');
+    // matriculou (situação vira Ganhou, carimbo de agendada permanece)
+    await c.query(`UPDATE lead_manager.extranet_lead SET situacao='Ganhou' WHERE lead_id=$1`, [lead.id]);
+    assert.equal(await conta('realizada'), 1, 'marcou + matriculou = realizada');
+    assert.equal(await conta('experimental'), 1, 'e continua agendada (realizada ⊆ agendada)');
+  } finally {
+    await c.query('DELETE FROM lead_manager.extranet_lead WHERE lead_id=$1', [lead.id]);
+    await c.query('DELETE FROM leads WHERE id=$1', [lead.id]);
+  }
 });

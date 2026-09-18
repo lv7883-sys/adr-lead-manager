@@ -13,9 +13,10 @@ const TAXA_NOVA = `SELECT count(*) FILTER (WHERE status='enviado')::int env,
 const TAXA_ANTIGA = `SELECT count(*) FILTER (WHERE status='enviado')::int env,
                             count(*) FILTER (WHERE status IN ('erro','pulado'))::int falhou
                        FROM envio_log WHERE franquia_id=$1`;
-// #2 — mirror do FILTER de "agendada" (metrics.js computeFunil), novo (EXPERIMENTAL_AGENDADA).
+// #2 — mirror do FILTER de "agendada" (stages.js _experimentalProxy), novo (EXPERIMENTAL_AGENDADA).
+// Sem intent SCHEDULE_INTEREST desde 2026-09-18: interesse em marcar não é aula marcada (ver stages.js).
 const AGENDADAS = `SELECT count(*) FILTER (
-    WHERE intent='SCHEDULE_INTEREST' OR status='EXPERIMENTAL_AGENDADA' OR desfecho='nao_compareceu_aula'
+    WHERE status='EXPERIMENTAL_AGENDADA' OR desfecho='nao_compareceu_aula'
   )::int n FROM leads WHERE status NOT IN ('NOT_LEAD','REVIEW_QUEUE')`;
 
 before(async () => {
@@ -29,7 +30,7 @@ before(async () => {
   const lead = (st, intent, desf) => c.query(`INSERT INTO leads (status, intent, desfecho) VALUES ($1,$2,$3)`, [st, intent, desf]);
   await lead('EXPERIMENTAL_AGENDADA', null, null);         // conta (status real de agendamento)
   await lead('QUALIFIED', null, null);                      // NÃO conta mais (era o proxy antigo)
-  await lead('QUALIFYING', 'SCHEDULE_INTEREST', null);      // conta (intent)
+  await lead('QUALIFYING', 'SCHEDULE_INTEREST', null);      // NÃO conta (só interesse; desde 2026-09-18)
   await lead('QUALIFYING', null, 'nao_compareceu_aula');    // conta (desfecho)
   await lead('QUALIFYING', null, null);                     // não conta
   await lead('NOT_LEAD', null, 'nao_compareceu_aula');      // fora do universo
@@ -50,8 +51,8 @@ test('(1) taxa envio-sem-erro: exclui pulado(opt-out) e ambiguo(no_match) → 95
 
 test('(2) funil "agendada": conta EXPERIMENTAL_AGENDADA, NÃO conta QUALIFIED', async () => {
   const n = (await c.query(AGENDADAS)).rows[0].n;
-  // conta: EXPERIMENTAL_AGENDADA + SCHEDULE_INTEREST + nao_compareceu = 3 ; QUALIFIED puro fica fora
-  assert.equal(n, 3, 'EXPERIMENTAL_AGENDADA + intent + nao_compareceu = 3');
+  // conta: EXPERIMENTAL_AGENDADA + nao_compareceu = 2 ; QUALIFIED puro e interesse-só ficam fora
+  assert.equal(n, 2, 'EXPERIMENTAL_AGENDADA + nao_compareceu = 2 (interesse sozinho não conta)');
   // prova direta: QUALIFIED puro (sem intent/desfecho) não entra
   const soQualified = (await c.query(`SELECT count(*)::int n FROM leads WHERE status='QUALIFIED' AND (intent IS DISTINCT FROM 'SCHEDULE_INTEREST') AND desfecho IS NULL`)).rows[0].n;
   assert.equal(soQualified, 1, 'há 1 QUALIFIED puro no seed');
