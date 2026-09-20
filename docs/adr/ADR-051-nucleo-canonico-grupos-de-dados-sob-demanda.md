@@ -374,6 +374,13 @@ Grupo por grupo, o adaptador de scraping é substituído pelo adaptador de API, 
 |---|---|---|---|---|
 | R1 | `LM src/jobs/dataRetention.js` (node-cron, dia 1 às 03:00; **próxima execução 01/10/2026**) | Anonimiza irreversivelmente leads COLD/LOST/OPTED_OUT com última mensagem há mais de `retention_days` (padrão 730), em **todas** as unidades, sem portão | Perda irreversível de histórico de conversa (inclusive do histórico importado do WhatsApp) | **Decisão do Leo.** Proposta: até o ADR fechar, rodar em modo simulação (só relatório: quantos e quais leads seriam anonimizados). Confirmar se está implantado em produção. Depois, portão por unidade + relatório prévio |
 | R2 | `DB lib/cancelamentos.js:92-95` | `DELETE FROM qualidade.cancelamento_motivo` + reinserção, **sem guarda** para resultado vazio ou queda | Scrape vazio ou falho apaga a tabela | Guarda de queda (mesma régua de 34%) e troca para upsert com `fonte_ausente_em` |
+
+**R2 — posição da sessão do Diapasão (20/09/2026):** a guarda pode falhar fechada sem prejuízo.
+`qualidade.cancelamento_motivo` tem 64 linhas e nenhuma com motivo preenchido no export; o motivo de
+saída real passou a viver em `qualidade.saida` (recepção ou pesquisa respondida pelo aluno). Os
+consumidores (tela Reconquista e a dica "Na Extranet: ..." da ficha de saída) toleram dado velho, e
+manter o que existe é preferível a apagar por um export truncado. Decisão em aberto para o Leo:
+aposentar o scraper e deixar `qualidade.saida` como fonte única do motivo.
 | R3 | `DB lib/qualidade-db.js:791-804` (`aluno_status`) | Apaga tudo e reinsere; só protege contra resultado vazio; janela padrão a partir de 01/01/2026 | Saídas antigas somem a cada refresh; scrape parcial apaga linhas | Guarda de queda + upsert com `fonte_ausente_em`; verificar se a janela filtra saídas |
 | R4 | `LM src/resources/sync.js:148-190` | Apaga fisicamente `resource_capability` e `resource_availability` ausentes; a guarda de 34% conta só recursos | Snapshot parcial apaga disponibilidade | Estender a guarda para capacidades e disponibilidades; marcar inativo em vez de apagar |
 | R5 | `SCH scripts/backfill-sa-enriquecimento.js:263-285` (host 05:45) | UPDATE incondicional em `service_account` (grava NULL quando o Excel vem vazio); junta com `bi_raw.contracts` sem filtrar `"tenantId"` | Apaga professor e motivo de saída já preenchidos; cruza unidades quando houver mais de uma | `COALESCE` (nunca sobrescrever com NULL) + filtro de unidade |
