@@ -124,6 +124,27 @@ Criar `plataforma.unidade` como identidade canônica e `plataforma.unidade_chave
 ### D9 — Fonte única de assinatura
 Criar `plataforma.aplicacao` (catálogo) e `plataforma.assinatura` (unidade × aplicação × estado). Na transição, E1 e E2 continuam existindo e são **mantidos em sincronia a partir da assinatura** (compatibilidade). Nenhum código novo lê E1 ou E2 diretamente.
 
+**Confirmado pelo Leo em 20/09/2026 (dívida A1).** A frente de atribuição de mídia paga preparou
+`plataforma.modulo_contratado` (migração LM 172, não aplicada), o que faria **quatro** lugares responderem
+"esta unidade contratou este módulo?": `app.tenant_modules` (produção, chaveada por `franquia_id`),
+`lead_manager.tenant_subscriptions` (produção), `plataforma.assinatura` (este ADR) e a nova tabela.
+Fica decidido:
+
+1. **A fonte única é `plataforma.assinatura`.** Nenhuma frente cria tabela nova de licença. A 172 entra
+   sem `modulo` e `modulo_contratado`; `credencial_unidade` e `consumo_evento` seguem (não conflitam,
+   e a credencial será desenhada junto com o grupo `acessos`).
+2. **Ninguém lê tabela de licença diretamente.** Todo consumidor chama uma função de leitura
+   (`plataforma.contratado(unidade, aplicacao)`), que hoje responde a partir de `app.tenant_modules` e
+   amanhã a partir de `assinatura`. Trocar a fonte vira uma linha, não uma caçada por chamadores.
+3. **Virada só com comparação.** Na Fase 6, a assinatura é preenchida a partir das duas tabelas de
+   produção e comparada linha a linha; só depois a função passa a ler dela. E1 e E2 viram derivados.
+4. **Quando a loja entrar**, o retorno do meio de pagamento escreve só em `assinatura`.
+
+Motivo de ser a assinatura, e não uma das tabelas atuais: é a única que modela **estado** (teste, ativa,
+em atraso, suspensa, cancelada) e que é chaveada por unidade, e é nela que a venda online vai escrever.
+Risco de não decidir: a loja venderia contra uma tabela enquanto os jobs conferem outra — cobrança e
+bloqueio saindo errados para a mesma unidade.
+
 ### D10 — Desativar não apaga
 Um grupo sem aplicação ativa vai para `preservado`: para de sincronizar e fica oculto. A exclusão só acontece depois do prazo D11 da especificação (proposta: 90 dias) **e** do piso de retenção legal do grupo, em ordem de dependência, com backup verificado de menos de 24 h, relatório de simulação e aprovação humana registrada. O código de exclusão nasce **desligado**.
 
