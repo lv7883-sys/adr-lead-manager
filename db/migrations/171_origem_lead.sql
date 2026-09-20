@@ -1,8 +1,8 @@
 -- ============================================================================
 -- 171 — origem_lead: a ORIGEM do contato, gravada no instante em que ela chega.
 --
---   docker exec -i <pg> psql -U postgres -d adr_scheduler -v ON_ERROR_STOP=1 -f 141_origem_lead.sql
---   (aplicar DEPOIS da 140_mapa_campanha.sql; não há FK entre elas, só ordem de leitura)
+--   docker exec -i <pg> psql -U postgres -d adr_scheduler -v ON_ERROR_STOP=1 -f 171_origem_lead.sql
+--   (aplicar DEPOIS da 170_mapa_campanha.sql; não há FK entre elas, só ordem de leitura)
 --
 -- POR QUÊ
 --   O dado de origem de um anúncio Click-to-WhatsApp chega UMA ÚNICA VEZ: no contextInfo
@@ -33,9 +33,11 @@
 -- ⚠ payload_bruto guarda o payload BRUTO do webhook, inclusive de quem não virou lead. É o
 --   material forense para descobrir formatos de contextInfo que ainda não conhecemos.
 --   Contém telefone e o texto da mensagem — nada além do que `messages.raw` já guarda.
---   LGPD: /forget e a retenção (src/anonymize.js) apagam telefone e payload desta linha e
---   MANTÊM a atribuição (campanha/anúncio), que não identifica ninguém. Esquecer uma
---   pessoa não pode reescrever a leitura da mídia paga daquele mês.
+--   LGPD: /forget e a retenção (src/anonymize.js) apagam telefone, payload bruto e o texto
+--   do anúncio (url/título/corpo). SOBREVIVEM apenas nove campos, nenhum deles capaz de
+--   identificar alguém: anuncio_id, codigo_campanha, campanha_ref, motor, objetivo,
+--   publico, criativo, metodo, capturado_em. Esquecer uma pessoa não pode reescrever
+--   quantos leads aquela campanha trouxe naquele mês.
 --
 -- Idempotente. RLS por tenant_id, igual ao resto do schema.
 -- ============================================================================
@@ -102,25 +104,35 @@ RETURNS trigger LANGUAGE plpgsql AS $fn$
 DECLARE
   anonimizando boolean;
 BEGIN
-  -- EXCEÇÃO ÚNICA: anonimização (LGPD, src/anonymize.js). O que identifica a pessoa
-  -- (telefone e payload bruto) pode ser APAGADO — e só para o sentinela, nunca para
-  -- outro valor. A atribuição (campanha, anúncio, método) não é PII e continua de pé,
-  -- senão esquecer uma pessoa reescreveria a leitura da mídia paga daquele mês.
+  -- EXCEÇÃO ÚNICA: anonimização (LGPD, src/anonymize.js). Nove campos sobrevivem à
+  -- exclusão, e SÓ eles — são os que respondem "de qual anúncio veio", e nenhum deles
+  -- identifica ninguém:
+  --   anuncio_id, codigo_campanha, campanha_ref, motor, objetivo, publico, criativo,
+  --   metodo, capturado_em
+  -- Tudo que pode carregar pessoa é APAGADO: telefone (vira sentinela), payload_bruto
+  -- (o webhook inteiro: telefone, nome de perfil, texto da mensagem) e também
+  -- anuncio_url / anuncio_titulo / anuncio_texto — a URL costuma trazer parâmetros de
+  -- rastreio, e título e corpo do anúncio são reconstituíveis a partir de anuncio_id.
+  -- Nada disso faz falta para a leitura da mídia paga; esquecer uma pessoa não pode
+  -- reescrever quantos leads aquela campanha trouxe naquele mês.
   anonimizando := NEW.telefone LIKE 'anonimizado\_%'
               AND NEW.payload_bruto = '{}'::jsonb
+              AND NEW.anuncio_url IS NULL
+              AND NEW.anuncio_titulo IS NULL
+              AND NEW.anuncio_texto IS NULL
               AND OLD.telefone NOT LIKE 'anonimizado\_%';
 
-  IF (NEW.tenant_id, NEW.canal, NEW.anuncio_id, NEW.anuncio_url,
-      NEW.anuncio_titulo, NEW.anuncio_texto, NEW.codigo_campanha, NEW.campanha_ref, NEW.motor,
-      NEW.objetivo, NEW.publico, NEW.criativo, NEW.metodo, NEW.capturado_em)
+  IF (NEW.tenant_id, NEW.canal, NEW.anuncio_id, NEW.codigo_campanha, NEW.campanha_ref,
+      NEW.motor, NEW.objetivo, NEW.publico, NEW.criativo, NEW.metodo, NEW.capturado_em)
      IS DISTINCT FROM
-     (OLD.tenant_id, OLD.canal, OLD.anuncio_id, OLD.anuncio_url,
-      OLD.anuncio_titulo, OLD.anuncio_texto, OLD.codigo_campanha, OLD.campanha_ref, OLD.motor,
-      OLD.objetivo, OLD.publico, OLD.criativo, OLD.metodo, OLD.capturado_em)
+     (OLD.tenant_id, OLD.canal, OLD.anuncio_id, OLD.codigo_campanha, OLD.campanha_ref,
+      OLD.motor, OLD.objetivo, OLD.publico, OLD.criativo, OLD.metodo, OLD.capturado_em)
      OR (NOT anonimizando
-         AND (NEW.telefone, NEW.payload_bruto) IS DISTINCT FROM (OLD.telefone, OLD.payload_bruto))
+         AND (NEW.telefone, NEW.payload_bruto, NEW.anuncio_url, NEW.anuncio_titulo, NEW.anuncio_texto)
+             IS DISTINCT FROM
+             (OLD.telefone, OLD.payload_bruto, OLD.anuncio_url, OLD.anuncio_titulo, OLD.anuncio_texto))
   THEN
-    RAISE EXCEPTION 'origem_lead é imutável: só lead_id muda (e a anonimização apaga telefone/payload) — linha %', OLD.id
+    RAISE EXCEPTION 'origem_lead é imutável: só lead_id muda (e a anonimização apaga o que identifica a pessoa) — linha %', OLD.id
       USING ERRCODE = 'restrict_violation';
   END IF;
   NEW.atualizado_em := now();
@@ -142,10 +154,14 @@ CREATE POLICY tenant_isolation ON lead_manager.origem_lead
 
 -- Sem DELETE: origem não se apaga pela aplicação (a faxina de retenção roda como superuser).
 -- E o UPDATE é por COLUNA: a aplicação só escreve lead_id (o vínculo) e, na anonimização,
--- telefone/payload_bruto (apagar PII). Um UPDATE errado em campanha/anúncio é recusado
+-- o que identifica a pessoa (apagar PII). Um UPDATE errado em campanha/anúncio é recusado
 -- pelo banco ANTES mesmo do gatilho — cinto e suspensório.
 GRANT SELECT, INSERT ON lead_manager.origem_lead TO lead_manager_user;
-GRANT UPDATE (lead_id, telefone, payload_bruto) ON lead_manager.origem_lead TO lead_manager_user;
+-- UPDATE por COLUNA: a aplicação escreve o vínculo do lead e, na exclusão LGPD, só o
+-- que identifica a pessoa. Campanha, anúncio e método são recusados pelo BANCO antes
+-- mesmo do gatilho.
+GRANT UPDATE (lead_id, telefone, payload_bruto, anuncio_url, anuncio_titulo, anuncio_texto)
+  ON lead_manager.origem_lead TO lead_manager_user;
 
 COMMENT ON TABLE lead_manager.origem_lead IS
   'Origem do 1º toque por contato (Click-to-WhatsApp). Gravada ANTES da IA no webhook; imutável exceto lead_id.';

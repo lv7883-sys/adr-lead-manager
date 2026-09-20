@@ -1,6 +1,6 @@
 'use strict';
-// lead-source.itest.js — origem do 1º toque contra Postgres real (migrations 140/141).
-// Roda pelo test/run-lead-source-itest.sh (PG efêmero em Docker). A app conecta como
+// origem-lead.itest.js — origem do 1º toque contra Postgres real (migrações 170/171).
+// Roda por `make test-origem` (Postgres descartável, porta 5433). A aplicação conecta como
 // lead_manager_user: a RLS testada aqui é a MESMA de produção, não uma imitação.
 //
 //   DATABASE_URL        = lead_manager_user  (o que a aplicação usa; RLS vale)
@@ -11,8 +11,8 @@ const { Client } = require('pg');
 const origemLead = require('../src/origemLead');
 const { pool, withTenant } = require('../src/db');
 
-const T1 = process.env.LS_TENANT_A || 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const T2 = process.env.LS_TENANT_B || 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const T1 = process.env.ISO_TENANT_A || process.env.LS_TENANT_A || 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const T2 = process.env.ISO_TENANT_B || process.env.LS_TENANT_B || 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
 // Logger mudo: o teste não precisa do JSON do logger na saída.
 const mudo = { info() {}, warn() {}, error() {} };
@@ -272,4 +272,77 @@ test('(13) erro de banco vira log, não exceção', async () => {
   // sem telefone não há o que gravar (e nada explode)
   assert.deepEqual(await origemLead.registrarOrigem(T1, { externalId: null, body: 'oi' }, {}, mudo),
     { gravado: false, metodo: null });
+});
+
+// ── LGPD: depois da exclusão, NENHUMA coluna pode conter dado pessoal ──────────────────
+// A varredura é GENÉRICA (to_jsonb da linha inteira), não uma lista de colunas escrita à
+// mão: se alguém acrescentar uma coluna com dado pessoal amanhã e esquecer de limpá-la na
+// anonimização, este teste fica vermelho sozinho. Uma lista à mão envelheceria em silêncio.
+test('(14) exclusão do cliente não deixa telefone, nome nem texto de mensagem em coluna alguma', async () => {
+  const tel = '5519990000021';
+  const NOME_PERFIL = 'Mariana Fulana de Tal';
+  const TEXTO = 'quero matricular meu filho de 9 anos';
+
+  const p = payload(tel, TEXTO, AD('120210000000000001'));
+  p.data.pushName = NOME_PERFIL;
+  await origemLead.registrarOrigem(T1, msgDe(tel, TEXTO), p, mudo);
+
+  // confere que ANTES da exclusão o dado realmente estava lá (senão o teste passaria à toa)
+  const antes = (await adm.query(
+    `SELECT to_jsonb(ol) AS linha FROM lead_manager.origem_lead ol
+      WHERE tenant_id = $1 AND telefone = $2`, [T1, tel])).rows[0].linha;
+  assert.ok(JSON.stringify(antes).includes(NOME_PERFIL), 'cenário inválido: o nome nem foi gravado');
+  assert.ok(JSON.stringify(antes).includes(TEXTO), 'cenário inválido: o texto nem foi gravado');
+
+  // A EXCLUSÃO, exatamente como src/anonymize.js faz — e rodando como a APLICAÇÃO,
+  // para provar que os grants por coluna permitem apagar e o gatilho não barra.
+  const anon = 'anonimizado_cafebabecafebabe';
+  await withTenant(T1, (c) => c.query(
+    `UPDATE origem_lead
+        SET telefone = $1, payload_bruto = '{}'::jsonb,
+            anuncio_url = NULL, anuncio_titulo = NULL, anuncio_texto = NULL
+      WHERE tenant_id = $2 AND telefone = $3`,
+    [anon, T1, tel]));
+
+  // VARREDURA: nenhum valor de nenhuma coluna pode conter o telefone, o nome ou o texto.
+  const { rows: vazamentos } = await adm.query(
+    `SELECT campo, valor
+       FROM lead_manager.origem_lead ol,
+            LATERAL jsonb_each_text(to_jsonb(ol)) AS e(campo, valor)
+      WHERE ol.tenant_id = $1 AND ol.telefone = $2
+        AND (valor ILIKE '%' || $3 || '%'      -- telefone completo
+          OR valor ILIKE '%990000021%'          -- telefone sem DDI/DDD
+          OR valor ILIKE '%' || $4 || '%'       -- nome do perfil
+          OR valor ILIKE '%Mariana%'
+          OR valor ILIKE '%' || $5 || '%'       -- texto da mensagem
+          OR valor ILIKE '%matricular%')`,
+    [T1, anon, tel, NOME_PERFIL, TEXTO]);
+  assert.deepEqual(vazamentos, [], `VAZAMENTO após exclusão: ${JSON.stringify(vazamentos)}`);
+
+  // ...e a atribuição sobreviveu inteira: é ela que responde "de qual anúncio veio".
+  const dep = (await adm.query(
+    `SELECT anuncio_id, codigo_campanha, campanha_ref, motor, objetivo, publico, criativo,
+            metodo, capturado_em
+       FROM lead_manager.origem_lead WHERE tenant_id = $1 AND telefone = $2`, [T1, anon])).rows[0];
+  assert.equal(dep.anuncio_id, '120210000000000001');
+  assert.equal(dep.campanha_ref, 'bateria-set');
+  assert.equal(dep.metodo, 'anuncio_meta');
+  assert.ok(dep.capturado_em);
+});
+
+test('(15) a exclusão NÃO é porta para reescrever a atribuição', async () => {
+  // apagar o que identifica a pessoa é permitido; mexer na campanha junto, não.
+  await assert.rejects(
+    adm.query(
+      `UPDATE lead_manager.origem_lead
+          SET telefone = 'anonimizado_0000111122223333', payload_bruto = '{}'::jsonb,
+              anuncio_url = NULL, anuncio_titulo = NULL, anuncio_texto = NULL,
+              campanha_ref = 'outra'
+        WHERE tenant_id = $1 AND chave_contato = '1999000002'`, [T1]),
+    /imutável/);
+  // e a aplicação não tem permissão de tocar em campanha nem com a forma certa de exclusão
+  await assert.rejects(
+    withTenant(T1, (c) => c.query(
+      `UPDATE origem_lead SET campanha_ref = 'outra' WHERE tenant_id = $1`, [T1])),
+    /permission denied|permissão negada/i);
 });

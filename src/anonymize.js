@@ -19,11 +19,24 @@ async function anonymizeLead(client, { tenantId, leadId, phone, actor, action, d
     // O external_id da conversa continha o telefone -> anonimiza também.
     await client.query('UPDATE conversations SET external_id = $2 WHERE external_id = $1', [phone, anonPhone]);
   }
-  // Origem do lead (mídia paga): apaga o que identifica a pessoa — telefone e payload
-  // bruto do webhook — e MANTÉM a atribuição (campanha/anúncio/método, que não é PII).
-  // Esquecer uma pessoa não pode reescrever a leitura da mídia paga daquele mês.
+  // Origem do lead (mídia paga). Apaga TUDO que pode carregar a pessoa:
+  //   • telefone            -> sentinela
+  //   • payload_bruto       -> o payload inteiro do webhook (telefone, nome de perfil,
+  //                            texto da mensagem). É o campo mais sensível da tabela.
+  //   • anuncio_url         -> costuma trazer parâmetros de rastreio
+  //   • anuncio_titulo/texto-> reconstituíveis a partir do anuncio_id; não fazem falta
+  // SOBREVIVEM só os nove que respondem "de qual anúncio veio": anuncio_id,
+  // codigo_campanha, campanha_ref, motor, objetivo, publico, criativo, metodo,
+  // capturado_em. Esquecer uma pessoa não pode reescrever a leitura da mídia paga.
+  // O gatilho da migr. 171 exige exatamente esta forma — qualquer outra combinação
+  // levanta exceção, então esta consulta e aquele gatilho mudam juntos.
   await client.query(
-    `UPDATE origem_lead SET telefone = $2, payload_bruto = '{}'::jsonb
+    `UPDATE origem_lead
+        SET telefone = $2,
+            payload_bruto = '{}'::jsonb,
+            anuncio_url = NULL,
+            anuncio_titulo = NULL,
+            anuncio_texto = NULL
       WHERE tenant_id = $3
         AND (lead_id = $1 OR ($4 <> '' AND chave_contato = br_phone_key($4)))
         AND telefone NOT LIKE 'anonimizado\\_%'`,
