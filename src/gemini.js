@@ -1,6 +1,6 @@
 'use strict';
 
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const ia = require('./plataforma/ia');   // ÚNICO ponto que fala com o SDK de IA (custo órfão)
 const logger = require('./logger');
 const perfilIA = require('./perfilAssistente');   // perfil da assistente por empresa (multi-ramo)
 
@@ -23,11 +23,8 @@ const CANDIDATES = [
 let activeIndex = 0;
 const getActiveModel = () => CANDIDATES[activeIndex];
 
-function client() {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error('GEMINI_API_KEY não configurada');
-  return new GoogleGenerativeAI(key);
-}
+// O cliente do SDK e a chave vivem em src/plataforma/ia.js. Aqui não se instancia SDK:
+// toda chamada passa por lá para ser MEDIDA na conta da unidade dona do trabalho.
 
 // Detecta "modelo indisponível/descontinuado" para acionar o fallback (e NÃO
 // para erros normais, como JSON malformado — esses são propagados).
@@ -39,11 +36,16 @@ function isModelUnavailable(err) {
 
 // Executa run(modelName) começando pelo modelo ativo; em erro de
 // indisponibilidade, avança na cadeia, memoiza o que funcionar e loga a troca.
-async function withModelFallback(run) {
+// `medicao` é repassada ao wrapper único (ia.medir): TODA chamada de IA do Lead Manager
+// passa por aqui, então medir neste ponto cobre as 16 chamadas do arquivo de uma vez —
+// nenhuma função precisa lembrar de se medir, e nenhuma consegue escapar.
+// Tentativa que falhou também é cobrada pelo provedor: por isso a medição envolve cada
+// tentativa do laço, não só a que der certo.
+async function withModelFallback(run, medicao) {
   let lastErr;
   for (let i = activeIndex; i < CANDIDATES.length; i += 1) {
     try {
-      const res = await run(CANDIDATES[i]);
+      const res = await ia.medir(medicao || {}, () => run(CANDIDATES[i]));
       if (i !== activeIndex) {
         logger.warn('gemini.model_switched', { from: CANDIDATES[activeIndex], to: CANDIDATES[i] });
         activeIndex = i;
@@ -102,7 +104,7 @@ function _fewShot(examples) {
 
 async function classify({ message, examples, presignalNote }) {
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0 },
     });
@@ -246,7 +248,7 @@ async function classifyConversa({ conversation, examples, stageDefinitions, lead
   const stage = _stageBlock(stageDefinitions);
   const basePrompt = _triageConversaPrompt(leadDefinition);
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0 },
     });
@@ -521,7 +523,7 @@ async function generateReply({ systemPrompt, history = [], message, clarificatio
     // temperature baixa (0.3) = respostas mais consistentes e ancoradas no prompt,
     // menos "criativas"/inventadas. Os classificadores já rodam em 0; aqui mantemos um
     // mínimo de naturalidade pra conversa sem abrir espaço pra alucinação.
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       systemInstruction: sys,
       generationConfig: { temperature: 0.3 },
@@ -566,7 +568,7 @@ async function estrategiaVendas({ systemPrompt, clientHistory = [], chatHistory 
       ? `\n\nCONVERSA REAL COM O CLIENTE (contexto; trate SÓ isto como fato do que já foi dito):\n${transcript}`
       : '\n\n(Ainda não há mensagens trocadas com o cliente nesta conversa.)'), perfil, [systemPrompt, transcript, escola]);
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({ model: modelName, systemInstruction: sys, generationConfig: { temperature: 0.5 } });
+    const model = ia.modelo({ model: modelName, systemInstruction: sys, generationConfig: { temperature: 0.5 } });
     const contents = [];
     for (const t of (chatHistory || [])) {
       const txt = String(t.content ?? t.body ?? '').trim();
@@ -608,7 +610,7 @@ async function improveReply({ systemPrompt, history = [], draft, perfil = null }
     'NÃO invente dados (endereço, preço, nomes, horários) que não estejam no histórico/prompt. ' +
     `Responda SOMENTE com a mensagem final melhorada, sem comentários nem aspas.${ctx}\n\nRASCUNHO:\n${draft ?? ''}`, perfil, [systemPrompt, draft, ...history.map((m) => m.content ?? m.body ?? '')]);
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       generationConfig: { temperature: 0.3 },
     });
@@ -633,7 +635,7 @@ async function assistantReply({ schoolContext, leadName, leadConversation, histo
     (leadConversation ? `\n\nCONVERSA COM ESTE LEAD (mais antigo -> mais novo):\n${leadConversation}` : '') +
     (schoolContext ? `\n\nINFORMAÇÕES DA ESCOLA (referência):\n${schoolContext}` : ''), perfil, [schoolContext, leadConversation, leadName]);
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       systemInstruction: sys,
       generationConfig: { temperature: 0.3 },
@@ -669,7 +671,7 @@ async function sugestaoRetomada({ history = [], leadName, schoolContext, engajam
     '\n\nResponda SOMENTE com JSON: {"estrategia":"<por que e como reabordar, 1-2 frases para a ' +
     'recepcionista>","rascunho":"<mensagem pronta para enviar ao lead, tom da escola, sem emojis>"}', perfil, [schoolContext, convo, engajamentoNota, leadName]);
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0.4 },
     });
@@ -728,7 +730,7 @@ async function sugestaoRenovacao({ marco, alunoNome, responsavelNome, servico, d
     '\n\nResponda SOMENTE com JSON: {"estrategia":"<por que e como abordar, 1-2 frases para a ' +
     'recepcionista>","rascunho":"<mensagem pronta para enviar, tom da escola, sem emojis>"}', perfil, [schoolContext, orientacao, alunoNome, responsavelNome, servico]);
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0.4 },
     });
@@ -755,7 +757,7 @@ async function lerDesfechoRenovacao({ historico } = {}) {
     'Conversa (mais antigo → mais novo):\n"""\n' + h.slice(0, 1800) + '\n"""\n\n' +
     'Responda SOMENTE com JSON: {"situacao":"<renovou|nao_renovou|indefinido>","motivo":"<até 12 palavras citando o trecho>"}';
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
     });
@@ -786,7 +788,7 @@ async function tocaAssuntoProibido({ texto, assuntos = [] } = {}) {
     '\n\nMensagem:\n"""\n' + t.slice(0, 2000) + '\n"""\n\n' +
     'Responda SOMENTE com JSON: {"toca": true ou false, "assunto": "<o assunto da lista, exatamente como escrito, ou vazio>"}';
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0 },
     });
@@ -808,7 +810,7 @@ Responda SOMENTE com JSON: {"intent":"<categoria>"}`;
 
 async function classifyIntent({ message }) {
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0 },
     });
@@ -830,7 +832,7 @@ Responda SOMENTE com JSON: {"name":<str|null>,"instrument":<str|null>,"availabil
 
 async function extractQualification({ history = [], message }) {
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0 },
     });
@@ -852,7 +854,7 @@ async function extractQualification({ history = [], message }) {
 async function transcribeAudio({ base64, mimetype }) {
   if (!base64) return null;
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({ model: modelName, generationConfig: { temperature: 0 } });
+    const model = ia.modelo({ model: modelName, generationConfig: { temperature: 0 } });
     const res = await model.generateContent([
       { inlineData: { data: base64, mimeType: (mimetype || 'audio/ogg').split(';')[0].trim() } },
       { text: 'Transcreva este áudio em português brasileiro. Retorne só a transcrição, sem explicações.' },
@@ -889,7 +891,7 @@ Se não tiver certeza, retorne null (NÃO invente categoria).
 Músicas: ${JSON.stringify(musicas.map((m, i) => ({ ref: m.ref ?? String(i), nome: m.nome, artista: m.artista || null })))}
 Responda SOMENTE JSON: {"resultados":[{"ref":"...","genero":str|null,"subgenero":str|null}]}`;
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({ model: modelName, generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
+    const model = ia.modelo({ model: modelName, generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
     const res = await model.generateContent(prompt);
     const parsed = JSON.parse(res.response.text());
     return (parsed.resultados || []).map((r) => ({
@@ -929,7 +931,7 @@ Responda SOMENTE JSON: {"resultados":[{"nome":str,"artista":str|null,"versao":st
 Texto:
 """${String(texto).slice(0, 20000)}"""`;
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({ model: modelName, generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
+    const model = ia.modelo({ model: modelName, generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
     const res = await model.generateContent(prompt);
     const parsed = JSON.parse(res.response.text());
     return (parsed.resultados || [])
@@ -953,7 +955,7 @@ async function classifyRescue({ message, conversation, rescuePrompt }) {
   const criterio = (typeof rescuePrompt === 'string' && rescuePrompt.trim()) ? rescuePrompt.trim() : null;
   if (!criterio) return { resgata: true, confidence: 0, motivo: 'sem critério de resgate configurado — mantém (não descarta)' };
   return withModelFallback(async (modelName) => {
-    const model = client().getGenerativeModel({
+    const model = ia.modelo({
       model: modelName,
       generationConfig: { responseMimeType: 'application/json', temperature: 0 },
     });

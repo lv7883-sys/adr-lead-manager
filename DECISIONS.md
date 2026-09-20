@@ -260,3 +260,62 @@ com o env como rede, migrando uma unidade por vez.
 | **A5** | Cobrança/fatura a partir de `consumo_evento` | esta sessão entrega a **medição**; preço e fatura são outra frente |
 | **A6** | Rodar as migrações e a suíte de isolamento num Postgres de verdade | esta máquina não tem Docker nem Postgres (ver relatório) |
 | **A7** | **Nenhuma chamada de IA do Lead Manager é medida nem limitada** — a cota (D7) só cobre a fila do marketing. Sem medição não dá para saber a distância do teto por minuto do Google (compartilhado com o painel), nem precificar com EBIT que cubra a API | descoberto ao responder "por que a chave estouraria?" (D20); com uma unidade é teórico, com 10–20 é o primeiro gargalo |
+
+---
+
+## 3. Sessão 3 — executar isolamento, fechar LGPD, travar custo órfão (20/09, noite)
+
+### D21 — O ambiente de teste é um Postgres descartável, e é impossível confundi-lo com produção
+`docker-compose.test.yml`: `postgres:16-alpine`, porta **5433** presa em `127.0.0.1`, dados em
+**tmpfs** (morrem com o container), `fsync=off`. Três travas contra o acidente clássico de
+rodar migração de teste no banco de verdade: porta diferente, sem persistência, e o alvo
+`migrate` que recusa DSN fora de `127.0.0.1`/`localhost`.
+Todo comando docker no Makefile leva `MSYS_NO_PATHCONV=1`: no Git Bash do Windows, argumento
+começando com `/` (ex.: `/var/lib/postgresql/data`) é traduzido para caminho do Windows antes
+de chegar ao docker, e o erro resultante é difícil de ler.
+O bootstrap saiu dos scripts `.sh` e virou SQL versionado em `test/db/` — bootstrap duplicado
+em dois scripts desanda sem ninguém perceber. Os dois `run-*-itest.sh` foram substituídos
+pelos alvos do Makefile.
+
+### D22 — Custo de IA ganha dono por CONTEXTO, não passando `tenantId` por 12 arquivos
+Medir IA por unidade exige saber de quem é a chamada. O caminho óbvio — acrescentar `tenant`
+nas ~18 funções de `src/gemini.js` e nos 12 arquivos que as chamam — tem um defeito fatal:
+basta **um** caminho esquecido para nascer custo órfão, e ninguém descobre até a fatura.
+Ficou `AsyncLocalStorage` (`src/plataforma/contexto.js`): `comUnidade()` marca a dona no
+início do processamento e cobre tudo que rodar dentro, em qualquer profundidade. Duas linhas
+em `src/routes/webhook.js` cobrem entrada e saída inteiras — mídia, transcrição, funil, Janis.
+`src/plataforma/ia.js` é o único arquivo autorizado a importar o SDK, e `test/sdk-ia-sem-atalho.test.js`
+falha se alguém importar em outro lugar. `src/gemini.js` não instancia mais SDK: as 16 chamadas
+passam por `ia.modelo()` e a medição entrou em `withModelFallback`, o funil por onde todas passam.
+*Detalhes que valem registro:* tentativa que falhou TAMBÉM é medida (o provedor cobra a
+tentativa); erro ao gravar consumo nunca derruba a chamada; e a gravação se auto-desliga após a
+primeira falha estrutural — enquanto a 172 não for aplicada, seriam duas linhas de erro por
+mensagem recebida.
+*Falta:* as rotinas em lote (`src/jobs/*`) ainda não abrem contexto. Não inventei um `tenantId`
+para elas: elas vão aparecer sozinhas no log como `ia.custo_orfao`, que é justamente o
+mecanismo para achá-las. Dívida A8.
+
+### D23 — LGPD: nove campos sobrevivem à exclusão, e o teste varre a linha inteira
+A exclusão apaga telefone (vira sentinela), `payload_bruto` (o webhook inteiro: telefone, nome
+de perfil, texto da mensagem) **e também** `anuncio_url`, `anuncio_titulo` e `anuncio_texto` —
+a URL costuma carregar parâmetros de rastreio, e título e corpo do anúncio são reconstituíveis
+a partir de `anuncio_id`. Sobrevivem só: `anuncio_id`, `codigo_campanha`, `campanha_ref`,
+`motor`, `objetivo`, `publico`, `criativo`, `metodo`, `capturado_em`.
+O gatilho de imutabilidade da 171 foi ajustado para permitir exatamente essa forma de apagar —
+e só ela: apagar junto com uma mudança de campanha continua levantando exceção. O `GRANT UPDATE`
+por coluna acompanha.
+**O teste varre `to_jsonb` da linha inteira**, não uma lista de colunas escrita à mão: coluna
+nova com dado pessoal que alguém esqueça de limpar amanhã deixa o teste vermelho sozinho. Lista
+à mão envelheceria em silêncio, que é como esse tipo de vazamento costuma nascer.
+
+### D24 — A branch continua `feat/origem-lead-e-nucleo-plataforma`
+O pedido citava `feat/marketing-modulo-multitenant` *caso o trabalho ainda não estivesse
+commitado*. Estava: dois commits atômicos por tema, feitos no fim da sessão 2. Renomear a
+branch só mudaria o rótulo e perderia a metade "origem do lead", que é metade do trabalho.
+
+### Status das dívidas depois desta sessão
+| # | Situação |
+|---|---|
+| A6 | **Aberta e agora é a única que bloqueia o merge.** A suíte de isolamento continua sem rodar: esta máquina não tem Docker (confirmado por ausência de binário, de serviço, de processo e de WSL) nem qualquer Postgres. |
+| A7 | **Fechada para o caminho do webhook** (entrada e saída medidas). Segue aberta para as rotinas em lote → vira A8. |
+| A8 | **Nova:** `src/jobs/*` chamam IA sem contexto de unidade. O log `ia.custo_orfao` é o rastro para encontrá-las. |
