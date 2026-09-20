@@ -150,6 +150,15 @@ Um grupo sem aplicação ativa vai para `preservado`: para de sincronizar e fica
 
 **Exceção: credenciais.** Chave privada de certificado digital, tokens OAuth (Conta Azul), credenciais da Extranet e, no futuro, de API bancária **não são preservadas**. Guardar segredo de quem cancelou é passivo, não proteção. Quando a unidade cancela a aplicação (ou tudo) que as usa, a credencial é **revogada e apagada na hora**, com trilha de auditoria; fica só o metadado. O dado obtido com ela (XML, movimentos) segue o piso legal. **A exportação no cancelamento inclui os XMLs de F4**, que a unidade tem obrigação de guardar.
 
+**Apagar não basta, tem de girar na origem (20/09/2026).** O backup anterior à revogação continua tendo
+o segredo cifrado, e a chave que o abre é a mesma. Só a revogação **no provedor** (trocar a senha da
+Extranet, revogar o OAuth da Conta Azul, girar o token da Evolution) encerra a exposição. A Fase 7 grava,
+junto do metadado da credencial, se o giro na origem foi feito e quando, e expõe a lista das credenciais
+apagadas daqui que seguem vivas do outro lado — é essa lista que interessa num incidente. O padrão já
+está implementado em `plataforma.credencial_unidade` (migração LM 172): `revogado_na_origem` ∈
+`sim | nao | nao_aplicavel`, com aviso em log quando fica `nao`. É declaração de quem revogou, não prova:
+provar exigiria tentar usar a credencial e receber 401, o que não se justifica hoje.
+
 ---
 
 ## 3. Modelo (esboço de DDL — migrations aditivas LM 127+)
