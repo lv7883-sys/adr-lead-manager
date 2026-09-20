@@ -19,6 +19,16 @@ async function anonymizeLead(client, { tenantId, leadId, phone, actor, action, d
     // O external_id da conversa continha o telefone -> anonimiza também.
     await client.query('UPDATE conversations SET external_id = $2 WHERE external_id = $1', [phone, anonPhone]);
   }
+  // Origem do lead (mídia paga): apaga o que identifica a pessoa — telefone e payload
+  // bruto do webhook — e MANTÉM a atribuição (campanha/anúncio/método, que não é PII).
+  // Esquecer uma pessoa não pode reescrever a leitura da mídia paga daquele mês.
+  await client.query(
+    `UPDATE origem_lead SET telefone = $2, payload_bruto = '{}'::jsonb
+      WHERE tenant_id = $3
+        AND (lead_id = $1 OR ($4 <> '' AND chave_contato = br_phone_key($4)))
+        AND telefone NOT LIKE 'anonimizado\\_%'`,
+    [leadId, anonPhone, tenantId, phone || '']
+  );
   // Nome extraído é PII -> remove (mantém instrumento/disponibilidade/completude).
   await client.query('UPDATE lead_qualifications SET name = NULL WHERE lead_id = $1', [leadId]);
   // Anonimiza o lead. MANTÉM status, datas e intent (métricas).
