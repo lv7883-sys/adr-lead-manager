@@ -26,9 +26,15 @@ services:
       # initdb mais rápido: é banco descartável, durabilidade não importa aqui.
       POSTGRES_INITDB_ARGS: "--nosync"
     ports:
+      # 127.0.0.1 de propósito: não escuta na rede. Rodando na VPS, ninguém de fora alcança.
       - "127.0.0.1:5433:5432"
     tmpfs:
       - /var/lib/postgresql/data
+    # Limites que o anexo de riscos do ADR-051 (X10) pede: quando este container sobe na
+    # VPS, ele divide CPU e disco com produção. Sem teto, uma suíte pesada degrada o
+    # atendimento real — o teste não pode custar caro para quem está sendo atendido.
+    cpus: 1.0
+    mem_limit: 1g
     # fsync off: acelera a suíte. NUNCA copie isto para produção.
     command: >-
       postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
