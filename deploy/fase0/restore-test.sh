@@ -95,6 +95,11 @@ ERR_GLOBALS="$(grep -c 'ERROR' "$WORK/globals.log" || true)"
 ESPERADOS="$(grep -c 'role "postgres" already exists' "$WORK/globals.log" || true)"
 [ "$ERR_GLOBALS" = "$ESPERADOS" ] || reprova "erros inesperados ao restaurar roles: $((ERR_GLOBALS - ESPERADOS))"
 
+# globals.sql traz a senha de produção do papel postgres e substitui a aleatória deste container.
+# Sem repor $PW, a checagem de segredos (que conecta pela rede interna) é recusada.
+tpsql -d postgres -v ON_ERROR_STOP=1 -c "ALTER ROLE postgres PASSWORD '$PW'" > /dev/null \
+  || { log "não redefiniu a senha do Postgres de teste"; exit 1; }
+
 for DB in $DATABASES; do
   log "restaurando banco $DB"
   tpsql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$DB\"" > /dev/null
@@ -108,14 +113,17 @@ done
 # pg_dumpall --globals-only traz ALTER ROLE ... SET; as de banco e de role-no-banco são reaplicadas aqui.
 filtrar_settings() { awk -F'\t' -v dbs=" $DATABASES " '$1 == "" || index(dbs, " " $1 " ") > 0' | sort; }
 filtrar_settings < "$STAGE/db-role-settings.tsv" > "$WORK/settings-origem.tsv"
-while IFS=$'\t' read -r db role cfg; do
+# TAB conta como espaço para o read: tabs seguidos colapsam e o campo vazio do meio desaparece,
+# então "banco<TAB><TAB>configuração" era lido como db=banco role=configuração cfg="" e descartado.
+while IFS= read -r linha; do
+  db="${linha%%$'\t'*}"; resto="${linha#*$'\t'}"; role="${resto%%$'\t'*}"; cfg="${resto#*$'\t'}"
   [ -n "$cfg" ] && [ -n "$db" ] || continue
   if [ -z "$role" ]; then
     sql="ALTER DATABASE \"$db\" SET ${cfg%%=*} = ${cfg#*=}"
   else
     sql="ALTER ROLE \"$role\" IN DATABASE \"$db\" SET ${cfg%%=*} = ${cfg#*=}"
   fi
-  tpsql -d postgres -c "$sql" > /dev/null 2>&1 || reprova "não reaplicou configuração ($db/$role): ${cfg%%=*}"
+  tpsql -d postgres -v ON_ERROR_STOP=1 -c "$sql" < /dev/null >> "$RELATORIO" 2>&1 || reprova "não reaplicou configuração ($db/$role): ${cfg%%=*}"
 done < "$WORK/settings-origem.tsv"
 tpsql -d postgres -c "SELECT COALESCE(d.datname, ''), COALESCE(r.rolname, ''), unnest(s.setconfig)
                         FROM pg_db_role_setting s
@@ -124,6 +132,8 @@ tpsql -d postgres -c "SELECT COALESCE(d.datname, ''), COALESCE(r.rolname, ''), u
 if diff -q "$WORK/settings-origem.tsv" "$WORK/settings-restaurado.tsv" > /dev/null; then
   log "configurações por banco/role: idênticas ($(wc -l < "$WORK/settings-origem.tsv"))"
 else
+  { echo "--- configurações divergentes (< origem, > restaurado) ---";
+    diff "$WORK/settings-origem.tsv" "$WORK/settings-restaurado.tsv" | grep '^[<>]' || true; } >> "$RELATORIO"
   reprova "configurações por banco/role diferentes: $(diff "$WORK/settings-origem.tsv" "$WORK/settings-restaurado.tsv" | grep -c '^[<>]')"
 fi
 
