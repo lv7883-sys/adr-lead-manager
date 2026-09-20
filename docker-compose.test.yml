@@ -1,0 +1,40 @@
+# ============================================================================
+# docker-compose.test.yml — Postgres DESCARTÁVEL para os testes de banco.
+#
+#   make test-db-up      sobe
+#   make test-all        sobe, roda tudo, derruba (mesmo se falhar)
+#   make test-db-down    derruba e apaga
+#
+# NUNCA É PRODUÇÃO, e há três travas para isso:
+#   • porta 5433 (produção é 5432) e presa em 127.0.0.1 — não escuta na rede local;
+#   • os dados vivem em tmpfs (memória): o container morre, tudo some, nada persiste;
+#   • senha fixa e boba, que só vale aqui dentro.
+# O alvo `make migrate` recusa DSN que não seja 127.0.0.1/localhost, então nem por
+# engano uma migração de teste alcança a VPS.
+#
+# Major 16 = a mesma dos itests já existentes no repo. A versão de produção não é
+# declarada em lugar nenhum deste repositório (o Postgres é externo, administrado
+# fora daqui); se um dia divergir, mude aqui e diga por quê no DECISIONS.md.
+# ============================================================================
+services:
+  pg-teste:
+    image: postgres:16-alpine
+    container_name: adr-lm-pg-teste
+    environment:
+      POSTGRES_PASSWORD: itest
+      POSTGRES_DB: postgres
+      # initdb mais rápido: é banco descartável, durabilidade não importa aqui.
+      POSTGRES_INITDB_ARGS: "--nosync"
+    ports:
+      - "127.0.0.1:5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    # fsync off: acelera a suíte. NUNCA copie isto para produção.
+    command: >-
+      postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+      start_period: 3s

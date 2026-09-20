@@ -1,27 +1,111 @@
-# Makefile — atalhos de migração e teste do Lead Manager / núcleo de plataforma.
+# Makefile — migrações e testes do Lead Manager / núcleo de plataforma.
 #
-# NUNCA aponte PSQL_DSN para produção: `make migrate` aplica DDL. O alvo `guard-nao-producao`
-# recusa DSN que não seja local, justamente para isso não acontecer por distração.
+#   make test            testes puros (offline, sem banco, sem rede)
+#   make test-db-up      sobe o Postgres descartável (porta 5433, tmpfs)
+#   make test-isolation  migra e roda a suíte BLOQUEANTE de isolamento entre unidades
+#   make test-origem     migra e roda a suíte da origem do lead
+#   make test-db-down    derruba e apaga o banco de teste
+#   make test-all        sobe, roda tudo, derruba — MESMO se algum teste falhar
+#   make ci              é isto que o build roda
 #
-#   make migrate PSQL_DSN=postgres://postgres:itest@127.0.0.1:55473/lm_itest
-#   make test          # testes puros (sem banco, sem rede)
-#   make itest         # suíte BLOQUEANTE de isolamento entre unidades (precisa de Docker)
-#   make ci            # test + itest — é isto que o build roda
+# MSYS_NO_PATHCONV=1 em todo comando docker: no Git Bash do Windows, um argumento
+# que começa com "/" (ex.: /var/lib/postgresql/data) é traduzido para caminho do
+# Windows antes de chegar ao docker, e o comando quebra de um jeito difícil de ler.
+#
+# NUNCA aponte PSQL_DSN para produção: `migrate` aplica DDL. O alvo
+# `guard-nao-producao` recusa DSN que não seja local, para isso não acontecer por
+# distração. O banco de teste é outro (porta 5433, em memória, some no down).
 #
 SHELL := /bin/bash
-PSQL  ?= psql
-PSQL_DSN ?= postgres://postgres:itest@127.0.0.1:55473/lm_itest
 
-# Migrações desta frente. Para aplicar outras, passe MIGRATIONS="172_plataforma_nucleo ...".
+DC        := MSYS_NO_PATHCONV=1 docker compose -f docker-compose.test.yml
+PSQL      := MSYS_NO_PATHCONV=1 docker compose -f docker-compose.test.yml exec -T pg-teste psql -v ON_ERROR_STOP=1 -q -U postgres
+PORTA     := 5433
+
+DSN_ORIGEM     := postgres://lead_manager_user:itest@127.0.0.1:$(PORTA)/lm_origem
+ADM_ORIGEM     := postgres://postgres:itest@127.0.0.1:$(PORTA)/lm_origem
+DSN_PLATAFORMA := postgres://lead_manager_user:itest@127.0.0.1:$(PORTA)/lm_plataforma
+ADM_PLATAFORMA := postgres://postgres:itest@127.0.0.1:$(PORTA)/lm_plataforma
+
+# Migrações desta frente (para `make migrate`, que é para banco local à mão).
 MIGRATIONS ?= 172_plataforma_nucleo 173_marketing_nucleo
-# Grants que acompanham as migrações (leitura da contratação em app.tenant_modules).
-GRANTS ?= plataforma_contratacao_read
+GRANTS     ?= plataforma_contratacao_read
+PSQL_DSN   ?= $(ADM_PLATAFORMA)
 
 # Testes puros: rodam offline e não tocam em banco nenhum.
-UNIT_TESTS := test/plataforma.test.js test/origem-lead.test.js test/webhook.test.js test/waConteudo.test.js
+UNIT_TESTS := test/plataforma.test.js test/origem-lead.test.js test/ia-wrapper.test.js \
+              test/sdk-ia-sem-atalho.test.js test/webhook.test.js test/waConteudo.test.js
 
-.PHONY: migrate test itest ci guard-nao-producao
+.PHONY: test test-db-up test-db-down test-isolation test-origem test-all ci migrate guard-nao-producao
 
+# ── testes puros ──────────────────────────────────────────────────────────────
+test:
+	node --test $(UNIT_TESTS)
+
+# ── banco de teste ────────────────────────────────────────────────────────────
+test-db-up:
+	@echo "[db] subindo Postgres de teste na porta $(PORTA) (tmpfs, descartável)…"
+	@$(DC) up -d
+	@for i in $$(seq 1 60); do \
+	  if $(DC) exec -T pg-teste pg_isready -U postgres -d postgres >/dev/null 2>&1; then \
+	    echo "[db] pronto"; exit 0; \
+	  fi; \
+	  sleep 1; \
+	done; \
+	echo "[db] NÃO ficou pronto em 60s"; $(DC) logs --tail 30 pg-teste; exit 1
+
+test-db-down:
+	@echo "[db] derrubando e apagando…"
+	@$(DC) down -v --remove-orphans
+
+# ── suíte da ORIGEM DO LEAD (migrações 170/171) ───────────────────────────────
+test-origem:
+	@echo "[origem] bootstrap + migrações (duas vezes, idempotência)…"
+	@$(PSQL) -d postgres   < test/db/00-role-e-bancos.sql
+	@$(PSQL) -d lm_origem  < test/db/10-origem-lead-base.sql
+	@for r in 1 2; do \
+	  for m in 085_br_phone_key 170_mapa_campanha 171_origem_lead; do \
+	    $(PSQL) -d lm_origem < db/migrations/$$m.sql >/dev/null; \
+	  done; \
+	done
+	@echo "[origem] rodando a suíte…"
+	@DATABASE_URL="$(DSN_ORIGEM)" ADMIN_DATABASE_URL="$(ADM_ORIGEM)" \
+	  node --test --test-concurrency=1 test/origem-lead.itest.js
+
+# ── suíte BLOQUEANTE de isolamento entre unidades (migrações 172/173) ─────────
+test-isolation:
+	@echo "[isolamento] bootstrap + migrações (duas vezes, idempotência)…"
+	@$(PSQL) -d postgres       < test/db/00-role-e-bancos.sql
+	@$(PSQL) -d lm_plataforma  < test/db/20-plataforma-base.sql
+	@for r in 1 2; do \
+	  for m in $(MIGRATIONS); do \
+	    $(PSQL) -d lm_plataforma < db/migrations/$$m.sql >/dev/null; \
+	  done; \
+	  for g in $(GRANTS); do \
+	    $(PSQL) -d lm_plataforma < db/grants/$$g.sql >/dev/null; \
+	  done; \
+	done
+	@echo "[isolamento] conferindo RLS ATIVA e FORÇADA em toda tabela nova…"
+	@$(PSQL) -d lm_plataforma < test/db/30-confere-rls.sql
+	@echo "[isolamento] rodando a suíte…"
+	@DATABASE_URL="$(DSN_PLATAFORMA)" ADMIN_DATABASE_URL="$(ADM_PLATAFORMA)" \
+	  LM_ENCRYPTION_KEY="chave-de-teste-da-infra" \
+	  node --test --test-concurrency=1 test/isolamento-tenant.itest.js
+
+# Sobe, roda tudo, derruba — o down acontece mesmo com teste vermelho.
+test-all:
+	@$(MAKE) test-db-up
+	@rc=0; \
+	 $(MAKE) test         || rc=$$?; \
+	 $(MAKE) test-origem  || rc=$$?; \
+	 $(MAKE) test-isolation || rc=$$?; \
+	 $(MAKE) test-db-down; \
+	 if [ $$rc -ne 0 ]; then echo "[ci] VERMELHO"; else echo "[ci] verde"; fi; \
+	 exit $$rc
+
+ci: test-all
+
+# ── migração à mão num banco local ────────────────────────────────────────────
 guard-nao-producao:
 	@case "$(PSQL_DSN)" in \
 	  *127.0.0.1*|*localhost*) : ;; \
@@ -32,19 +116,10 @@ migrate: guard-nao-producao
 	@set -euo pipefail; \
 	for m in $(MIGRATIONS); do \
 	  echo "[migrate] $$m"; \
-	  $(PSQL) "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -q -f db/migrations/$$m.sql; \
+	  $(PSQL) -d lm_plataforma < db/migrations/$$m.sql; \
 	done; \
 	for g in $(GRANTS); do \
 	  echo "[migrate] grants: $$g"; \
-	  $(PSQL) "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -q -f db/grants/$$g.sql; \
+	  $(PSQL) -d lm_plataforma < db/grants/$$g.sql; \
 	done; \
 	echo "[migrate] ok"
-
-test:
-	node --test $(UNIT_TESTS)
-
-itest:
-	bash test/run-plataforma-itest.sh
-
-ci: test itest
-	@echo "[ci] núcleo + isolamento verdes"
