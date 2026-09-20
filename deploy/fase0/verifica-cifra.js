@@ -40,6 +40,10 @@ async function main() {
     res[nome] = { estado: falhou ? 'falhou' : 'ok', abertos: ok, falharam: falhou };
   };
 
+  // Confere uma tabela só se ela já existir no banco restaurado (a credencial por unidade
+  // nasce com a migração 172; até lá o resultado é "ausente", não erro).
+  const existe = async (tab) => (await c.query("SELECT to_regclass($1) IS NOT NULL AS e", [tab])).rows[0].e;
+
   await conferir('certificado_digital',
     "SELECT chave_cifrada AS v FROM compasso.certificado WHERE status = 'ativo' AND chave_cifrada IS NOT NULL",
     appKey, (t) => t.includes('PRIVATE KEY'));
@@ -49,6 +53,14 @@ async function main() {
   await conferir('token_evolution_dashboard',
     'SELECT evolution_token_enc AS v FROM app.franquia WHERE evolution_token_enc IS NOT NULL',
     appKey, (t) => t.length > 0);
+
+  if (await existe('plataforma.credencial_unidade')) {
+    await conferir('credencial_unidade',
+      'SELECT valor_cifrado AS v FROM plataforma.credencial_unidade WHERE revogado_em IS NULL AND valor_cifrado IS NOT NULL',
+      lmKey, (t) => t.length > 0);
+  } else {
+    res.credencial_unidade = { estado: 'ausente' };
+  }
 
   await c.end();
   console.log(JSON.stringify(res));
