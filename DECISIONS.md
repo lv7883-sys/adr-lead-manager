@@ -319,3 +319,39 @@ branch só mudaria o rótulo e perderia a metade "origem do lead", que é metade
 | A6 | **Aberta e agora é a única que bloqueia o merge.** A suíte de isolamento continua sem rodar: esta máquina não tem Docker (confirmado por ausência de binário, de serviço, de processo e de WSL) nem qualquer Postgres. |
 | A7 | **Fechada para o caminho do webhook** (entrada e saída medidas). Segue aberta para as rotinas em lote → vira A8. |
 | A8 | **Nova:** `src/jobs/*` chamam IA sem contexto de unidade. O log `ia.custo_orfao` é o rastro para encontrá-las. |
+
+### D25 — O jid do WhatsApp não é telefone (bug real, achado por coordenação)
+O Leo pediu para não mexer em nada perto de telefone sem combinar com quem já tinha
+trabalhado nisso. A coordenação com a sessão de WhatsApp não só confirmou a régua — **ela
+revelou um bug meu**. `registrarOrigem` calculava a chave do contato sobre `msg.externalId`,
+que sai de `jid.split('@')[0]`. Três formas de jid produziam chave falsa:
+- `5519999990001:12@s.whatsapp.net` — o `:12` (sufixo de aparelho) entrava como dígito, e a
+  MESMA pessoa virava contato novo, com origem gravada duas vezes;
+- `NNNNNNNN@lid` — id de privacidade, não telefone: os dígitos do lid viravam "telefone" e
+  inventavam um contato;
+- `@g.us` — grupo. Já era barrado no webhook, mas não no módulo.
+
+A régua aplicada é a que **já existia** em `src/waChats.js`: tira o sufixo de aparelho,
+recusa grupo, resolve `@lid` pelo mapa `wa_lid` (migr. 115) e exige PN de 10 a 15 dígitos.
+Sem telefone confiável, **não grava**: chave errada é pior que origem ausente — ausente
+aparece como `nenhum` e alguém investiga; errada atribui a campanha à pessoa errada e
+ninguém desconfia.
+**Nada de `br_phone_key`, `telefoneBR.js` ou das migrações 085/094/112/113 foi alterado** —
+só o meu chamador passou a respeitar a régua. Quatro testes (18–21) cobrem os quatro casos.
+*Duas coisas que aprendi e valem registro:* `matchKeys` (JS) só tira o 9º dígito quando o DDD
+está na lista ANATEL, enquanto `br_phone_key` (SQL) tira sempre que o local tem 11 dígitos e
+o 3º é `9` — convergem no caso brasileiro real, divergem com DDD inválido. E número
+estrangeiro fica com os dígitos como vieram, sem `+`.
+
+### Status final da sessão 3
+| # | Situação |
+|---|---|
+| **A6** | **FECHADA.** As suítes rodaram num Postgres descartável na VPS (container próprio, porta 5433, tmpfs — produção intocada): **22/22** na origem do lead e **13/13** no isolamento entre unidades. As migrações 170–173 aplicadas duas vezes, limpas, e a trava de RLS aprovou todas as tabelas novas. |
+| A8 | Aberta: `src/jobs/*` ainda chamam IA sem contexto de unidade (aparecerão no log como `ia.custo_orfao`). |
+| **A9** | **Nova:** `vincularLead` ainda recebe `msg.externalId` cru do webhook. Para contato que chega por `@lid`, o vínculo simplesmente não acontece (0 linhas) — não corrompe nada, mas a origem fica sem lead. Resolver junto com a próxima frente que tocar o webhook. |
+
+**Quatro defeitos reais foram encontrados por rodar o teste contra banco de verdade**, e
+nenhum deles apareceria em teste de unidade: a coluna `ref`/`referencia` (que quebrava TODA a
+medição de consumo em silêncio), o `--remove-orphans` que removeria o container de produção,
+o jid não normalizado, e o contrato de retorno inconsistente. É o argumento a favor de a
+suíte existir, e de ela ser bloqueante.
