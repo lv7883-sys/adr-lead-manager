@@ -17,6 +17,8 @@ const waConteudo = require('../waConteudo');  // tradutor único do conteúdo (p
 const waEnquete = require('../waEnquete');    // voto de enquete cifrado (paridade 3)
 const waEventos = require('../waEventos');
 const waChats = require('../waChats');         // paridade: estado da lista de conversas vindo do celular     // paridade 6: ligação e eventos de grupo
+const { comUnidade } = require('../plataforma/contexto');   // dona do trabalho -> custo de IA com dono
+const origemLead = require('../origemLead');   // origem do 1º toque (anúncio Click-to-WhatsApp)
 const { decrypt } = require('../crypto');
 
 const router = express.Router();
@@ -712,17 +714,27 @@ async function handleZapiWebhook(req, res) {
         await engine.classificarSaida(tenant.id, { ident, sampleId: cap.id, body: msg.body, mediaPendente });
       }
     };
-    processarSaida().catch((err) => log.warn('saida.unhandled', { error: err.message }));
+    // comUnidade marca a unidade dona: cobre TUDO que rodar aqui dentro (transcrição do
+    // áudio, classificação da bola) para que nenhuma chamada de IA vire custo órfão.
+    comUnidade(tenant.id, { modulo: 'LEADS' }, processarSaida)
+      .catch((err) => log.warn('saida.unhandled', { error: err.message }));
     return;
   }
 
   // ADR-016 — mídia recebida: baixa, grava em disco e (áudio) transcreve ANTES do
   // funil, pra a mensagem ser persistida já com a mídia. Best-effort, não trava.
   const processar = async () => {
+    // ORIGEM PRIMEIRO. O dado do anúncio (contextInfo.externalAdReply / código no texto)
+    // chega UMA ÚNICA VEZ, nesta mensagem. Se a IA cair depois, a conversa espera o
+    // reprocessamento — a origem não teria segunda chance. Por isso ela é gravada ANTES
+    // de baixar mídia, transcrever áudio ou classificar. Nunca lança (trata por dentro).
+    await origemLead.registrarOrigem(tenant.id, msg, req.body, log);
     await baixarMidiaInbound(tenant, msg, log);
     const textoCartao = textoDeCartaoForaDoFunil(msg);
     if (textoCartao) msg.body = null;   // funil e Janis recebem o mesmo vazio de antes
     await engine.processInbound(tenant, msg, req.body);
+    // O lead (se nasceu) só existe agora: liga a origem já gravada a ele. Nunca lança.
+    await origemLead.vincularLead(tenant.id, msg.externalId, log);
     await garantirLinhaDoCartao(tenant.id, msg, textoCartao, req.body, log);
     await curarMidia(tenant, msg, log);
     await gravarExtras(tenant.id, msg, log);
@@ -733,7 +745,10 @@ async function handleZapiWebhook(req, res) {
       .catch((e) => log.warn('autoreply.unhandled', { error: e.message }));
   };
   // Funil de triagem (Portões 0/1/2). Fire-and-forget com captura de erro.
-  processar().catch((err) => log.error('engine.unhandled_error', { error: err.message }));
+  // Todo o caminho de entrada (mídia, transcrição, funil, Janis) roda com a unidade dona
+  // marcada: é o que dá dono ao custo de IA sem passar tenantId por 12 arquivos.
+  comUnidade(tenant.id, { modulo: 'LEADS' }, processar)
+    .catch((err) => log.error('engine.unhandled_error', { error: err.message }));
 }
 
 router.post('/zapi/:tenantId', authenticateTenant, handleZapiWebhook);
