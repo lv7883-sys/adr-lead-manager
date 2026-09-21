@@ -145,6 +145,12 @@ async function resolverDePara(c, tenantId, { codigoCampanha, anuncioId }) {
 // e ninguém desconfia.
 const _dig = (j) => String(j || '').split('@')[0].split(':')[0].replace(/\D/g, '');
 
+// Migração 171 ainda não aplicada: desliga após o primeiro erro. Sem isto seria UMA linha
+// de erro por mensagem recebida até alguém aplicar — barulho que esconde erro de verdade.
+// A ordem correta é migração ANTES do deploy; isto é a rede para quem inverter, ou para um
+// rollback que deixe código novo com banco antigo.
+let _semTabela = false;
+
 async function _telefoneDoContato(c, tenantId, rawBody, msg) {
   const jid = rawBody && rawBody.data && rawBody.data.key && rawBody.data.key.remoteJid;
   if (!jid) {
@@ -165,7 +171,7 @@ async function _telefoneDoContato(c, tenantId, rawBody, msg) {
 }
 
 async function registrarOrigem(tenantId, msg, rawBody, log = logger) {
-  if (!tenantId || !msg) return { gravado: false, metodo: null };
+  if (!tenantId || !msg || _semTabela) return { gravado: false, metodo: null };
   const canal = (msg && msg.channel) || 'whatsapp';
   try {
     const message = (rawBody && rawBody.data && rawBody.data.message) || null;
@@ -215,7 +221,15 @@ async function registrarOrigem(tenantId, msg, rawBody, log = logger) {
     return { gravado, metodo };
   } catch (e) {
     // O webhook segue. Perdemos a origem DESTE contato — e o log é o que conta isso.
-    log.error('origem_lead.falhou', { tenant_id: tenantId, error: e.message });
+    if (e && e.code === '42P01') {
+      if (!_semTabela) {
+        _semTabela = true;
+        log.error('origem_lead.tabela_ausente', { tenant_id: tenantId,
+          aviso: 'migração 171 não aplicada — captura de origem DESLIGADA até o próximo reinício' });
+      }
+    } else {
+      log.error('origem_lead.falhou', { tenant_id: tenantId, error: e.message });
+    }
     return { gravado: false, metodo: null };
   }
 }

@@ -37,7 +37,8 @@ PSQL_DSN   ?= $(ADM_PLATAFORMA)
 
 # Testes puros: rodam offline e não tocam em banco nenhum.
 UNIT_TESTS := test/plataforma.test.js test/origem-lead.test.js test/ia-wrapper.test.js \
-              test/sdk-ia-sem-atalho.test.js test/webhook.test.js test/waConteudo.test.js
+              test/sdk-ia-sem-atalho.test.js test/anonimizacao-ordem-migracao.test.js \
+              test/webhook.test.js test/waConteudo.test.js
 
 .PHONY: test test-db-up test-db-down test-isolation test-origem test-all ci migrate guard-nao-producao
 
