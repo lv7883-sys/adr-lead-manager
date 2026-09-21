@@ -130,8 +130,8 @@ async function resolverDePara(c, tenantId, { codigoCampanha, anuncioId }) {
  * @param {string} tenantId
  * @param {{externalId: string, body: ?string}} msg  mensagem já normalizada pelo webhook
  * @param {object} rawBody  payload BRUTO do webhook (vai inteiro para payload_bruto)
- * @returns {Promise<{gravado: boolean, metodo: ?string, motivo?: string}>}
- *   metodo só vem preenchido quando houve gravação; motivo diz por que não houve.
+ * @returns {Promise<{gravado: boolean, metodo: ?string}>}  metodo só vem preenchido
+ *   quando houve gravação; o porquê de não haver fica no log.
  */
 // ── O jid do WhatsApp NÃO é um telefone ────────────────────────────────────────────────
 // Régua confirmada com a sessão de WhatsApp em 21/09/2026, espelhando src/waChats.js.
@@ -199,8 +199,9 @@ async function registrarOrigem(tenantId, msg, rawBody, log = logger) {
     });
     // Pulou por falta de telefone confiável: NÃO gravou e não há método a declarar.
     // `metodo` descreve o que foi PERSISTIDO; devolvê-lo aqui faria o chamador acreditar
-    // que existe uma linha de origem que não existe. `motivo` diz por que não há.
-    if (r && r.pulou) return { gravado: false, metodo: null, motivo: r.pulou };
+    // que existe uma linha de origem que não existe. O porquê fica no log — nenhum
+    // chamador decide nada com ele, e o retorno tem um contrato só.
+    if (r && r.pulou) return { gravado: false, metodo: null };
     const gravado = r.rowCount > 0;
     // Só o 1º toque vira log de origem; do 2º em diante seria ruído em toda mensagem.
     if (gravado) {
