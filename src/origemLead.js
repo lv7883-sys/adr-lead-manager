@@ -130,7 +130,8 @@ async function resolverDePara(c, tenantId, { codigoCampanha, anuncioId }) {
  * @param {string} tenantId
  * @param {{externalId: string, body: ?string}} msg  mensagem já normalizada pelo webhook
  * @param {object} rawBody  payload BRUTO do webhook (vai inteiro para payload_bruto)
- * @returns {Promise<{gravado: boolean, metodo: ?string}>}
+ * @returns {Promise<{gravado: boolean, metodo: ?string, motivo?: string}>}
+ *   metodo só vem preenchido quando houve gravação; motivo diz por que não houve.
  */
 // ── O jid do WhatsApp NÃO é um telefone ────────────────────────────────────────────────
 // Régua confirmada com a sessão de WhatsApp em 21/09/2026, espelhando src/waChats.js.
@@ -176,7 +177,7 @@ async function registrarOrigem(tenantId, msg, rawBody, log = logger) {
         // info, não warn: 'grupo' é rotina. 'lid_sem_telefone' é o que vale investigar —
         // se aparecer muito, o mapa wa_lid não está sendo alimentado.
         log.info('origem_lead.sem_telefone', { tenant_id: tenantId, motivo: contato.pular });
-        return { rowCount: 0, pulou: true };
+        return { pulou: contato.pular };
       }
       const externalId = contato.pn;
       const derivado = (codigoCampanha || ad.anuncioId)
@@ -196,6 +197,10 @@ async function registrarOrigem(tenantId, msg, rawBody, log = logger) {
           d.campanha_ref || null, d.motor || null, d.objetivo || null, d.publico || null, d.criativo || null,
           metodo, rawBody ? JSON.stringify(rawBody) : null]);
     });
+    // Pulou por falta de telefone confiável: NÃO gravou e não há método a declarar.
+    // `metodo` descreve o que foi PERSISTIDO; devolvê-lo aqui faria o chamador acreditar
+    // que existe uma linha de origem que não existe. `motivo` diz por que não há.
+    if (r && r.pulou) return { gravado: false, metodo: null, motivo: r.pulou };
     const gravado = r.rowCount > 0;
     // Só o 1º toque vira log de origem; do 2º em diante seria ruído em toda mensagem.
     if (gravado) {
