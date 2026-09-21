@@ -8,8 +8,9 @@
 //   (3) a cota de A não consome a cota de B;
 //   (4) o trabalhador atendendo A não segura a fila de B.
 //
-// Roda pelo test/run-plataforma-itest.sh, num Postgres descartável. A aplicação conecta como
-// lead_manager_user (não superuser) — a RLS exercitada aqui é a MESMA de produção.
+// Roda por `make test-isolation` (ou pelo bloco equivalente), num Postgres descartável.
+// A aplicação conecta como lead_manager_user (não superusuário): a RLS exercitada aqui é a
+// MESMA de produção — como superusuário, o teste não provaria nada.
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { Client } = require('pg');
@@ -157,10 +158,10 @@ test('(2b) dentro do contexto de B, a credencial de A não existe — nem cifrad
 });
 
 test('(2c) a credencial não fica em claro no banco', async () => {
-  const bruto = await adm.query('SELECT value_encrypted FROM plataforma.credencial_unidade');
+  const bruto = await adm.query('SELECT valor_cifrado FROM plataforma.credencial_unidade');
   assert.ok(bruto.rows.length >= 2);
   for (const l of bruto.rows) {
-    const texto = l.value_encrypted.toString('utf8');
+    const texto = l.valor_cifrado.toString('utf8');
     assert.ok(!texto.includes('CHAVE-DA-UNIDADE'), 'credencial gravada em texto legível');
   }
 });

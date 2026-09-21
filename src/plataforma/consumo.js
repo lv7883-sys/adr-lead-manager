@@ -53,7 +53,7 @@ async function registrarUso(tenantId, moduleCode, eventType, quantidade = 1, opc
       ? opcoes.client.query.bind(opcoes.client)
       : (sql, params) => withTenant(tenantId, (c) => c.query(sql, params));
     await exec(
-      `INSERT INTO plataforma.consumo_evento (tenant_id, modulo_codigo, tipo_evento, quantidade, custo_unitario_brl, ref)
+      `INSERT INTO plataforma.consumo_evento (tenant_id, modulo_codigo, tipo_evento, quantidade, custo_unitario_brl, referencia)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [tenantId, moduleCode, eventType, qtd, custo, opcoes.ref || null]);
     return true;

@@ -74,7 +74,7 @@ test('(1) external_ad_reply: grava o anúncio e deriva a campanha pelo anuncio_i
   assert.equal(l.campanha_ref, 'bateria-set');   // 2ª chance: casou pelo id do anúncio
   assert.equal(l.publico, 'pais-8-12');
   assert.equal(l.lead_id, null);                 // o lead ainda não existe — e isso é o esperado
-  assert.equal(l.chave_contato, '1999000001');     // br_phone_key: sem 55, sem 9º dígito
+  assert.equal(l.chave_contato, '1990000001');     // br_phone_key: sem 55, sem 9º dígito
   assert.equal(l.payload_bruto.data.key.remoteJid, `${tel}@s.whatsapp.net`);
 });
 
@@ -124,7 +124,7 @@ test('(5) 2ª mensagem do mesmo contato NÃO sobrescreve a origem', async () => 
     payload(tel, 'agora vi este [RK9]', AD('120210000000000009')), mudo);
   assert.equal(segunda.gravado, false, 'a 2ª mensagem não grava linha nova');
 
-  const doContato = (await linhas(T1)).filter((x) => x.chave_contato === '1999000005');
+  const doContato = (await linhas(T1)).filter((x) => x.chave_contato === '1990000005');
   assert.equal(doContato.length, 1, 'uma linha por contato');
   assert.equal(doContato[0].codigo_campanha, 'RK3');
   assert.equal(doContato[0].anuncio_id, null, 'o 1º toque continua intacto');
@@ -162,13 +162,13 @@ test('(8) um lead nunca tem duas origens (índice único parcial)', async () => 
     `INSERT INTO lead_manager.leads (tenant_id, name, phone) VALUES ($1,'Duplo','5519990000008') RETURNING id`,
     [T1])).rows[0].id;
   await adm.query(
-    `UPDATE lead_manager.origem_lead SET lead_id = $2 WHERE tenant_id = $1 AND chave_contato = '1999000001'`,
+    `UPDATE lead_manager.origem_lead SET lead_id = $2 WHERE tenant_id = $1 AND chave_contato = '1990000001'`,
     [T1, leadId]);
   await assert.rejects(
-    adm.query(`UPDATE lead_manager.origem_lead SET lead_id = $2 WHERE tenant_id = $1 AND chave_contato = '1999000002'`,
+    adm.query(`UPDATE lead_manager.origem_lead SET lead_id = $2 WHERE tenant_id = $1 AND chave_contato = '1990000002'`,
       [T1, leadId]),
     /duplicate key|uq_origem_lead_lead/);
-  await adm.query(`UPDATE lead_manager.origem_lead SET lead_id = NULL WHERE tenant_id = $1 AND chave_contato = '1999000001'`, [T1]);
+  await adm.query(`UPDATE lead_manager.origem_lead SET lead_id = NULL WHERE tenant_id = $1 AND chave_contato = '1990000001'`, [T1]);
 });
 
 // ── a origem é imutável ────────────────────────────────────────────────────────────────
@@ -252,11 +252,11 @@ test('(15) anonimizar NÃO é porta de entrada para reescrever a origem', async 
     adm.query(
       `UPDATE lead_manager.origem_lead
           SET telefone = 'anonimizado_0000000000000000', payload_bruto = '{}'::jsonb, campanha_ref = 'outra'
-        WHERE tenant_id = $1 AND chave_contato = '1999000004'`, [T1]),
+        WHERE tenant_id = $1 AND chave_contato = '1990000004'`, [T1]),
     /imutável/);
   // telefone trocado por OUTRO telefone (não pelo sentinela) também é recusado
   await assert.rejects(
-    adm.query(`UPDATE lead_manager.origem_lead SET telefone = '5511999999999' WHERE tenant_id = $1 AND chave_contato = '1999000004'`, [T1]),
+    adm.query(`UPDATE lead_manager.origem_lead SET telefone = '5511999999999' WHERE tenant_id = $1 AND chave_contato = '1990000004'`, [T1]),
     /imutável/);
 });
 
@@ -278,7 +278,7 @@ test('(13) erro de banco vira log, não exceção', async () => {
 // A varredura é GENÉRICA (to_jsonb da linha inteira), não uma lista de colunas escrita à
 // mão: se alguém acrescentar uma coluna com dado pessoal amanhã e esquecer de limpá-la na
 // anonimização, este teste fica vermelho sozinho. Uma lista à mão envelheceria em silêncio.
-test('(14) exclusão do cliente não deixa telefone, nome nem texto de mensagem em coluna alguma', async () => {
+test('(16) exclusão do cliente não deixa telefone, nome nem texto de mensagem em coluna alguma', async () => {
   const tel = '5519990000021';
   const NOME_PERFIL = 'Mariana Fulana de Tal';
   const TEXTO = 'quero matricular meu filho de 9 anos';
@@ -330,7 +330,7 @@ test('(14) exclusão do cliente não deixa telefone, nome nem texto de mensagem 
   assert.ok(dep.capturado_em);
 });
 
-test('(15) a exclusão NÃO é porta para reescrever a atribuição', async () => {
+test('(17) a exclusão NÃO é porta para reescrever a atribuição', async () => {
   // apagar o que identifica a pessoa é permitido; mexer na campanha junto, não.
   await assert.rejects(
     adm.query(
@@ -338,7 +338,7 @@ test('(15) a exclusão NÃO é porta para reescrever a atribuição', async () =
           SET telefone = 'anonimizado_0000111122223333', payload_bruto = '{}'::jsonb,
               anuncio_url = NULL, anuncio_titulo = NULL, anuncio_texto = NULL,
               campanha_ref = 'outra'
-        WHERE tenant_id = $1 AND chave_contato = '1999000002'`, [T1]),
+        WHERE tenant_id = $1 AND chave_contato = '1990000002'`, [T1]),
     /imutável/);
   // e a aplicação não tem permissão de tocar em campanha nem com a forma certa de exclusão
   await assert.rejects(
