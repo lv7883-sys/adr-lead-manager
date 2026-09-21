@@ -16,6 +16,13 @@
 # declarada em lugar nenhum deste repositório (o Postgres é externo, administrado
 # fora daqui); se um dia divergir, mude aqui e diga por quê no DECISIONS.md.
 # ============================================================================
+# PROJETO PRÓPRIO, E ISTO NÃO É DETALHE: sem `name`, o Docker deriva o nome do projeto
+# da PASTA — e na VPS este arquivo e o docker-compose.lead-manager.yml moram na mesma.
+# Os dois cairiam no projeto "adr-lead-manager", e aí um `down` daqui enxergaria o
+# container de PRODUÇÃO como órfão do projeto. Com nome próprio, o mundo deste arquivo
+# começa e termina nele.
+name: adr-lm-teste
+
 services:
   pg-teste:
     image: postgres:16-alpine

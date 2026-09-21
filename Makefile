@@ -18,8 +18,11 @@
 #
 SHELL := /bin/bash
 
-DC        := MSYS_NO_PATHCONV=1 docker compose -f docker-compose.test.yml
-PSQL      := MSYS_NO_PATHCONV=1 docker compose -f docker-compose.test.yml exec -T pg-teste psql -v ON_ERROR_STOP=1 -q -U postgres
+# -p adr-lm-teste: nome de projeto explícito, além do `name:` no arquivo (versões antigas
+# do compose ignoram o `name:`). É o que impede este Makefile de enxergar — e mexer em —
+# containers do compose de PRODUÇÃO, que na VPS mora na mesma pasta.
+DC        := MSYS_NO_PATHCONV=1 docker compose -p adr-lm-teste -f docker-compose.test.yml
+PSQL      := MSYS_NO_PATHCONV=1 docker compose -p adr-lm-teste -f docker-compose.test.yml exec -T pg-teste psql -v ON_ERROR_STOP=1 -q -U postgres
 PORTA     := 5433
 
 DSN_ORIGEM     := postgres://lead_manager_user:itest@127.0.0.1:$(PORTA)/lm_origem
@@ -56,7 +59,10 @@ test-db-up:
 
 test-db-down:
 	@echo "[db] derrubando e apagando…"
-	@$(DC) down -v --remove-orphans
+	@# SEM --remove-orphans de propósito: "órfão" é qualquer container do projeto que não
+	@# esteja neste arquivo — e um engano de nome de projeto transformaria isso em derrubar
+	@# produção. O -v aqui só alcança volumes deste projeto.
+	@$(DC) down -v
 
 # ── suíte da ORIGEM DO LEAD (migrações 170/171) ───────────────────────────────
 test-origem:
