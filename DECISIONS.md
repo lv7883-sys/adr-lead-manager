@@ -355,3 +355,28 @@ nenhum deles apareceria em teste de unidade: a coluna `ref`/`referencia` (que qu
 medição de consumo em silêncio), o `--remove-orphans` que removeria o container de produção,
 o jid não normalizado, e o contrato de retorno inconsistente. É o argumento a favor de a
 suíte existir, e de ela ser bloqueante.
+
+### Sessão 4 — publicação (21/09/2026, 19h24 UTC)
+**Publicado.** `2351cad` no ar; imagem anterior marcada como `adr-lead-manager:rollback-pre-170-174`
+(volta em um comando). Container saudável em 12 s, **zero erros** no arranque e depois.
+
+**Não-regressão, com tráfego real:** o webhook recebeu e processou mensagem de grupo, recibos de
+entrega e arquivou rascunho por resposta humana nos minutos seguintes ao deploy; o dashboard
+(agendador de disparos) seguiu intocado e sem erros. Os `ack.updated` provam que o envio
+continua chegando ao destino.
+
+**Caminho de escrita provado EM PRODUÇÃO, sem deixar dado:** transação com `SET LOCAL ROLE
+lead_manager_user` (RLS valendo de verdade) — o INSERT gravou `metodo=codigo_campanha` com
+`chave_contato=1999999999` (br_phone_key correta), a tentativa de reescrever `campanha_ref` foi
+**recusada por falta de privilégio** (migração 174 valendo, barrando antes mesmo do gatilho), e o
+`ROLLBACK` deixou a tabela com 0 linhas.
+
+**externalAdReply: NÃO aparece.** 300 mensagens recentes inspecionadas, 18 com `contextInfo`
+(citação, menção, encaminhada) e **nenhuma** com `externalAdReply`. É o esperado: nenhum anúncio
+Click-to-WhatsApp está no ar, então ninguém clicou em nenhum. A leitura de `contextInfo` funciona —
+o que falta é o clique existir.
+
+**Fumaça com `[TST1]`: PENDENTE, e depende de ação física.** O teste exige uma mensagem de entrada
+de um telefone real; não tenho aparelho, e fabricar um payload no webhook de produção criaria lead
+falso no funil da recepção. Fica para o Leo enviar. Até lá, o que está provado é tudo menos o
+último elo: a captura nunca rodou com mensagem de verdade.
