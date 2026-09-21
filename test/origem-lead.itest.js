@@ -346,3 +346,52 @@ test('(17) a exclusão NÃO é porta para reescrever a atribuição', async () =
       `UPDATE origem_lead SET campanha_ref = 'outra' WHERE tenant_id = $1`, [T1])),
     /permission denied|permissão negada/i);
 });
+
+// ── O jid do WhatsApp não é telefone ───────────────────────────────────────────────────
+// Régua confirmada com a sessão de WhatsApp (21/09/2026), espelhando src/waChats.js.
+// Chave errada é PIOR que origem ausente: ausente vira 'nenhum' e se investiga; errada
+// atribui a campanha à pessoa errada e ninguém desconfia.
+const jidDe = (jid, texto, ad) => {
+  const p = payload('0', texto, ad);
+  p.data.key.remoteJid = jid;
+  return p;
+};
+
+test('(18) sufixo de dispositivo no jid não cria um segundo contato', async () => {
+  const tel = '5519990000018';
+  await origemLead.registrarOrigem(T1, msgDe(tel, 'primeira [RK3]'),
+    jidDe(`${tel}@s.whatsapp.net`, 'primeira [RK3]'), mudo);
+  // mesma pessoa, agora com ":12" (outro aparelho dela)
+  const segunda = await origemLead.registrarOrigem(T1, msgDe(tel, 'de novo [RK9]'),
+    jidDe(`${tel}:12@s.whatsapp.net`, 'de novo [RK9]'), mudo);
+  assert.equal(segunda.gravado, false, 'o ":12" virou dígito e inventou um contato novo');
+  assert.equal((await linhas(T1)).filter((x) => x.chave_contato === '1990000018').length, 1);
+});
+
+test('(19) @lid sem mapa NÃO grava origem — chave falsa é pior que origem ausente', async () => {
+  const r = await origemLead.registrarOrigem(T1, msgDe('274312345678901', 'oi [RK3]'),
+    jidDe('274312345678901@lid', 'oi [RK3]'), mudo);
+  assert.equal(r.gravado, false);
+  assert.equal((await linhas(T1)).filter((x) => x.telefone === '274312345678901').length, 0);
+});
+
+test('(20) @lid COM mapa grava na chave do telefone de verdade', async () => {
+  const tel = '5519990000020';
+  const lid = '198765432100000@lid';
+  await adm.query(`INSERT INTO lead_manager.wa_lid (tenant_id, lid, pn) VALUES ($1, $2, $3)`,
+    [T1, lid, `${tel}@s.whatsapp.net`]);
+  const r = await origemLead.registrarOrigem(T1, msgDe('198765432100000', 'vim do anúncio [RK3]'),
+    jidDe(lid, 'vim do anúncio [RK3]'), mudo);
+  assert.equal(r.gravado, true);
+  const [l] = (await linhas(T1)).filter((x) => x.chave_contato === '1990000020');
+  assert.ok(l, 'deveria ter gravado sob o telefone do mapa, não sob os dígitos do lid');
+  assert.equal(l.telefone, tel);
+  assert.equal(l.campanha_ref, 'bateria-set');
+});
+
+test('(21) grupo nunca vira origem de lead', async () => {
+  const r = await origemLead.registrarOrigem(T1, msgDe('120363999888777', 'oi [RK3]'),
+    jidDe('120363999888777@g.us', 'oi [RK3]'), mudo);
+  assert.equal(r.gravado, false);
+  assert.equal((await linhas(T1)).filter((x) => x.telefone === '120363999888777').length, 0);
+});

@@ -37,3 +37,21 @@ CREATE POLICY tenant_isolation ON lead_manager.leads
   USING      (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
 GRANT SELECT, INSERT, UPDATE ON lead_manager.leads TO lead_manager_user;
+
+-- wa_lid (migr. 115): mapa lid -> telefone. O jid `NNNN@lid` é id de PRIVACIDADE, não
+-- telefone; sem este mapa, calcular a chave em cima dele inventa um contato.
+CREATE TABLE IF NOT EXISTS lead_manager.wa_lid (
+  tenant_id  uuid NOT NULL REFERENCES lead_manager.tenants(id) ON DELETE CASCADE,
+  lid        text NOT NULL,
+  pn         text,
+  proprio    boolean NOT NULL DEFAULT false,
+  visto_em   timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, lid)
+);
+ALTER TABLE lead_manager.wa_lid ENABLE ROW LEVEL SECURITY;
+ALTER TABLE lead_manager.wa_lid FORCE  ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON lead_manager.wa_lid;
+CREATE POLICY tenant_isolation ON lead_manager.wa_lid
+  USING      (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
+GRANT SELECT, INSERT, UPDATE ON lead_manager.wa_lid TO lead_manager_user;

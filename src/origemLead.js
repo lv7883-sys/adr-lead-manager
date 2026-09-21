@@ -132,15 +132,53 @@ async function resolverDePara(c, tenantId, { codigoCampanha, anuncioId }) {
  * @param {object} rawBody  payload BRUTO do webhook (vai inteiro para payload_bruto)
  * @returns {Promise<{gravado: boolean, metodo: ?string}>}
  */
+// ── O jid do WhatsApp NÃO é um telefone ────────────────────────────────────────────────
+// Régua confirmada com a sessão de WhatsApp em 21/09/2026, espelhando src/waChats.js.
+// Calcular br_phone_key em cima do jid cru produz CHAVE FALSA e contato duplicado:
+//   • sufixo de dispositivo: `5519999990001:12@s.whatsapp.net` — o ":12" vira dígito;
+//   • `@lid`: id de privacidade do WhatsApp, NÃO é telefone. Os dígitos do lid viram
+//     "telefone" e inventam um contato. Resolve-se pelo mapa wa_lid (migr. 115);
+//   • `@g.us`: grupo (18–19 dígitos) nunca é lead — foi a causa da migr. 113.
+// Sem telefone confiável, NÃO se grava origem. Chave errada é pior que origem ausente:
+// ausente aparece como 'nenhum' e se investiga; errada atribui a campanha à pessoa errada
+// e ninguém desconfia.
+const _dig = (j) => String(j || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+
+async function _telefoneDoContato(c, tenantId, rawBody, msg) {
+  const jid = rawBody && rawBody.data && rawBody.data.key && rawBody.data.key.remoteJid;
+  if (!jid) {
+    // Z-API (body.phone) e caminhos sem jid: o externalId já é telefone.
+    const pn = _dig(msg && msg.externalId);
+    return pn.length >= 10 && pn.length <= 15 ? { pn } : { pular: 'telefone_invalido' };
+  }
+  const j = String(jid).replace(/:\d+@/, '@');            // tira o sufixo de dispositivo
+  if (/@g\.us$/i.test(j)) return { pular: 'grupo' };       // grupo nunca é lead
+  let pn = /@lid$/i.test(j) ? null : _dig(j);
+  if (!pn && /@lid$/i.test(j)) {
+    const r = await c.query('SELECT pn FROM wa_lid WHERE tenant_id = $1 AND lid = $2', [tenantId, j]);
+    pn = r.rows[0] && r.rows[0].pn ? _dig(r.rows[0].pn) : null;
+    if (!pn) return { pular: 'lid_sem_telefone' };
+  }
+  if (!pn || pn.length < 10 || pn.length > 15) return { pular: 'telefone_invalido' };
+  return { pn };
+}
+
 async function registrarOrigem(tenantId, msg, rawBody, log = logger) {
-  const externalId = msg && msg.externalId ? String(msg.externalId) : null;
-  if (!tenantId || !externalId) return { gravado: false, metodo: null };
+  if (!tenantId || !msg) return { gravado: false, metodo: null };
   const canal = (msg && msg.channel) || 'whatsapp';
   try {
     const message = (rawBody && rawBody.data && rawBody.data.message) || null;
     const { anuncio, codigoCampanha, metodo } = analisar({ message, texto: msg.body });
     const ad = anuncio || {};
     const r = await withTenant(tenantId, async (c) => {
+      const contato = await _telefoneDoContato(c, tenantId, rawBody, msg);
+      if (contato.pular) {
+        // info, não warn: 'grupo' é rotina. 'lid_sem_telefone' é o que vale investigar —
+        // se aparecer muito, o mapa wa_lid não está sendo alimentado.
+        log.info('origem_lead.sem_telefone', { tenant_id: tenantId, motivo: contato.pular });
+        return { rowCount: 0, pulou: true };
+      }
+      const externalId = contato.pn;
       const derivado = (codigoCampanha || ad.anuncioId)
         ? await resolverDePara(c, tenantId, { codigoCampanha, anuncioId: ad.anuncioId })
         : null;
