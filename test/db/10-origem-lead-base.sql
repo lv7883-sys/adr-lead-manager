@@ -9,6 +9,13 @@
 CREATE SCHEMA IF NOT EXISTS lead_manager;
 GRANT USAGE ON SCHEMA lead_manager TO lead_manager_user;
 
+-- ⚠ REPRODUZ PRODUÇÃO: o schema `lead_manager` de produção tem uma regra antiga de
+-- privilégios padrão (`{lead_manager_user=arwd/postgres}` em pg_default_acl) que concede
+-- INSERT/SELECT/UPDATE/DELETE à aplicação em TODA tabela nova, por cima do que a migração
+-- pedir. Sem esta linha, o teste de privilégio passaria aqui por um motivo que não existe
+-- lá — garantia falsa, que é pior que nenhuma. É esta regra que a migração 174 corrige.
+ALTER DEFAULT PRIVILEGES IN SCHEMA lead_manager GRANT ALL ON TABLES TO lead_manager_user;
+
 CREATE TABLE IF NOT EXISTS lead_manager.tenants (
   id                  uuid PRIMARY KEY,
   name                text,

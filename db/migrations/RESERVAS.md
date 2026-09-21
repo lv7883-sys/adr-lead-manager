@@ -15,8 +15,8 @@ colisão de 20/09/2026 (faixa 140–149 ocupada por engano por duas frentes ao m
 | 131–139 | ADR-051 | Núcleo canônico (unidade, aplicacao, assinatura, grupos de dados) | não |
 | 140–149 | ADR-052 | Implantação guiada | não (arquivos ainda não criados) |
 | 150–169 | ADR-051 | continuação do núcleo canônico | não |
-| **170–173** | **atribuição + plataforma** | 170 mapa_campanha, 171 origem_lead, 172 plataforma, 173 marketing | **não** |
-| 174–199 | livre | — | — |
+| **170–174** | **atribuição + plataforma** | 170 mapa_campanha, 171 origem_lead, 172 plataforma, 173 marketing, 174 privilégios da origem | **SIM — aplicadas em 21/09/2026** |
+| 175–199 | livre | — | — |
 
 ## Nomes já reservados dentro do schema `plataforma`
 

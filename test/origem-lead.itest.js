@@ -395,3 +395,14 @@ test('(21) grupo nunca vira origem de lead', async () => {
   assert.equal(r.gravado, false);
   assert.equal((await linhas(T1)).filter((x) => x.telefone === '120363999888777').length, 0);
 });
+
+test('(22) a aplicação NÃO pode apagar uma origem, nem com a regra antiga do schema', async () => {
+  // Em produção o schema lead_manager tem privilégio padrão que concede DELETE a toda
+  // tabela nova (pg_default_acl). A migração 174 desfaz isso NESTA tabela. Sem ela, uma
+  // consulta errada apagaria a atribuição de um lead para sempre — e o gatilho não veria,
+  // porque ele é BEFORE UPDATE e DELETE não passa por gatilho nenhum.
+  await assert.rejects(
+    withTenant(T1, (c) => c.query('DELETE FROM origem_lead WHERE tenant_id = $1', [T1])),
+    /permission denied|permissão negada/i,
+    'a aplicação conseguiu APAGAR uma linha de origem');
+});

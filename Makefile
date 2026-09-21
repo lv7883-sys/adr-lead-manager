@@ -71,7 +71,7 @@ test-origem:
 	@$(PSQL) -d postgres   < test/db/00-role-e-bancos.sql
 	@$(PSQL) -d lm_origem  < test/db/10-origem-lead-base.sql
 	@for r in 1 2; do \
-	  for m in 085_br_phone_key 170_mapa_campanha 171_origem_lead; do \
+	  for m in 085_br_phone_key 170_mapa_campanha 171_origem_lead 174_origem_lead_privilegios; do \
 	    $(PSQL) -d lm_origem < db/migrations/$$m.sql >/dev/null; \
 	  done; \
 	done
