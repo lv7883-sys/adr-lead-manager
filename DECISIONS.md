@@ -572,3 +572,20 @@ Suíte na VPS: 68 puros + **26** origem + 13 isolamento + 6 ingestão = **113, z
 **não antecipa** a normalização da porta de entrada — quando a linha 68 passar a normalizar, o
 caminho aqui não muda, porque ele deriva do `rawBody` e não do `externalId`. Fechar agora tira
 uma dependência do caminho daquela frente em vez de criar uma.
+
+**Dimensão real do problema (22/09/2026, medida pela sessão de WhatsApp).** O número que
+circulava — "38 NOT_LEAD com fato da Extranet" — estava **inflado**: contava linhas de
+`extranet_lead`, e um lead tem várias. Uma linha por lead dá **28**. Desses, 15 têm fato de
+verdade (aula agendada/realizada ou "Ganhou"); tirando 3 internos e 7 com desfecho posto por
+gente, sobram **7 leads realmente errados hoje** — entre eles uma "Ganhou" e uma com aula
+realizada em 27/08.
+
+É bem menor do que parecia, e a manchete honesta é essa. **Não diminui o caso:** 6 dos 7 estão
+com `review_result='confirmed_not_lead'` e ninguém consegue dizer se foi a recepção clicando
+ou a máquina — que é exatamente o buraco de autoria descrito acima. Por isso a recomendação da
+sessão da Extranet (virar PENDÊNCIA para humano em vez de ressuscitar sozinho) é a certa
+enquanto o dado não existir.
+
+*Terceiro caso no mesmo dia de número certo com significado errado* — depois da contagem de
+`@lid` e da leitura de `review_by`. Os três vieram de medir sem checar a granularidade ou a
+origem da coluna.
