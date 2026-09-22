@@ -203,11 +203,10 @@ async function aplicarRegua(c, tenantId, r, mode, stats) {
 //      'Exp. Cancelada' nem chega aqui: o mapa a manda para mirror-only (cancelar ≠ avançar).
 //   b) DISPENSA: recepção reverteu uma ressuscitação no Monitor → suggested_stage_dismissed=alvo;
 //      sem este check o run de 3h re-ressuscitaria em loop.
-//   c) INTERNO: quem casa internal_contacts por br_phone_key não volta ao funil (Leo/Daniele/
-//      Allan — a 127 quase errou usando lista de nomes; regra por propriedade, não por nome).
-//      ANTES da confirmação, de propósito: interno confirmado não é pendência, é ruído — o card
-//      do Plantão o exclui pela mesma propriedade e o contador concorda com o card (1º ciclo
-//      22/09 contou o Allan como pendência por a ordem ser a inversa).
+//   c) INTERNO: quem casa internal_contacts por br_phone_key NUNCA é auto-ressuscitado, mas
+//      com fato vira PENDÊNCIA (revisão do Leo 22/09, caso Allan: professor marcando aula para
+//      o filho — interno é exclusão de PALPITE, não de FATO). Regra por propriedade, não por
+//      nome (a 127 quase errou com lista de nomes). Sub-contador interno_pendencia no log.
 //   d) CONFIRMAÇÃO: review_result='confirmed_not_lead' NÃO é sobrescrito — 'SERVICE' é a
 //      credencial do dashboard e PODE ter sido a recepção clicando (caso Camila, header da 128);
 //      o sistema hoje não distingue pessoa de máquina. O caso permanece visível no card
@@ -221,16 +220,17 @@ async function aplicarRegua(c, tenantId, r, mode, stats) {
 async function ressuscitarDescartado(c, tenantId, r, l, alvo, mode, stats) {
   if (ORDINAL[alvo] < ORDINAL.experimental) return;                       // (a) sem fato de avanço
   if (alvo === l.suggested_stage_dismissed) return;                       // (b) recepção já disse não
-  // (c) INTERNO ANTES da confirmação (lição do 1º ciclo, 22/09: o Allan — interno COM
-  //     confirmed_not_lead — foi contado como pendência humana; interno não é "caso para a
-  //     recepção decidir", é caso de NUNCA ter entrado. O card do Plantão já o exclui pela
-  //     mesma propriedade; o contador tem que concordar com o card).
+  // (c) INTERNO com fato NUNCA auto-ressuscita, mas VIRA PENDÊNCIA (revisão do Leo 22/09, caso
+  //     Allan: professor que marcou aula para o FILHO — interno e cliente em potencial ao mesmo
+  //     tempo). Interno é exclusão de PALPITE, não de FATO: a recepção decide, no card do
+  //     Plantão, que desde a mesma revisão mostra interno-com-fato (plantao.js). O sub-contador
+  //     interno_pendencia existe para o log dizer QUANTOS dos pendentes são da casa.
   if (r._phoneKey) {
     const interno = (await c.query(
       `SELECT 1 FROM lead_manager.internal_contacts ic
         WHERE ic.tenant_id=$1 AND lead_manager.br_phone_key(ic.phone) = $2 LIMIT 1`,
       [tenantId, r._phoneKey])).rowCount > 0;
-    if (interno) { stats._internos.add(r._leadId); return; }
+    if (interno) { stats._internos.add(r._leadId); stats._pendencias.add(r._leadId); return; }
   }
   // (d) confirmação (pessoa OU máquina — indistinguíveis até o by_name povoar review_by)
   if (l.review_result === 'confirmed_not_lead') { stats._pendencias.add(r._leadId); return; }
@@ -287,7 +287,7 @@ async function syncExtranetLeads(c, { tenantId, snapshot, mode }) {
   stats.situacao_desconhecida = [...stats._desconhecidas];
   delete stats._desconhecidas;
   stats.pendencia_humana = stats._pendencias.size;
-  stats.interno_ignorado = stats._internos.size;
+  stats.interno_pendencia = stats._internos.size;   // subconjunto: quantos pendentes são da casa
   delete stats._pendencias; delete stats._internos;
   return stats;
 }

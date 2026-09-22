@@ -83,15 +83,20 @@ async function resumoPlantao(tenantId) {
       // Medido na primeira execução: 20 descartados marcaram aula, 8 fizeram, 6 matricularam.
       // NÃO é do dia: é passivo acumulado. Quem foi descartado semana passada e matriculou ontem
       // conta — restringir a hoje esconderia justamente o caso que demora a aparecer.
-      // ⚠ DUAS EXCLUSÕES, ambas aprendidas na primeira leitura do alerta pelo Leo (2026-09-17).
-      // Nem todo descartado com fato na Extranet é erro do filtro:
+      // ⚠ UMA exclusão (era duas; revisão do Leo em 2026-09-22, caso Allan):
       //
-      //   • CONTATO INTERNO — dono, professor, staff. O Leo mesmo fez uma aula experimental de
-      //     canto sem nunca trocar mensagem; um professor avaliou aula para o filho. A aula é
-      //     real, o lead não. Aqui o filtro ACERTOU, e acusá-lo ensina a recepção a ignorar o
-      //     aviso. Casa por dígitos porque internal_contacts guarda o telefone em formato livre.
       //   • desfecho='cliente' — pagante PRÉ-EXISTENTE (stages.js CLIENTE_DESFECHO): já era aluno
       //     antes de existir como lead. Não nasceu no funil, então não foi perdido por ele.
+      //
+      //   • CONTATO INTERNO já foi excluído aqui (leitura do Leo de 2026-09-17: "o filtro
+      //     ACERTOU"). REVOGADO em 2026-09-22 pelo próprio Leo, com fato novo: o Allan
+      //     (professor, internal_contacts) marcou aula experimental PARA O FILHO — interno e
+      //     cliente em potencial ao mesmo tempo. Interno é exclusão de PALPITE (conversa de
+      //     trabalho não vira lead), não de FATO: quem tem aula marcada tem aula marcada, seja
+      //     da casa ou não. Interno-com-fato APARECE para a recepção decidir (é o mesmo
+      //     princípio do descarte confirmado). Custo aceito: casos "Leo fez aula de canto"
+      //     voltam a contar de vez em quando. O sync espelha esta régua (interno nunca é
+      //     auto-ressuscitado — vira pendência; sync-extranet-leads.ressuscitarDescartado).
       //
       // O que sobra é o que o aviso promete: gente que o gate tirou do funil e que depois marcou
       // aula, fez a aula ou matriculou.
@@ -99,11 +104,6 @@ async function resumoPlantao(tenantId) {
         `SELECT count(*)::int n FROM lead_manager.leads l
           WHERE l.tenant_id = $1 AND l.status IN ('NOT_LEAD','REVIEW_QUEUE')
             AND COALESCE(l.desfecho, '') <> 'cliente'
-            AND NOT EXISTS (
-                  SELECT 1 FROM lead_manager.internal_contacts ic
-                   WHERE ic.tenant_id = l.tenant_id
-                     AND regexp_replace(ic.phone, '\\D', '', 'g')
-                       = regexp_replace(COALESCE(l.phone, ''), '\\D', '', 'g'))
             AND ${temFatoExtranetSql('l')}`, [tenantId])).rows[0].n;
       return { total: g.total, fp: g.fp, descartes: desc, rev, modo, fpReal };
     }, FALHOU);

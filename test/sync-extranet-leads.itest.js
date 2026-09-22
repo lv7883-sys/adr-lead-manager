@@ -267,18 +267,26 @@ test('(r3) CONFIRMADO (SERVICE = ambíguo) → pendência humana, nunca override
   assert.equal(l.status, 'NOT_LEAD', 'fica para o card do Plantão — recepção decide');
 });
 
-test('(r4) INTERNO por br_phone_key nunca volta ao funil — e interno CONFIRMADO é interno, não pendência', async () => {
+test('(r4) INTERNO com fato: NUNCA auto-ressuscita, mas vira PENDÊNCIA (caso Allan, revisão 22/09)', async () => {
   // contato interno cadastrado SEM o 9º dígito e sem +; o lead tem a variante completa.
-  // Com confirmed_not_lead de propósito: caso Allan do 1º ciclo (22/09) — a ordem antiga (c antes
-  // de d) o contava como pendência humana e o contador discordava do card do Plantão.
+  // Interno é exclusão de PALPITE, não de FATO: professor marcando aula para o filho aparece
+  // para a recepção decidir — mas a máquina jamais o devolve sozinha, com ou sem confirmação.
   await withTenant(A, (c) => c.query(
-    `INSERT INTO lead_manager.internal_contacts (tenant_id, phone, name, type) VALUES ($1,'1999990104','Dono Teste','gestor')`, [A]));
+    `INSERT INTO lead_manager.internal_contacts (tenant_id, phone, name, type) VALUES ($1,'1999990104','Prof Teste','professor')`, [A]));
   const nl = await mkLead(A, { phone: '+5519999990104', status: 'NOT_LEAD', review_result: 'confirmed_not_lead', review_by: 'SERVICE' });
   const st = await sync(A, [row('R4', { foneRaw: '(19)99999-0104', situacao: 'Ganhou' })]);
-  assert.equal(st.ressuscitados, 0);
-  assert.equal(st.interno_ignorado, 1, 'conta como interno…');
-  assert.equal(st.pendencia_humana, 0, '…e NÃO como pendência (guarda de interno vem antes)');
+  assert.equal(st.ressuscitados, 0, 'máquina nunca devolve interno sozinha');
+  assert.equal(st.interno_pendencia, 1, 'sub-contador diz que o pendente é da casa');
+  assert.equal(st.pendencia_humana, 1, 'e ele CONTA como pendência (recepção decide)');
   assert.equal((await lead(A, nl)).status, 'NOT_LEAD');
+  // interno SEM confirmação nenhuma: idem — pendência, nunca auto (a guarda não depende do review)
+  await withTenant(A, (c) => c.query(
+    `INSERT INTO lead_manager.internal_contacts (tenant_id, phone, name, type) VALUES ($1,'1999990108','Staff Teste','funcionario')`, [A]));
+  const nl2 = await mkLead(A, { phone: '+5519999990108', status: 'NOT_LEAD' });
+  const st2 = await sync(A, [row('R8', { foneRaw: '(19)99999-0108', situacao: 'Exp. Agendada' })]);
+  assert.equal(st2.ressuscitados, 0);
+  assert.equal(st2.interno_pendencia, 1);
+  assert.equal((await lead(A, nl2)).status, 'NOT_LEAD');
 });
 
 test('(r7) pendência conta por LEAD distinto, não por linha do espelho (Extranet duplica cadastros)', async () => {

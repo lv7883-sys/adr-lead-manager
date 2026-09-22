@@ -576,6 +576,17 @@ partes aprovadas na forma combinada acima:
 O estoque atual (leads com fato hoje em NOT_LEAD sem confirmação) é devolvido pelo próprio
 cron no primeiro ciclo após o deploy — sem migração nova.
 
+**Revisão do mesmo dia (22/09, caso Allan) — interno é exclusão de PALPITE, não de FATO.**
+O 1º ciclo supervisionado contou o Allan (professor, `internal_contacts`) como pendência e
+expôs duas coisas: um defeito de ordem de guardas (consertado: contador passou a concordar com
+o card) e, pelo fato novo trazido pelo Leo ("o Allan quer trazer o filho para fazer aula"),
+um defeito na PRÓPRIA exclusão de 17/09: interno pode ser cliente em potencial ao mesmo tempo.
+Decisão do Leo: **interno-com-fato aparece** — o card do Plantão deixou de excluir internos
+(plantao.js) e o sync os conta como pendência (`interno_pendencia` diz quantos dos pendentes
+são da casa); a máquina segue NUNCA devolvendo interno sozinha. Custo aceito e registrado:
+casos "Leo fez aula de canto" voltam a contar de vez em quando. Aferição do próximo ciclo:
+`ressuscitados:0, pendencia_humana:7 (interno_pendencia:1)`.
+
 ### A13 fechada (22/09/2026) — `43325ee`
 `vincularLead` passou a receber `(msg, rawBody)` e a derivar o telefone pelo **mesmo**
 `_telefoneDoContato()` da gravação. **Nada de `br_phone_key`, `telefoneBR.js` ou das migrações
