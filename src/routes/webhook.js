@@ -743,7 +743,9 @@ async function handleZapiWebhook(req, res) {
     if (textoCartao) msg.body = null;   // funil e Janis recebem o mesmo vazio de antes
     await engine.processInbound(tenant, msg, req.body);
     // O lead (se nasceu) só existe agora: liga a origem já gravada a ele. Nunca lança.
-    await origemLead.vincularLead(tenant.id, msg.externalId, log);
+    // msg + req.body (não o externalId): o vínculo deriva o telefone pela MESMA régua de jid
+    // da gravação — o externalId daqui ainda é `jid.split('@')[0]`, que não é telefone.
+    await origemLead.vincularLead(tenant.id, msg, req.body, log);
     await garantirLinhaDoCartao(tenant.id, msg, textoCartao, req.body, log);
     await curarMidia(tenant, msg, log);
     await gravarExtras(tenant.id, msg, log);

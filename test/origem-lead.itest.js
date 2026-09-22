@@ -149,8 +149,10 @@ test('(7) vincularLead liga a origem ao lead criado depois — e é idempotente'
     `INSERT INTO lead_manager.leads (tenant_id, name, phone) VALUES ($1,'Maria',$2) RETURNING id`,
     [T1, tel])).rows[0].id;
 
-  assert.deepEqual(await origemLead.vincularLead(T1, tel, mudo), { vinculado: 1 });
-  assert.deepEqual(await origemLead.vincularLead(T1, tel, mudo), { vinculado: 0 }, 'não religa o que já ligou');
+  assert.deepEqual(await origemLead.vincularLead(T1, msgDe(tel, 'oi'), payload(tel, 'oi'), mudo),
+    { vinculado: 1 });
+  assert.deepEqual(await origemLead.vincularLead(T1, msgDe(tel, 'oi'), payload(tel, 'oi'), mudo),
+    { vinculado: 0 }, 'não religa o que já ligou');
 
   const origem = await origemLead.origemDoLead(T1, leadId);
   assert.equal(origem.campanha_ref, 'bateria-set');
@@ -267,8 +269,8 @@ test('(13) erro de banco vira log, não exceção', async () => {
   const r = await origemLead.registrarOrigem('00000000-0000-4000-8000-000000000999',
     msgDe('5519990000099', 'oi'), payload('5519990000099', 'oi'), mudo);
   assert.deepEqual(r, { gravado: false, metodo: null });
-  assert.deepEqual(await origemLead.vincularLead('00000000-0000-4000-8000-000000000999', '5519990000099', mudo),
-    { vinculado: 0 });
+  assert.deepEqual(await origemLead.vincularLead('00000000-0000-4000-8000-000000000999',
+    msgDe('5519990000099', 'oi'), payload('5519990000099', 'oi'), mudo), { vinculado: 0 });
   // sem telefone não há o que gravar (e nada explode)
   assert.deepEqual(await origemLead.registrarOrigem(T1, { externalId: null, body: 'oi' }, {}, mudo),
     { gravado: false, metodo: null });
@@ -405,4 +407,58 @@ test('(22) a aplicação NÃO pode apagar uma origem, nem com a regra antiga do 
     withTenant(T1, (c) => c.query('DELETE FROM origem_lead WHERE tenant_id = $1', [T1])),
     /permission denied|permissão negada/i,
     'a aplicação conseguiu APAGAR uma linha de origem');
+});
+
+// ── A13: o VÍNCULO também tem de respeitar a régua do jid ──────────────────────────────
+
+test('(24) vínculo por @lid não gruda a origem de um contato no lead de outro', async () => {
+  // O buraco (A13, 22/09/2026): o webhook chamava vincularLead com `msg.externalId`, que é
+  // `jid.split('@')[0]` — para um @lid, os DÍGITOS DO LID fazendo as vezes de telefone. A
+  // gravação já era protegida; a leitura não. Se um lead existir com esse número falso (e
+  // existe: +53751599612092, medido em produção), o vínculo casaria a origem de quem
+  // realmente tem aquela chave com o lead errado.
+  const telReal = '5519990000024';
+  const lidDigits = '537515996120924';     // "telefone" que só existe porque é um lid
+
+  // Uma origem real, gravada pelo caminho protegido.
+  await origemLead.registrarOrigem(T1, msgDe(telReal, 'vim do anúncio [RK3]'),
+    jidDe(`${telReal}@s.whatsapp.net`, 'vim do anúncio [RK3]'), mudo);
+
+  // Um lead nascido do jid podre, com o número falso — exatamente o caso de produção.
+  await adm.query(
+    `INSERT INTO lead_manager.leads (tenant_id, name, phone) VALUES ($1,'Fantasma',$2)`,
+    [T1, lidDigits]);
+
+  // O vínculo chega com a mensagem do @lid, SEM mapa em wa_lid.
+  const r = await origemLead.vincularLead(T1, msgDe(lidDigits, 'oi'),
+    jidDe(`${lidDigits}@lid`, 'oi'), mudo);
+
+  assert.deepEqual(r, { vinculado: 0 }, 'sem telefone confiável, não vincula nada');
+  const origem = (await linhas(T1)).find((x) => x.chave_contato === '1990000024');
+  assert.ok(origem, 'a origem real continua lá');
+  assert.equal(origem.lead_id, null, 'e NÃO foi grudada no lead fantasma');
+});
+
+test('(25) vínculo ignora o sufixo de aparelho (":12") em vez de inventar contato', async () => {
+  const tel = '5519990000025';
+  await origemLead.registrarOrigem(T1, msgDe(tel, 'oi [RK3]'),
+    jidDe(`${tel}@s.whatsapp.net`, 'oi [RK3]'), mudo);
+  const leadId = (await adm.query(
+    `INSERT INTO lead_manager.leads (tenant_id, name, phone) VALUES ($1,'Joana',$2) RETURNING id`,
+    [T1, tel])).rows[0].id;
+
+  // A mesma pessoa, falando do segundo aparelho: o jid vem com ":12".
+  const r = await origemLead.vincularLead(T1, msgDe(`${tel}:12`, 'de novo'),
+    jidDe(`${tel}:12@s.whatsapp.net`, 'de novo'), mudo);
+
+  assert.deepEqual(r, { vinculado: 1 }, 'o ":12" é o mesmo contato — tem de vincular');
+  const origem = await origemLead.origemDoLead(T1, leadId);
+  assert.ok(origem, 'a origem do anúncio chegou ao lead mesmo vindo do outro aparelho');
+  assert.equal(origem.campanha_ref, 'bateria-set');
+});
+
+test('(26) grupo nunca vincula origem a lead', async () => {
+  const r = await origemLead.vincularLead(T1, msgDe('120363999888777', 'oi'),
+    jidDe('120363999888777@g.us', 'oi'), mudo);
+  assert.deepEqual(r, { vinculado: 0 });
 });

@@ -242,10 +242,21 @@ async function registrarOrigem(tenantId, msg, rawBody, log = logger) {
  *
  * NUNCA LANÇA. Idempotente (só age em linha com lead_id NULL).
  */
-async function vincularLead(tenantId, externalId, log = logger, canal = 'whatsapp') {
-  if (!tenantId || !externalId) return { vinculado: 0 };
+async function vincularLead(tenantId, msg, rawBody, log = logger, canal = null) {
+  if (!tenantId || !msg) return { vinculado: 0 };
+  const via = canal || (msg && msg.channel) || 'whatsapp';
   try {
-    const n = await withTenant(tenantId, async (c) => (await c.query(
+    const n = await withTenant(tenantId, async (c) => {
+      // MESMA RÉGUA DA ESCRITA. Antes esta função recebia o `externalId` do webhook, que é
+      // `jid.split('@')[0]` — com o `:12` de aparelho colado e com os dígitos de um `@lid`
+      // fazendo as vezes de telefone. A gravação já passava por aqui; a leitura não, e casar
+      // por uma chave derivada de jid podre é grudar a origem de um contato no lead de outro.
+      const contato = await _telefoneDoContato(c, tenantId, rawBody, msg);
+      if (contato.pular) {
+        log.info('origem_lead.vinculo_sem_telefone', { tenant_id: tenantId, motivo: contato.pular });
+        return 0;
+      }
+      return (await c.query(
       `UPDATE origem_lead s
           SET lead_id = l.id
          FROM (SELECT id, br_phone_key(coalesce(phone, '')) AS k
@@ -255,7 +266,8 @@ async function vincularLead(tenantId, externalId, log = logger, canal = 'whatsap
         WHERE s.tenant_id = $1 AND s.canal = $2 AND s.chave_contato = l.k AND s.lead_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM origem_lead s2
                            WHERE s2.tenant_id = $1 AND s2.lead_id = l.id)`,
-      [tenantId, canal, String(externalId)])).rowCount);
+      [tenantId, via, contato.pn])).rowCount;
+    });
     if (n) log.info('origem_lead.vinculado', { tenant_id: tenantId, linhas: n });
     return { vinculado: n };
   } catch (e) {
