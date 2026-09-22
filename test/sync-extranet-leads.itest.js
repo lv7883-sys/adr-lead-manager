@@ -267,14 +267,28 @@ test('(r3) CONFIRMADO (SERVICE = ambíguo) → pendência humana, nunca override
   assert.equal(l.status, 'NOT_LEAD', 'fica para o card do Plantão — recepção decide');
 });
 
-test('(r4) INTERNO por br_phone_key nunca volta ao funil (mesmo com Ganhou e variante de dígitos)', async () => {
-  // contato interno cadastrado SEM o 9º dígito e sem +; o lead tem a variante completa
+test('(r4) INTERNO por br_phone_key nunca volta ao funil — e interno CONFIRMADO é interno, não pendência', async () => {
+  // contato interno cadastrado SEM o 9º dígito e sem +; o lead tem a variante completa.
+  // Com confirmed_not_lead de propósito: caso Allan do 1º ciclo (22/09) — a ordem antiga (c antes
+  // de d) o contava como pendência humana e o contador discordava do card do Plantão.
   await withTenant(A, (c) => c.query(
     `INSERT INTO lead_manager.internal_contacts (tenant_id, phone, name, type) VALUES ($1,'1999990104','Dono Teste','gestor')`, [A]));
-  const nl = await mkLead(A, { phone: '+5519999990104', status: 'NOT_LEAD' });
+  const nl = await mkLead(A, { phone: '+5519999990104', status: 'NOT_LEAD', review_result: 'confirmed_not_lead', review_by: 'SERVICE' });
   const st = await sync(A, [row('R4', { foneRaw: '(19)99999-0104', situacao: 'Ganhou' })]);
   assert.equal(st.ressuscitados, 0);
-  assert.equal(st.interno_ignorado, 1);
+  assert.equal(st.interno_ignorado, 1, 'conta como interno…');
+  assert.equal(st.pendencia_humana, 0, '…e NÃO como pendência (guarda de interno vem antes)');
+  assert.equal((await lead(A, nl)).status, 'NOT_LEAD');
+});
+
+test('(r7) pendência conta por LEAD distinto, não por linha do espelho (Extranet duplica cadastros)', async () => {
+  const nl = await mkLead(A, { phone: '+5519999990107', status: 'NOT_LEAD', review_result: 'confirmed_not_lead', review_by: 'SERVICE' });
+  // mesmo telefone em DUAS linhas da Extranet (caso Wagner), ambas com fato
+  const st = await sync(A, [
+    row('R7A', { foneRaw: '(19)99999-0107', situacao: 'Exp. Agendada' }),
+    row('R7B', { foneRaw: '19 99999 0107', situacao: 'Exp. Agendada' }),
+  ]);
+  assert.equal(st.pendencia_humana, 1, '2 linhas, 1 lead, 1 pendência');
   assert.equal((await lead(A, nl)).status, 'NOT_LEAD');
 });
 

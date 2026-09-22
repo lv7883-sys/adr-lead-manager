@@ -203,13 +203,16 @@ async function aplicarRegua(c, tenantId, r, mode, stats) {
 //      'Exp. Cancelada' nem chega aqui: o mapa a manda para mirror-only (cancelar ≠ avançar).
 //   b) DISPENSA: recepção reverteu uma ressuscitação no Monitor → suggested_stage_dismissed=alvo;
 //      sem este check o run de 3h re-ressuscitaria em loop.
-//   c) CONFIRMAÇÃO: review_result='confirmed_not_lead' NÃO é sobrescrito — 'SERVICE' é a
+//   c) INTERNO: quem casa internal_contacts por br_phone_key não volta ao funil (Leo/Daniele/
+//      Allan — a 127 quase errou usando lista de nomes; regra por propriedade, não por nome).
+//      ANTES da confirmação, de propósito: interno confirmado não é pendência, é ruído — o card
+//      do Plantão o exclui pela mesma propriedade e o contador concorda com o card (1º ciclo
+//      22/09 contou o Allan como pendência por a ordem ser a inversa).
+//   d) CONFIRMAÇÃO: review_result='confirmed_not_lead' NÃO é sobrescrito — 'SERVICE' é a
 //      credencial do dashboard e PODE ter sido a recepção clicando (caso Camila, header da 128);
 //      o sistema hoje não distingue pessoa de máquina. O caso permanece visível no card
 //      Plantão › Filtro (pendência humana com superfície JÁ existente); o conserto estrutural
-//      (gravar o nome real) é tarefa da frente do dashboard.
-//   d) INTERNO: quem casa internal_contacts por br_phone_key não volta ao funil (Leo/Daniele/
-//      Allan — a 127 quase errou usando lista de nomes; regra por propriedade, não por nome).
+//      (gravar o nome real) é a frente by_name.
 // Aplicação: Ganhou → CONVERTED com desfecho NULO (molde da 127: carimbar 'matriculado' aqui
 // bloquearia o contractConvert de distinguir conversão de cliente pré-existente e inflaria a
 // taxa); aula → EXPERIMENTAL_AGENDADA. review_* é PRESERVADO (lição da 128: a 127 limpou e tirou
@@ -218,17 +221,22 @@ async function aplicarRegua(c, tenantId, r, mode, stats) {
 async function ressuscitarDescartado(c, tenantId, r, l, alvo, mode, stats) {
   if (ORDINAL[alvo] < ORDINAL.experimental) return;                       // (a) sem fato de avanço
   if (alvo === l.suggested_stage_dismissed) return;                       // (b) recepção já disse não
-  if (l.review_result === 'confirmed_not_lead') { stats.pendencia_humana++; return; }   // (c)
-  if (r._phoneKey) {                                                      // (d) internos por chave
+  // (c) INTERNO ANTES da confirmação (lição do 1º ciclo, 22/09: o Allan — interno COM
+  //     confirmed_not_lead — foi contado como pendência humana; interno não é "caso para a
+  //     recepção decidir", é caso de NUNCA ter entrado. O card do Plantão já o exclui pela
+  //     mesma propriedade; o contador tem que concordar com o card).
+  if (r._phoneKey) {
     const interno = (await c.query(
       `SELECT 1 FROM lead_manager.internal_contacts ic
         WHERE ic.tenant_id=$1 AND lead_manager.br_phone_key(ic.phone) = $2 LIMIT 1`,
       [tenantId, r._phoneKey])).rowCount > 0;
-    if (interno) { stats.interno_ignorado++; return; }
+    if (interno) { stats._internos.add(r._leadId); return; }
   }
+  // (d) confirmação (pessoa OU máquina — indistinguíveis até o by_name povoar review_by)
+  if (l.review_result === 'confirmed_not_lead') { stats._pendencias.add(r._leadId); return; }
   // suggestion: suggested_stage é INERTE em lead terminal (stages.terminalParaSugestaoSql) — não
   // há o que gravar; o card do Plantão é a superfície. Só o modo auto devolve.
-  if (mode !== 'auto') { stats.pendencia_humana++; return; }
+  if (mode !== 'auto') { stats._pendencias.add(r._leadId); return; }
 
   const prova = alvo === 'convertido' ? 'MATRÍCULA (Ganhou)' : `aula experimental — situação "${String(r.situacao).trim()}"`;
   await c.query(
@@ -262,7 +270,9 @@ async function syncExtranetLeads(c, { tenantId, snapshot, mode }) {
     movidos: 0, sugeridos: 0, _desconhecidas: new Set(),
     // decisão 22/09/2026 — descartados com fato: devolvidos pela regra / aguardando humano no
     // card do Plantão (confirmação ambígua ou modo suggestion) / interno protegido.
-    ressuscitados: 0, pendencia_humana: 0, interno_ignorado: 0,
+    // Pendência e interno contam por LEAD DISTINTO (Sets), não por linha do espelho — a Extranet
+    // duplica cadastros (Wagner tem 2 linhas) e a pegadinha linha×lead já mordeu duas medições.
+    ressuscitados: 0, _pendencias: new Set(), _internos: new Set(),
     // migr 106 — quantos leads DESTE snapshot estavam em situação que prova aula experimental.
     // Sem isso não dá pra verificar o carimbo depois do deploy sem abrir o banco. Não é "quantos
     // foram carimbados agora" (o COALESCE não recarimba): é o volume observado no run.
@@ -276,6 +286,9 @@ async function syncExtranetLeads(c, { tenantId, snapshot, mode }) {
   }
   stats.situacao_desconhecida = [...stats._desconhecidas];
   delete stats._desconhecidas;
+  stats.pendencia_humana = stats._pendencias.size;
+  stats.interno_ignorado = stats._internos.size;
+  delete stats._pendencias; delete stats._internos;
   return stats;
 }
 

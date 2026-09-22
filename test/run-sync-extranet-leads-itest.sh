@@ -47,7 +47,7 @@ CREATE TABLE lead_manager.leads (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, name text, phone text, meta_psid text,
   status text, desfecho text, desfecho_em timestamptz, desfecho_source text, origem text,
   suggested_stage text, stage_reasoning text, stage_suggested_at timestamptz, suggested_stage_dismissed text,
-  review_result text, review_by text,
+  review_result text, review_by text, review_queue boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz DEFAULT now());
 CREATE UNIQUE INDEX uq_leads_tenant_phone ON lead_manager.leads (tenant_id, phone) WHERE phone IS NOT NULL;
 ALTER TABLE lead_manager.leads ENABLE ROW LEVEL SECURITY;
