@@ -65,8 +65,13 @@ CREATE TABLE lead_manager.stage_autoapply_log (
   source text NOT NULL DEFAULT 'event' CHECK (source IN ('event','backfill')),
   external_message_id text, prior_status text, prior_desfecho text, prior_desfecho_em timestamptz, evento_id uuid,
   reverted boolean NOT NULL DEFAULT false, reverted_at timestamptz, reverted_by text, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE lead_manager.internal_contacts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, phone text NOT NULL,
+  name text NOT NULL, type text NOT NULL, created_at timestamptz DEFAULT now(),
+  UNIQUE (tenant_id, phone));
 GRANT SELECT, INSERT, UPDATE, DELETE ON lead_manager.leads, lead_manager.lead_eventos,
-  lead_manager.tenant_lead_config, lead_manager.stage_autoapply_log TO lead_manager_user;
+  lead_manager.tenant_lead_config, lead_manager.stage_autoapply_log,
+  lead_manager.internal_contacts TO lead_manager_user;
 SQL
 
 echo "[itest] migrations 085 (br_phone_key) + 102 (extranet_lead) + 106 (carimbos exp_*) + 130 (created_at do cadastro)…"

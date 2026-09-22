@@ -557,6 +557,25 @@ Os **12 leads com `extranet_auto`** hoje em NOT_LEAD são, pela leitura da sess�
 leads que o sync avançou e o roteador rebaixou **antes** do fix de 18/09 — reforçam o caso.
 **Ninguém toca o arquivo sem combinar antes.**
 
+**DECIDIDO pelo Leo (22/09/2026) e IMPLEMENTADO (este commit) — sessão da Extranet.** As três
+partes aprovadas na forma combinada acima:
+
+1. **Auto-devolução LIGADA** (`ressuscitarDescartado` em `sync-extranet-leads.js`): fato ≥
+   experimental devolve descartado automático ao funil; **Ganhou → CONVERTED com desfecho NULO**
+   (molde da 127 — o `contractConvert` distingue conversão de cliente pré-existente; carimbar
+   aqui inflaria a taxa); aula → EXPERIMENTAL_AGENDADA. `review_*` é **preservado** (lição da
+   128: a 127 limpou e tirou a trava do roteador). Evento + `stage_autoapply_log`
+   (`from_stage='descartado'`) → reversível no Monitor; reversão grava
+   `suggested_stage_dismissed` e a regra a respeita (sem loop).
+2. **Descarte CONFIRMADO** (`review_result='confirmed_not_lead'`, qualquer `review_by` — SERVICE
+   é ambíguo por construção) **não é sobrescrito**: permanece no card Plantão › Filtro
+   (`stats.pendencia_humana` conta). Escolha consciente, não limitação esquecida.
+3. **Conserto estrutural** (dashboard gravar o NOME real de quem clica) → tarefa aberta em
+   separado para a frente do Scheduler.
+
+O estoque atual (leads com fato hoje em NOT_LEAD sem confirmação) é devolvido pelo próprio
+cron no primeiro ciclo após o deploy — sem migração nova.
+
 ### A13 fechada (22/09/2026) — `43325ee`
 `vincularLead` passou a receber `(msg, rawBody)` e a derivar o telefone pelo **mesmo**
 `_telefoneDoContato()` da gravação. **Nada de `br_phone_key`, `telefoneBR.js` ou das migrações

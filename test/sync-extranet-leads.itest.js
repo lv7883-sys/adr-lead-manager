@@ -229,3 +229,70 @@ test('(n) lead CRIADO pelo sync nasce na data do cadastro da Extranet (migr 130)
   const depois = await withTenant(A, async (c) => (await c.query('SELECT created_at FROM lead_manager.leads WHERE id=$1', [pre])).rows[0].created_at);
   assert.equal(depois.getTime(), antes.getTime());
 });
+
+// ---- RESSUSCITAR DESCARTADO (decisão do Leo 22/09/2026; DECISIONS.md "Convergência") ----------
+// Fato da Extranet vence classificação AUTOMÁTICA; confirmação (pessoa ou máquina, o sistema não
+// distingue) vira pendência humana no card do Plantão; internos e desfechos nunca voltam.
+
+test('(r1) NOT_LEAD automático + Ganhou → CONVERTED com desfecho NULO (contractConvert decide) + rastro', async () => {
+  const notlead = await mkLead(A, { phone: '+5519999990101', status: 'NOT_LEAD' });   // gate descartou, sem review
+  const st = await sync(A, [row('R1', { foneRaw: '(19)99999-0101', situacao: 'Ganhou' })]);
+  assert.equal(st.ressuscitados, 1);
+  const l = await lead(A, notlead);
+  assert.equal(l.status, 'CONVERTED');
+  assert.equal(l.desfecho, null, 'molde da 127: desfecho fica NULO — contractConvert distingue conversão de cliente');
+  const lg = await logs(A, notlead);
+  assert.equal(lg[0].from_stage, 'descartado'); assert.equal(lg[0].to_stage, 'convertido');
+  assert.equal(lg[0].prior_status, 'NOT_LEAD', 'reverter no Monitor restaura o estado exato');
+  assert.equal((await eventos(A, notlead)).length, 1);
+  // idempotência: re-run não gera segundo movimento nem evento
+  const st2 = await sync(A, [row('R1', { foneRaw: '(19)99999-0101', situacao: 'Ganhou' })]);
+  assert.equal(st2.ressuscitados + st2.movidos, 0);
+  assert.equal((await eventos(A, notlead)).length, 1);
+});
+
+test('(r2) FATO-somente: NOT_LEAD + Conexão NÃO ressuscita (linha no espelho não é prova de avanço)', async () => {
+  const nl = await mkLead(A, { phone: '+5519999990102', status: 'NOT_LEAD' });
+  const st = await sync(A, [row('R2', { foneRaw: '(19)99999-0102', situacao: 'Conexão' })]);
+  assert.equal(st.ressuscitados, 0);
+  assert.equal((await lead(A, nl)).status, 'NOT_LEAD');
+});
+
+test('(r3) CONFIRMADO (SERVICE = ambíguo) → pendência humana, nunca override', async () => {
+  const nl = await mkLead(A, { phone: '+5519999990103', status: 'NOT_LEAD', review_result: 'confirmed_not_lead', review_by: 'SERVICE' });
+  const st = await sync(A, [row('R3', { foneRaw: '(19)99999-0103', situacao: 'Exp. Agendada' })]);
+  assert.equal(st.ressuscitados, 0);
+  assert.ok(st.pendencia_humana >= 1);
+  const l = await lead(A, nl);
+  assert.equal(l.status, 'NOT_LEAD', 'fica para o card do Plantão — recepção decide');
+});
+
+test('(r4) INTERNO por br_phone_key nunca volta ao funil (mesmo com Ganhou e variante de dígitos)', async () => {
+  // contato interno cadastrado SEM o 9º dígito e sem +; o lead tem a variante completa
+  await withTenant(A, (c) => c.query(
+    `INSERT INTO lead_manager.internal_contacts (tenant_id, phone, name, type) VALUES ($1,'1999990104','Dono Teste','gestor')`, [A]));
+  const nl = await mkLead(A, { phone: '+5519999990104', status: 'NOT_LEAD' });
+  const st = await sync(A, [row('R4', { foneRaw: '(19)99999-0104', situacao: 'Ganhou' })]);
+  assert.equal(st.ressuscitados, 0);
+  assert.equal(st.interno_ignorado, 1);
+  assert.equal((await lead(A, nl)).status, 'NOT_LEAD');
+});
+
+test('(r5) DISPENSA: recepção reverteu no Monitor → regra não re-ressuscita a mesma etapa', async () => {
+  const nl = await mkLead(A, { phone: '+5519999990105', status: 'NOT_LEAD' });
+  await withTenant(A, (c) => c.query(
+    "UPDATE lead_manager.leads SET suggested_stage_dismissed='experimental' WHERE id=$1", [nl]));
+  const st = await sync(A, [row('R5', { foneRaw: '(19)99999-0105', situacao: 'Exp. Agendada' })]);
+  assert.equal(st.ressuscitados, 0);
+  assert.equal((await lead(A, nl)).status, 'NOT_LEAD');
+});
+
+test('(r6) SUGGESTION mode não devolve (sugestão é inerte em terminal) → pendência', async () => {
+  const nl = await mkLead(A, { phone: '+5519999990106', status: 'NOT_LEAD' });
+  const st = await sync(A, [row('R6', { foneRaw: '(19)99999-0106', situacao: 'Ganhou' })], 'suggestion');
+  assert.equal(st.ressuscitados, 0);
+  assert.ok(st.pendencia_humana >= 1);
+  const l = await lead(A, nl);
+  assert.equal(l.status, 'NOT_LEAD');
+  assert.equal(l.suggested_stage, null, 'nada gravado — sugestão seria invisível em lead terminal');
+});

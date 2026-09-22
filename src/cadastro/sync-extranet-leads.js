@@ -9,8 +9,10 @@
 //                 não achou → CRIA lead (origem='extranet', first-touch imutável/043, sem conversa
 //                 — precedente Meta leadgen). Sem telefone → mirror-only.
 //   3) RÉGUA    — Situação → etapa, FORWARD-ONLY (nunca rebaixa; ordinal cresce), com as guardas
-//                 do molde contractConvert: latch humano, desfecho existente e status fora do
-//                 funil são intocáveis. 'convertido' (matrícula) grava desfecho='matriculado' +
+//                 do molde contractConvert: desfecho existente é intocável; DESCARTADO
+//                 (NOT_LEAD/REVIEW_QUEUE) volta ao funil quando a Extranet prova FATO ≥
+//                 experimental e ninguém confirmou o descarte (decisão 22/09/2026 — ver
+//                 ressuscitarDescartado). 'convertido' (matrícula) grava desfecho='matriculado' +
 //                 desfecho_source='extranet' (042) — vira terminal e a IA para de tocar.
 //                 mode 'auto' move com lead_eventos (autor 'extranet_auto') + stage_autoapply_log
 //                 (source 'extranet_lead') → reversível card a card no Monitor da 078.
@@ -134,12 +136,16 @@ async function aplicarRegua(c, tenantId, r, mode, stats) {
             suggested_stage, suggested_stage_dismissed
        FROM lead_manager.leads WHERE id=$1`, [r._leadId])).rows[0];
   if (!l) return;
-  // 1) latch humano — decisão de gente é terminal
-  if (l.review_result === 'confirmed_not_lead' && l.review_by && l.review_by !== 'SERVICE') return;
-  // 2) desfecho existente (matriculado/perda/cliente) e status fora do funil: intocáveis
+  // 1) desfecho existente (matriculado/perda/cliente): intocável — decisão registrada é terminal
   if (l.desfecho != null) return;
   const st = String(l.status || '').toUpperCase();
-  if (['NOT_LEAD', 'REVIEW_QUEUE', 'PENDING_CLASSIFICATION', 'OPTED_OUT'].includes(st)) return;
+  if (['PENDING_CLASSIFICATION', 'OPTED_OUT'].includes(st)) return;   // transitório / opt-out legal
+  // 2) DESCARTADO (NOT_LEAD/REVIEW_QUEUE) — decisão do Leo 22/09/2026 (DECISIONS.md, "Convergência
+  //    — dono e forma do conserto do NOT_LEAD"): FATO VENCE CLASSIFICAÇÃO AUTOMÁTICA. O gate/
+  //    roteador descartou por palpite; a Extranet prova aula marcada/feita ou matrícula. Corrigido
+  //    à mão DUAS vezes (migr 127: 36 leads; migr 128: 4) antes de virar regra — o gêmeo do
+  //    roteador já se protege por stages.temFatoExtranetSql desde 23df600.
+  if (['NOT_LEAD', 'REVIEW_QUEUE'].includes(st)) return ressuscitarDescartado(c, tenantId, r, l, alvo, mode, stats);
   // 3) forward-only por ordinal
   const atual = stages.stageKey(l.status, l.desfecho);
   if (ORDINAL[alvo] <= ORDINAL[atual]) return;           // já está lá ou à frente → no-op
@@ -190,6 +196,63 @@ async function aplicarRegua(c, tenantId, r, mode, stats) {
   stats.movidos++;
 }
 
+// ---- ressuscitar descartado (decisão 22/09/2026) ----------------------------------------------
+// Guardas na ordem, cada uma provada necessária pelas migrações 127/128:
+//   a) FATO-somente: só alvo ≥ experimental ressuscita (Conexão/Atendido NÃO — linha no espelho
+//      não é prova de avanço; spam com cadastro na Extranet ficaria voltando ao funil). A
+//      'Exp. Cancelada' nem chega aqui: o mapa a manda para mirror-only (cancelar ≠ avançar).
+//   b) DISPENSA: recepção reverteu uma ressuscitação no Monitor → suggested_stage_dismissed=alvo;
+//      sem este check o run de 3h re-ressuscitaria em loop.
+//   c) CONFIRMAÇÃO: review_result='confirmed_not_lead' NÃO é sobrescrito — 'SERVICE' é a
+//      credencial do dashboard e PODE ter sido a recepção clicando (caso Camila, header da 128);
+//      o sistema hoje não distingue pessoa de máquina. O caso permanece visível no card
+//      Plantão › Filtro (pendência humana com superfície JÁ existente); o conserto estrutural
+//      (gravar o nome real) é tarefa da frente do dashboard.
+//   d) INTERNO: quem casa internal_contacts por br_phone_key não volta ao funil (Leo/Daniele/
+//      Allan — a 127 quase errou usando lista de nomes; regra por propriedade, não por nome).
+// Aplicação: Ganhou → CONVERTED com desfecho NULO (molde da 127: carimbar 'matriculado' aqui
+// bloquearia o contractConvert de distinguir conversão de cliente pré-existente e inflaria a
+// taxa); aula → EXPERIMENTAL_AGENDADA. review_* é PRESERVADO (lição da 128: a 127 limpou e tirou
+// a única trava do roteador; hoje conta a história sem travar nada). Evento + stage_autoapply_log
+// (from_stage 'descartado') → reversível card a card no Monitor.
+async function ressuscitarDescartado(c, tenantId, r, l, alvo, mode, stats) {
+  if (ORDINAL[alvo] < ORDINAL.experimental) return;                       // (a) sem fato de avanço
+  if (alvo === l.suggested_stage_dismissed) return;                       // (b) recepção já disse não
+  if (l.review_result === 'confirmed_not_lead') { stats.pendencia_humana++; return; }   // (c)
+  if (r._phoneKey) {                                                      // (d) internos por chave
+    const interno = (await c.query(
+      `SELECT 1 FROM lead_manager.internal_contacts ic
+        WHERE ic.tenant_id=$1 AND lead_manager.br_phone_key(ic.phone) = $2 LIMIT 1`,
+      [tenantId, r._phoneKey])).rowCount > 0;
+    if (interno) { stats.interno_ignorado++; return; }
+  }
+  // suggestion: suggested_stage é INERTE em lead terminal (stages.terminalParaSugestaoSql) — não
+  // há o que gravar; o card do Plantão é a superfície. Só o modo auto devolve.
+  if (mode !== 'auto') { stats.pendencia_humana++; return; }
+
+  const prova = alvo === 'convertido' ? 'MATRÍCULA (Ganhou)' : `aula experimental — situação "${String(r.situacao).trim()}"`;
+  await c.query(
+    `UPDATE lead_manager.leads
+        SET status=$2, review_queue=false, suggested_stage=NULL, stage_reasoning=NULL,
+            stage_suggested_at=NULL, updated_at=now()
+      WHERE id=$1`,
+    [r._leadId, alvo === 'convertido' ? 'CONVERTED' : 'EXPERIMENTAL_AGENDADA']);
+  const evento = (await c.query(
+    `INSERT INTO lead_manager.lead_eventos (tenant_id, lead_id, tipo, autor, conteudo, etapa_key)
+     VALUES ($1,$2,'mudanca_etapa','extranet_auto',$3,$4) RETURNING id`,
+    [tenantId, r._leadId,
+     `devolvido ao funil — o filtro havia descartado, mas a Extranet registra ${prova}. Fato vence classificação automática (decisão 22/09/2026).`,
+     alvo])).rows[0];
+  await c.query(
+    `INSERT INTO lead_manager.stage_autoapply_log
+       (tenant_id, lead_id, from_stage, to_stage, reasoning, source,
+        prior_status, prior_desfecho, prior_desfecho_em, evento_id)
+     VALUES ($1,$2,'descartado',$3,$4,'extranet_lead',$5,$6,$7,$8)`,
+    [tenantId, r._leadId, alvo, `descartado × ${prova} — devolvido pela regra da Extranet`,
+     l.status, l.desfecho, l.desfecho_em, evento.id]);
+  stats.ressuscitados++;
+}
+
 // ---- entrada ----------------------------------------------------------------------------------
 // mode: 'suggestion' | 'auto' (o runner pula 'off' antes de chegar aqui).
 async function syncExtranetLeads(c, { tenantId, snapshot, mode }) {
@@ -197,6 +260,9 @@ async function syncExtranetLeads(c, { tenantId, snapshot, mode }) {
     espelho_novos: 0, espelho_atualizados: 0, soft_deleted: 0,
     linkados: 0, leads_criados: 0, sem_telefone: 0, ambiguos: 0,
     movidos: 0, sugeridos: 0, _desconhecidas: new Set(),
+    // decisão 22/09/2026 — descartados com fato: devolvidos pela regra / aguardando humano no
+    // card do Plantão (confirmação ambígua ou modo suggestion) / interno protegido.
+    ressuscitados: 0, pendencia_humana: 0, interno_ignorado: 0,
     // migr 106 — quantos leads DESTE snapshot estavam em situação que prova aula experimental.
     // Sem isso não dá pra verificar o carimbo depois do deploy sem abrir o banco. Não é "quantos
     // foram carimbados agora" (o COALESCE não recarimba): é o volume observado no run.
