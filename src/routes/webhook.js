@@ -19,6 +19,7 @@ const waEventos = require('../waEventos');
 const waChats = require('../waChats');         // paridade: estado da lista de conversas vindo do celular     // paridade 6: ligação e eventos de grupo
 const { comUnidade } = require('../plataforma/contexto');   // dona do trabalho -> custo de IA com dono
 const origemLead = require('../origemLead');   // origem do 1º toque (anúncio Click-to-WhatsApp)
+const ingestao = require('../marketing/ingestao');   // foto/vídeo do grupo -> matéria-prima
 const { decrypt } = require('../crypto');
 
 const router = express.Router();
@@ -615,6 +616,9 @@ async function handleZapiWebhook(req, res) {
       m.media.url = saved.media_url;
       m.media.type = saved.media_type;
       m.media.filename = saved.media_filename;
+      // Onde o arquivo pousou. Quem vier depois (ingestão de matéria-prima) lê daqui em vez
+      // de baixar de novo — a Evolution não guarda mídia velha, e o segundo pedido falha.
+      m.media.diskPath = saved.diskPath;
       if (saved.media_type === 'audio') {
         try {
           m.media.transcription = await gemini.transcribeAudio({ base64: saved.base64, mimetype: saved.mimetype });
@@ -660,6 +664,11 @@ async function handleZapiWebhook(req, res) {
         await engine.captureGroupInbound(tenant.id, String(jid), msg, req.body);
         await curarMidia(tenant, msg, log);
         await gravarExtras(tenant.id, msg, log);
+        // ADR-053 — foto/vídeo de grupo-fonte vira matéria-prima de conteúdo. Roda DEPOIS
+        // de tudo o que a Caixa de Entrada precisa: se a ingestão falhar, a bolha do grupo
+        // já está gravada. Nunca lança (devolve a situação) e nunca toca no funil — este
+        // ramo já retorna antes do funil, e a mensagem de grupo nunca vira lead.
+        await ingestao.capturarMidia(tenant, msg, req.body, log);
       })().catch((e) => log.warn('group.capture_unhandled', { error: e.message }));
     } else if (msg.fromMe) {
       (async () => {

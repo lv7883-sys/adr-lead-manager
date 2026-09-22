@@ -20,6 +20,7 @@ const TIPOS = Object.freeze({
   TRANSCRICAO_SEG: 'transcricao_seg',    // segundos de áudio transcrito
   VIDEO_SEG: 'video_seg',                // segundos de vídeo processado
   STORAGE_GB_DIA: 'storage_gb_dia',      // GB-dia de armazenamento
+  MIDIA_INGERIDA: 'midia_ingerida',      // 1 arquivo entrando pela ingestão do grupo
 });
 const TIPOS_VALIDOS = new Set(Object.values(TIPOS));
 
@@ -32,6 +33,9 @@ const CUSTO_PADRAO_BRL = Object.freeze({
   [TIPOS.TRANSCRICAO_SEG]: 0.0006,
   [TIPOS.VIDEO_SEG]: 0.004,
   [TIPOS.STORAGE_GB_DIA]: 0.0008,
+  // Ingestão em si não chama provedor: o custo é o armazenamento do arquivo até a
+  // curadoria decidir. Valor simbólico — o que importa aqui é CONTAR, para a cota existir.
+  [TIPOS.MIDIA_INGERIDA]: 0.0005,
 });
 
 /**

@@ -7,6 +7,7 @@
 #   make test-db-down    derruba e apaga o banco de teste
 #   make test-all        sobe, roda tudo, derruba — MESMO se algum teste falhar
 #   make ci              é isto que o build roda
+#   make ingest-status   painel READ-ONLY da ingestão de mídia (roda NA VPS, no container)
 #
 # MSYS_NO_PATHCONV=1 em todo comando docker: no Git Bash do Windows, um argumento
 # que começa com "/" (ex.: /var/lib/postgresql/data) é traduzido para caminho do
@@ -31,16 +32,16 @@ DSN_PLATAFORMA := postgres://lead_manager_user:itest@127.0.0.1:$(PORTA)/lm_plata
 ADM_PLATAFORMA := postgres://postgres:itest@127.0.0.1:$(PORTA)/lm_plataforma
 
 # Migrações desta frente (para `make migrate`, que é para banco local à mão).
-MIGRATIONS ?= 172_plataforma_nucleo 173_marketing_nucleo
+MIGRATIONS ?= 172_plataforma_nucleo 173_marketing_nucleo 175_marketing_ingestao
 GRANTS     ?= plataforma_contratacao_read
 PSQL_DSN   ?= $(ADM_PLATAFORMA)
 
 # Testes puros: rodam offline e não tocam em banco nenhum.
 UNIT_TESTS := test/plataforma.test.js test/origem-lead.test.js test/ia-wrapper.test.js \
               test/sdk-ia-sem-atalho.test.js test/anonimizacao-ordem-migracao.test.js \
-              test/webhook.test.js test/waConteudo.test.js
+              test/webhook.test.js test/waConteudo.test.js test/ingestao.test.js
 
-.PHONY: test test-db-up test-db-down test-isolation test-origem test-all ci migrate guard-nao-producao
+.PHONY: test test-db-up test-db-down test-isolation test-origem test-ingestao test-all ci migrate guard-nao-producao ingest-status
 
 # ── testes puros ──────────────────────────────────────────────────────────────
 test:
@@ -99,6 +100,28 @@ test-isolation:
 	  LM_ENCRYPTION_KEY="chave-de-teste-da-infra" \
 	  node --test --test-concurrency=1 test/isolamento-tenant.itest.js
 
+# ── suíte da INGESTÃO DE MÍDIA (migração 175) ─────────────────────────────────
+test-ingestao:
+	@echo "[ingestao] bootstrap + migrações (duas vezes, idempotência)…"
+	@$(PSQL) -d postgres       < test/db/00-role-e-bancos.sql
+	@$(PSQL) -d lm_plataforma  < test/db/20-plataforma-base.sql
+	@for r in 1 2; do \
+	  for m in $(MIGRATIONS); do \
+	    $(PSQL) -d lm_plataforma < db/migrations/$$m.sql >/dev/null; \
+	  done; \
+	done
+	@echo "[ingestao] conferindo RLS ATIVA e FORÇADA em toda tabela nova…"
+	@$(PSQL) -d lm_plataforma < test/db/30-confere-rls.sql
+	@echo "[ingestao] rodando a suíte…"
+	@DATABASE_URL="$(DSN_PLATAFORMA)" ADMIN_DATABASE_URL="$(ADM_PLATAFORMA)" \
+	  LM_ENCRYPTION_KEY="chave-de-teste-da-infra" \
+	  node --test --test-concurrency=1 test/ingestao.itest.js
+
+# Painel da ingestão. NÃO roda no laptop: as tabelas e os arquivos estão na VPS, e o
+# script é READ-ONLY (nenhum INSERT, nenhum UPDATE).
+ingest-status:
+	@docker exec adr-lead-manager node /app/scripts/ingest-status.js $(ARGS)
+
 # Sobe, roda tudo, derruba — o down acontece mesmo com teste vermelho.
 test-all:
 	@$(MAKE) test-db-up
@@ -106,6 +129,7 @@ test-all:
 	 $(MAKE) test         || rc=$$?; \
 	 $(MAKE) test-origem  || rc=$$?; \
 	 $(MAKE) test-isolation || rc=$$?; \
+	 $(MAKE) test-ingestao || rc=$$?; \
 	 $(MAKE) test-db-down; \
 	 if [ $$rc -ne 0 ]; then echo "[ci] VERMELHO"; else echo "[ci] verde"; fi; \
 	 exit $$rc

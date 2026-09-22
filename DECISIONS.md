@@ -380,3 +380,61 @@ o que falta é o clique existir.
 de um telefone real; não tenho aparelho, e fabricar um payload no webhook de produção criaria lead
 falso no funil da recepção. Fica para o Leo enviar. Até lá, o que está provado é tudo menos o
 último elo: a captura nunca rodou com mensagem de verdade.
+
+---
+
+## Sessão 5 — ingestão de mídia do grupo (22/09/2026)
+
+**O que é.** Fase 1 do motor de conteúdo: foto e vídeo que o professor manda no grupo de
+WhatsApp viram matéria-prima, sem nenhuma ação humana a mais. Nada de IA ainda — a linha
+nasce `pendente_curadoria` e quem a move é a fase seguinte.
+
+### D26 — o grupo-fonte é CONFIGURAÇÃO por unidade, não variável de ambiente
+`marketing.grupo_fonte (tenant_id, jid)`, com CHECK `jid LIKE '%@g.us'`. Cada unidade tem o
+seu grupo (às vezes mais de um), e quem configura é a recepção pela tela — não um deploy.
+O CHECK de grupo existe porque um telefone 1:1 cadastrado ali faria a ingestão capturar
+conversa de cliente, que é exatamente o que não pode acontecer.
+**Reversão:** `DELETE FROM marketing.grupo_fonte WHERE tenant_id = …` desliga a unidade sem
+mexer em código; `DROP TABLE marketing.raw_asset, marketing.grupo_fonte` apaga a frente toda.
+
+### D27 — deduplicação por CONTEÚDO (sha256), não por id de mensagem
+São dois problemas diferentes e cada um tem o seu índice:
+`uq_raw_asset_conteudo (tenant_id, sha256)` resolve *o professor reenviou o mesmo vídeo no
+dia seguinte*; `uq_raw_asset_mensagem (tenant_id, mensagem_id)` resolve *o webhook reentregou
+o mesmo evento*. Um só não cobriria o outro caso.
+**Efeito colateral aceito:** duas fotos idênticas mandadas de propósito (a mesma arte por dois
+professores) contam como uma. É o lado certo de errar — uma linha a menos para curar.
+
+### D28 — figurinha NÃO é foto, mesmo chegando como `kind: 'image'`
+O normalizador do webhook entrega figurinha como imagem de propósito (renderiza no mesmo
+`<img>` da Caixa de Entrada). A ingestão barra pelos dois lados: `stickerMessage` no cru e
+`webp` no mime. Sem isso, todo "figurinha de joinha" no grupo viraria matéria-prima de post.
+Foi encontrado lendo o normalizador, não testando — e é o tipo de erro que só apareceria na
+curadoria, semanas depois.
+
+### D29 — a recusa é uma LINHA, não um silêncio
+Cota estourada grava `situacao='cota_excedida'` e download quebrado grava `'falhou'`, os dois
+com `motivo` por escrito. "A foto que mandei sumiu" não pode ser a única informação
+disponível. A cota é conferida **antes** de baixar: cota estourada não gasta banda nem disco.
+Cota ausente = sem limite; cota `0` = desligado.
+
+### D30 — os bytes vêm do download que a Caixa de Entrada já fez
+`baixarMidiaInbound` passou a expor `msg.media.diskPath`, e a ingestão lê dali. Baixar de
+novo seria pagar duas vezes pelo mesmo arquivo — e a Evolution **não guarda mídia antiga**
+(400 no segundo pedido), então a segunda tentativa nem sempre existe. Só quando o caminho não
+está lá é que a ingestão baixa sozinha, com prazo de 45 s e três tentativas.
+*A cópia é separada de propósito:* a da Caixa de Entrada vive em `MEDIA_ROOT` (`/app/uploads`,
+sujeito a retenção) e a matéria-prima em `/srv/adr-media/<tenant_id>/materia-prima/`, com o
+nome derivado do sha256. São ciclos de vida diferentes.
+
+### D31 — a ingestão NUNCA lança e NUNCA toca no funil
+Roda no caminho do webhook: qualquer erro vira log estruturado e a entrega segue. E entra
+depois de tudo o que a Caixa de Entrada precisa — se a ingestão falhar, a bolha do grupo já
+está gravada. O ramo de grupo do webhook já retornava antes do funil; nada disso mudou.
+
+### Dívidas abertas nesta sessão
+| # | Dívida |
+|---|---|
+| **A10** | Não existe tela para cadastrar o grupo-fonte: hoje é INSERT à mão em `marketing.grupo_fonte`. Enquanto for assim, `make ingest-status` é o único jeito de saber se a unidade está ligada. |
+| **A11** | O arquivo é escrito no disco **antes** do INSERT. Se o INSERT falhar, sobra arquivo órfão — inofensivo (o nome é o hash, então reescrever é idempotente), mas ninguém o recolhe. Falta uma faxina periódica de arquivos sem linha. |
+| **A12** | A ingestão roda dentro do contexto de unidade aberto com `modulo: 'LEADS'` (o do webhook). Não chama IA, então não há custo atribuído errado hoje — mas quando a curadoria com IA entrar, ela precisa do seu próprio `comUnidade(..., { modulo: 'MARKETING' })`. |

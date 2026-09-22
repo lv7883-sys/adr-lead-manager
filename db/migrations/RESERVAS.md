@@ -16,7 +16,8 @@ colisão de 20/09/2026 (faixa 140–149 ocupada por engano por duas frentes ao m
 | 140–149 | ADR-052 | Implantação guiada | não (arquivos ainda não criados) |
 | 150–169 | ADR-051 | continuação do núcleo canônico | não |
 | **170–174** | **atribuição + plataforma** | 170 mapa_campanha, 171 origem_lead, 172 plataforma, 173 marketing, 174 privilégios da origem | **SIM — aplicadas em 21/09/2026** |
-| 175–199 | livre | — | — |
+| **175** | **ingestão de mídia** | 175 grupo_fonte + raw_asset (matéria-prima vinda do grupo de WhatsApp) | não (aguardando o teste de isolamento) |
+| 176–199 | livre | — | — |
 
 ## Nomes já reservados dentro do schema `plataforma`
 
