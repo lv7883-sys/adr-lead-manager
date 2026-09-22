@@ -22,6 +22,9 @@ const { Client } = require('pg');
 const T = '00000000-0000-4000-8000-00000000f11a';
 let c;
 
+// O engine (caso 9) carrega o gemini no topo; aqui nenhuma chamada de IA acontece.
+process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'teste';
+
 // withTenant do db.js trocado pelo cliente do teste (mesmo truque dos outros itests).
 const dbPath = require.resolve(path.join(__dirname, '../src/db.js'));
 require.cache[dbPath] = {
@@ -60,7 +63,8 @@ function doKanban(r, id) {
   return null;
 }
 
-let idReacao, idSistema, idEsperando, idSoReacao;
+let idReacao, idSistema, idEsperando, idSoReacao, idDormente;
+const TEL_DORMENTE = '5519999990005';
 
 before(async () => {
   c = new Client({ connectionString: process.env.DATABASE_URL });
@@ -80,7 +84,7 @@ before(async () => {
       body text, sender text, raw jsonb, received_at timestamptz DEFAULT now());
     CREATE TABLE pending_approvals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid, status text,
       suggested_response text, final_response text, decided_at timestamptz, created_at timestamptz DEFAULT now());
-    CREATE TABLE reabordagem_tentativas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid, status text);
+    CREATE TABLE reabordagem_tentativas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid, status text, enviado_em timestamptz);
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, dormancy_days int DEFAULT 7);
     CREATE TABLE tenants (id uuid PRIMARY KEY, name text, horario_comercial jsonb, horario_comercial_inicio time, horario_comercial_fim time, horario_comercial_dias int[]);
   `);
@@ -117,6 +121,15 @@ before(async () => {
   const cvD = await conversa(telD);
   await saida(telD, 'oi! vi seu interesse', 30);
   await entrada(cvD, REACAO, 29);
+
+  // (E) DORMENTE retomado: escreveu há 60d, ficamos calados, retomamos há 10d (lacuna >> 7d de
+  // dormência) e ele só reagiu 👍 há 5d. A reação não pode apagar a retomada nem marcar "reengajou",
+  // e o silêncio dele tem de continuar valendo para a reabordagem.
+  idDormente = await lead('Dormente que só reagiu', TEL_DORMENTE);
+  const cvE = await conversa(TEL_DORMENTE);
+  await entrada(cvE, 'oi, quero saber dos cursos', 60 * 24);
+  await saida(TEL_DORMENTE, 'oi! ainda tem interesse?', 10 * 24);
+  await entrada(cvE, REACAO, 5 * 24);
 });
 after(async () => { await c.end(); });
 
@@ -163,4 +176,38 @@ test('(6) painel/SLA: reação não entra como "aguardando nós" nem como 1ª me
   const aguardando = (((m.bloco1_sla || {}).aguardando_lista) || []).map((x) => x.id);
   assert.ok(!aguardando.includes(idReacao), 'lead do caso não aparece como "devemos resposta"');
   assert.ok(aguardando.includes(idEsperando), 'quem escreveu mesmo continua aparecendo');
+});
+
+// ---- 22/09: os outros três lugares que decidiam sem a régua ------------------------------------
+// A mesma causa dava resultados OPOSTOS em cada tela, o que é a assinatura da régua duplicada:
+// na fila, a reação COBRAVA resposta; na reativação e no job de silenciosos, ela ESCONDIA o lead.
+
+test('(7) reativação: 👍 não apaga a retomada nem marca "reengajou"', async () => {
+  const { retomadaCtes, identLateral } = require('../src/reativacao');
+  const r = (await c.query(
+    `WITH ${retomadaCtes('7')}
+     SELECT rtm.retomada_em IS NOT NULL AS teve_retomada,
+            (rin.last_in > rtm.retomada_em) AS reengajou
+       FROM leads l
+       ${identLateral('l')}
+       LEFT JOIN rt_retom rtm ON li.ident <> '' AND rtm.ident = li.ident
+       LEFT JOIN rt_in   rin ON li.ident <> '' AND rin.ident = li.ident
+      WHERE l.id = $1`, [idDormente])).rows[0];
+  assert.equal(r.teve_retomada, true, 'a saída após 50 dias de silêncio continua sendo uma retomada');
+  assert.notEqual(r.reengajou, true, 'reagir com 👍 não é voltar a conversar');
+});
+
+test('(8) job de silenciosos: quem só reagiu continua na lista de reabordagem', async () => {
+  const { leadsSilenciosos } = require('../src/jobs/detectar-silenciosos');
+  const ids = (await leadsSilenciosos(c, T)).map((x) => x.id);
+  assert.ok(ids.includes(idDormente), 'o 👍 fazia o lead parecer "respondeu depois de nós" e ele sumia daqui');
+  assert.ok(!ids.includes(idEsperando), 'quem escreveu de verdade não é silencioso — a bola é NOSSA');
+});
+
+test('(9) bola: a reação não vira "nossa desde" (o lead não rejuvenesce)', async () => {
+  const { _posseDesde } = require('../src/engine');
+  const ident = TEL_DORMENTE;
+  const desde = await _posseDesde(T, ident, { bola_nossa_desde: null, created_at: null });
+  const dias = (Date.now() - new Date(desde).getTime()) / 864e5;
+  assert.ok(dias > 55, `deveria contar desde a mensagem de 60 dias atrás, veio ${Math.round(dias)}d`);
 });

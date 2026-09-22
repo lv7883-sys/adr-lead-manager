@@ -726,7 +726,10 @@ router.get(
                       -- Régua compartilhada com a contagem de não-lidas do inbox (src/reacao.js).
                       max(m.received_at) FILTER (WHERE m.role = 'USER' AND ${naoEhReacaoSql('m')}) AS last_in_turno,
                       (array_agg(m.body ORDER BY m.received_at) FILTER (WHERE m.role = 'USER'))[1] AS first_message,
-                      array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) FILTER (WHERE m.role = 'USER') AS ts_in
+                      -- ts_in alimenta o ENGAJAMENTO (classificarEngajamento): mesma régua, senão a
+                      -- reação vira "o cliente respondeu" e, instantânea, derruba o tempo médio dele.
+                      array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at)
+                        FILTER (WHERE m.role = 'USER' AND ${naoEhReacaoSql('m')}) AS ts_in
                  FROM conv c JOIN messages m ON m.conversation_id = c.id
                 WHERE c.ident <> ''
                 GROUP BY c.ident
@@ -1544,7 +1547,8 @@ router.get('/:tenantId/leads/:id/sugestao-retomada', authenticate, requireTenant
         const tin = (await c.query(
           `SELECT array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) AS ts
              FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-            WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2 AND m.role = 'USER'`,
+            WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
+              AND m.role = 'USER' AND ${naoEhReacaoSql('m')}`,
           [req.tenantId, ident])).rows[0];
         const tout = (await c.query(
           `SELECT array_agg(EXTRACT(EPOCH FROM s.received_at) ORDER BY s.received_at) AS ts
@@ -2571,7 +2575,8 @@ router.get('/:tenantId/bola-shadow', authenticate, requireTenantAccess(READ_ROLE
          SELECT veredito, camada, count(*)::int AS n,
                 count(*) FILTER (WHERE EXISTS (
                   SELECT 1 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-                   WHERE cv.tenant_id = $1 AND m.role = 'USER' AND m.received_at > base.created_at
+                   WHERE cv.tenant_id = $1 AND m.role = 'USER' AND ${naoEhReacaoSql('m')}
+                     AND m.received_at > base.created_at
                      AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = base.ident))::int AS cliente_voltou,
                 count(*) FILTER (WHERE EXISTS (
                   SELECT 1 FROM staff_outbound_samples s

@@ -7,6 +7,7 @@ const { toE164 } = require('./validation');
 const telBR = require('./telefoneBR');
 const { resolveSystemPrompt } = require('./templates');
 const { sanitizarIdentidade } = require('./temaProibido');   // rascunho nunca sai com nome de recepcionista
+const { naoEhReacaoSql } = require('./reacao');              // reação/aviso de sistema não é turno do cliente
 const gemini = require('./gemini');
 const { getRescuePolicy } = require('./roleLeadPolicy');   // ADR-036 E1.4: rescue question por papel (config por tenant)
 const notifyModule = require('./notify');
@@ -1006,12 +1007,15 @@ async function _semNomeDeRecepcionista(c, tenantId, texto, log, extra = {}) {
 // todo o ciclo — não muda enquanto o cliente não escreve de novo). Fallback: created_at.
 async function _posseDesde(tenantId, ident, lead) {
   if (lead.bola_nossa_desde) return lead.bola_nossa_desde;
+  // Reação não é turno do cliente (src/reacao.js): se o último inbound for um 👍, a bola passaria a
+  // ser "nossa desde" o emoji, rejuvenescendo um lead parado há dias. Sem turno de verdade, cai no
+  // created_at, como já acontece com quem nunca escreveu.
   const r = await withTenant(tenantId, (c) => c.query(
     `SELECT max(m.received_at) AS last_in
        FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
       WHERE cv.tenant_id = $1
         AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = $2
-        AND m.role = 'USER'`,
+        AND m.role = 'USER' AND ${naoEhReacaoSql('m')}`,
     [tenantId, ident]
   ).then((rr) => rr.rows[0]));
   return (r && r.last_in) || lead.created_at || null;
@@ -1972,6 +1976,7 @@ module.exports = {
   _carregarConversaSaida, _rescueConversation, RESCUE_CONV_MAX,
   // ADR-030 Passo 2 — classificação da saída (estado semântico da bola), shadow-only.
   classificarSaida, _aplicarEstadoBola,
+  _posseDesde,   // exposto p/ itest: reação não pode virar "bola nossa desde"
   // Aplicação automática de sugestão de etapa (078) — expostos p/ itest + backfill.
   _autoAplicarEtapa, persistStageSuggestion,
 };

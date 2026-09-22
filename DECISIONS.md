@@ -484,3 +484,24 @@ mas como a imagem seguinte subiu com a ingestão **e** com as correções de ide
 assistente, aquela tag deixou de ser "o estado imediatamente anterior ao meu código" — voltar
 nela desfaria trabalho de outra frente junto. **O caminho limpo para reverter só a ingestão é
 `git revert` do merge + rebuild**, não a imagem antiga. (Apontado pela sessão de WhatsApp.)
+
+### A13 — `vincularLead` usa o `external_id` cru (encontrado em 22/09/2026)
+`src/routes/webhook.js:746` chama `origemLead.vincularLead(tenant.id, msg.externalId, log)`, e
+`msg.externalId` é o `jid.split('@')[0]` da linha 68 — **sem a régua de jid**. Dentro,
+`src/origemLead.js:253` faz `br_phone_key($3)` em cima disso.
+
+**A escrita está protegida, a leitura não.** `registrarOrigem` passa pelo
+`_telefoneDoContato()` (tira `:NN`, recusa `@g.us`, resolve `@lid` pelo `wa_lid`, exige 10–15
+dígitos), então nunca existe linha de origem com chave de `@lid` — e uma chave podre não casa
+com nada. É isso, e só isso, que segura hoje.
+
+**O risco é estreito mas real:** se os dígitos de um `@lid` produzirem a mesma `br_phone_key`
+de um contato real, o `vincularLead` gruda a origem real no lead falso. O lead
+`+53751599612092` (medido pela sessão de WhatsApp) é o candidato exato — o telefone dele É o
+número do `@lid`. Em 22/09 a `origem_lead` tem 39 linhas, todas vinculadas: há material real
+para colidir.
+
+**Conserto (não feito, de propósito):** o `vincularLead` deve usar a mesma régua da escrita em
+vez do `externalId` cru. É arquivo meu e régua minha — **não encosta em `br_phone_key` nem em
+`telefoneBR.js`**, respeitando o combinado. Ficou fora agora para não virar mais uma correção
+pontual antes do raio-X de causas que a sessão de WhatsApp está levando ao Leo.

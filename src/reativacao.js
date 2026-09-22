@@ -23,13 +23,20 @@
 //   reengajou desde X: rin.last_in > rtm.retomada_em AND rin.last_in >= X
 //   (max > threshold ≡ EXISTS > threshold — as condições são fechadas p/ cima, então o
 //    máximo satisfaz sse algum elemento satisfaz. rt_in não referenciada não executa.)
+//
+// REAÇÃO NÃO É INBOUND (2026-09-22): um 👍 do lead entrava aqui como turno dele e mentia dos dois
+// lados — zerava a lacuna de dormência (uma retomada de verdade deixava de ser contada) e marcava
+// "reengajou", tirando o lead da lista de reativação sem ninguém ter conversado. Mesma régua do
+// resto do sistema: src/reacao.js.
+
+const { naoEhReacaoSql } = require('./reacao');
 
 // CTEs rt_ev/rt_retom/rt_in. `dorm` = expressão SQL de dormancy_days (ex.: '$2' ou literal).
 function retomadaCtes(dorm, { schema = '' } = {}) {
   return `rt_ev AS (
     SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident, m.received_at, 'in'::text AS kind
       FROM ${schema}messages m JOIN ${schema}conversations cv ON cv.id = m.conversation_id
-     WHERE m.role = 'USER'
+     WHERE m.role = 'USER' AND ${naoEhReacaoSql('m')}
     UNION ALL
     SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g'), s.received_at, 'out'
       FROM ${schema}staff_outbound_samples s

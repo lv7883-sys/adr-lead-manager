@@ -529,10 +529,12 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
          inb AS (
            -- Mesmo recorte NO PERÍODO do SLA: sem ele, gaps de conversas antigas do
            -- mesmo número (join por ident) contaminavam o engajamento.
+           -- reação não é turno: entrava como "o cliente respondeu" e, por ser instantânea,
+           -- ainda puxava o tempo médio de resposta do cliente para baixo.
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
                   array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) AS ts
              FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-            WHERE cv.tenant_id = $1 AND m.role = 'USER'
+            WHERE cv.tenant_id = $1 AND m.role = 'USER' AND ${naoEhReacaoSql('m')}
               AND m.received_at >= now() - ($2 || ' days')::interval
             GROUP BY 1
          ),
@@ -898,7 +900,7 @@ async function computePainel(tenantId) {
             ) sx
             WHERE EXISTS (
               SELECT 1 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-               WHERE cv.tenant_id = $1 AND m.role = 'USER'
+               WHERE cv.tenant_id = $1 AND m.role = 'USER' AND ${naoEhReacaoSql('m')}
                  AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = sx.ident
                  AND m.received_at < sx.sent
             )) AS leads_respondidos,

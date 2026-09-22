@@ -10,6 +10,7 @@
 // da recepção, que vê na fila). Idempotente: a janela de 3 dias evita repetir.
 
 const { SQL_PERFIL } = require('../perfilAssistente');   // perfil da assistente junto da config (migr. 119)
+const { naoEhReacaoSql } = require('../reacao');         // reação não é turno do cliente
 const { pool, withTenant } = require('../db');
 const gemini = require('../gemini');
 const redisClient = require('../redisClient');
@@ -28,12 +29,14 @@ function faixaDe(silencioSeg) {
 }
 
 // Leads silenciosos do tenant que ainda precisam de uma sugestão de reabordagem.
+// Reação não conta como resposta (src/reacao.js): um 👍 no fim da conversa fazia o lead parecer
+// "respondeu depois de nós" e ele sumia desta lista para sempre — silêncio que nunca vira retomada.
 async function leadsSilenciosos(c, tenantId) {
   return (await c.query(
     `WITH inb AS (
        SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident, max(m.received_at) AS last_in
          FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-        WHERE cv.tenant_id = $1 AND m.role = 'USER' GROUP BY 1
+        WHERE cv.tenant_id = $1 AND m.role = 'USER' AND ${naoEhReacaoSql('m')} GROUP BY 1
      ),
      outb AS (
        SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident, max(s.received_at) AS last_out
@@ -148,4 +151,4 @@ async function runDetectarSilenciosos(deps = {}) {
   return summary;
 }
 
-module.exports = { runDetectarSilenciosos, faixaDe };
+module.exports = { runDetectarSilenciosos, faixaDe, leadsSilenciosos };   // leadsSilenciosos exposto p/ itest
