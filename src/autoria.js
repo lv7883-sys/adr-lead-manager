@@ -12,7 +12,7 @@
 // próprio novo ATIVA o latch humano do contractConvert (`review_by <> 'SERVICE'`), que hoje
 // está dormente por falta de nomes na base. Por isso valores reservados são rejeitados e
 // caem no papel do token, como se o campo não tivesse vindo.
-const RESERVADOS = /^(service|ia_auto|extranet_auto|migracao-.*)$/i;
+const RESERVADOS = /^(service|ia_auto|extranet_auto|contrato_auto|migracao-.*)$/i;
 
 function autorHumano(req) {
   const v = typeof req.body?.by_name === 'string' ? req.body.by_name.trim().slice(0, 80) : '';

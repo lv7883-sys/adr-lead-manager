@@ -26,7 +26,7 @@ test('campo ausente, vazio ou não-string cai no papel do token', () => {
 
 test('valores reservados não fabricam humano nem máquina', () => {
   for (const v of ['SERVICE', 'service', 'Service', 'ia_auto', 'IA_AUTO', 'extranet_auto',
-    'migracao-127', 'MIGRACAO-128', 'migracao-qualquer']) {
+    'contrato_auto', 'migracao-127', 'MIGRACAO-128', 'migracao-qualquer']) {
     assert.equal(autorHumano(req(v)), 'SERVICE', `reservado vazou: ${v}`);
   }
 });
