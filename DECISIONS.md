@@ -541,3 +541,18 @@ precisa fechar.
 auditoria de 18/09 e já o havia retratado com o Leo. Dois caminhos separados tropeçaram na
 mesma coluna — o que é argumento para a ambiguidade ser tratada no esquema, não na cabeça de
 quem consulta.
+
+**Convergência (22/09/2026) — dono e forma do conserto do NOT_LEAD.** O conserto das linhas
+138–142 do `sync-extranet-leads.js` é da **sessão da Extranet**, e está parado aguardando
+decisão do Leo. Forma combinada entre as três frentes:
+
+- `review_by='SERVICE'` vira **DESCONHECIDO** → gera **pendência humana**, nunca override
+  silencioso (é a tradução prática de "o sistema não sabe quem decidiu");
+- `lead_eventos.autor` entra como sinal **quando existir** — e só nome próprio afirma humano;
+- três guardas que a 127/128 provaram necessárias: fato-somente via
+  `stages.temFatoExtranetSql`, internos por dígitos, e desfecho intocável; só fato ≥
+  experimental ressuscita (Conexão/Atendido não).
+
+Os **12 leads com `extranet_auto`** hoje em NOT_LEAD são, pela leitura da sessão da Extranet,
+leads que o sync avançou e o roteador rebaixou **antes** do fix de 18/09 — reforçam o caso.
+**Ninguém toca o arquivo sem combinar antes.**
