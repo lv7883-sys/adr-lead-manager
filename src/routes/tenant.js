@@ -502,6 +502,10 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
   }
 });
 
+// Autoria real nas ações de confirmar/descartar — semântica e sanitização (valores
+// reservados nunca viram "humano") em src/autoria.js.
+const { autorHumano: _autorHumano } = require('../autoria.js');
+
 // Helpers de resolução de item não classificado (lead | message).
 async function _msgInfo(c, msgId) {
   return (await c.query(
@@ -517,6 +521,7 @@ router.post('/:tenantId/unclassified/:id/promote', authenticate, requireTenantAc
   if (!isUuid(id) || (kind !== 'lead' && kind !== 'message')) return res.status(400).json({ error: 'invalid' });
   // Temperatura opcional (passo secundário do controle "é lead" compartilhado).
   const temperature = ['quente', 'morno', 'frio'].includes(req.body?.temperature) ? req.body.temperature : null;
+  const autor = _autorHumano(req);
   try {
     const leadId = await withTenant(req.tenantId, async (c) => {
       if (kind === 'lead') {
@@ -524,10 +529,10 @@ router.post('/:tenantId/unclassified/:id/promote', authenticate, requireTenantAc
           `UPDATE leads SET status = 'QUALIFYING', review_queue = false,
                             review_result = 'confirmed_lead', review_em = now(), review_by = $3,
                             temperatura_manual = COALESCE($2, temperatura_manual), updated_at = now()
-            WHERE id = $1 RETURNING id`, [id, temperature, req.tenantRole]
+            WHERE id = $1 RETURNING id`, [id, temperature, autor]
         );
         if (!r.rows[0]) return null;
-        await _registrarFeedback(c, req.tenantId, id, 'lead', req.tenantRole, { temperature });
+        await _registrarFeedback(c, req.tenantId, id, 'lead', autor, { temperature });
         return id;
       }
       const m = await _msgInfo(c, id);
@@ -540,7 +545,7 @@ router.post('/:tenantId/unclassified/:id/promote', authenticate, requireTenantAc
         [req.tenantId, m.sender || m.external_id, m.external_id, temperature]
       );
       await c.query("UPDATE messages SET discarded = false, discard_reason = 'promoted' WHERE id = $1", [id]);
-      await _registrarFeedback(c, req.tenantId, lead.rows[0].id, 'lead', req.tenantRole, { temperature });
+      await _registrarFeedback(c, req.tenantId, lead.rows[0].id, 'lead', autor, { temperature });
       return lead.rows[0].id;
     });
     if (!leadId) return res.status(404).json({ error: 'not found' });
@@ -563,12 +568,13 @@ router.post('/:tenantId/unclassified/:id/ignore', authenticate, requireTenantAcc
   // Motivo (tópico ou texto livre) — vira rótulo content-based no classification_feedback,
   // mesmo caminho da Revisar. Mantém o lead fora do funil.
   const motivo = typeof req.body?.motivo === 'string' ? req.body.motivo.trim().slice(0, 200) || null : null;
+  const autor = _autorHumano(req);
   try {
     const ok = await withTenant(req.tenantId, async (c) => {
       if (kind === 'lead') {
-        const r = await c.query("UPDATE leads SET review_result = 'confirmed_not_lead', review_em = now(), review_by = $2 WHERE id = $1 RETURNING id", [id, req.tenantRole]);
+        const r = await c.query("UPDATE leads SET review_result = 'confirmed_not_lead', review_em = now(), review_by = $2 WHERE id = $1 RETURNING id", [id, autor]);
         if (!r.rows[0]) return false;
-        await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole, { context: motivo });
+        await _registrarFeedback(c, req.tenantId, id, 'not_lead', autor, { context: motivo });
         await _limparSugestaoEtapa(c, id);   // fatia (b): descarte limpa a sugestão pendente (raiz)
         return true;
       }
@@ -576,7 +582,7 @@ router.post('/:tenantId/unclassified/:id/ignore', authenticate, requireTenantAcc
       return !!r.rows[0];
     });
     if (!ok) return res.status(404).json({ error: 'not found' });
-    logger.info('tenant.unclassified.ignored', { tenant_id: req.tenantId, kind, id, by: req.tenantRole });
+    logger.info('tenant.unclassified.ignored', { tenant_id: req.tenantId, kind, id, by: autor });
     res.json({ ok: true });
   } catch (err) {
     logger.error('tenant.unclassified.ignore_error', { tenant_id: req.tenantId, error: err.message });
@@ -592,6 +598,7 @@ router.post('/:tenantId/unclassified/:id/marcar-interno', authenticate, requireT
   const TIPOS = ['gestor', 'recepcionista', 'professor', 'funcionario', 'parceiro', 'outro'];
   const type = TIPOS.includes(req.body?.type) ? req.body.type : 'outro';
   const nome = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : null;
+  const autor = _autorHumano(req);
   try {
     const ok = await withTenant(req.tenantId, async (c) => {
       let phone = null, defName = nome;
@@ -599,7 +606,7 @@ router.post('/:tenantId/unclassified/:id/marcar-interno', authenticate, requireT
         const l = (await c.query('SELECT phone, name FROM leads WHERE id = $1', [id])).rows[0];
         if (!l || !l.phone) return false;
         phone = l.phone; defName = defName || l.name;
-        await c.query("UPDATE leads SET status = 'NOT_LEAD', review_result = 'confirmed_not_lead', review_em = now(), review_by = $2 WHERE id = $1", [id, req.tenantRole]);
+        await c.query("UPDATE leads SET status = 'NOT_LEAD', review_result = 'confirmed_not_lead', review_em = now(), review_by = $2 WHERE id = $1", [id, autor]);
         await _limparSugestaoEtapa(c, id);   // fatia (b): virar contato interno (terminal) limpa a sugestão
       } else {
         const m = await _msgInfo(c, id);
@@ -615,7 +622,7 @@ router.post('/:tenantId/unclassified/:id/marcar-interno', authenticate, requireT
       return true;
     });
     if (!ok) return res.status(404).json({ error: 'not found' });
-    logger.info('tenant.unclassified.marcado_interno', { tenant_id: req.tenantId, kind, id, type, by: req.tenantRole });
+    logger.info('tenant.unclassified.marcado_interno', { tenant_id: req.tenantId, kind, id, type, by: autor });
     res.json({ ok: true });
   } catch (err) {
     logger.error('tenant.unclassified.marcar_interno_error', { tenant_id: req.tenantId, error: err.message });
@@ -641,6 +648,7 @@ router.post(
     // o uso atual (botões sem esses campos seguem funcionando).
     const temperature = ['quente', 'morno', 'frio'].includes(req.body?.temperature) ? req.body.temperature : null;
     const motivo = typeof req.body?.motivo === 'string' ? req.body.motivo.trim().slice(0, 200) || null : null;
+    const autor = _autorHumano(req);
     try {
       const updated = await withTenant(req.tenantId, async (c) => {
         const isLead = result === 'confirmed_lead';
@@ -653,13 +661,13 @@ router.post(
                   updated_at = now()
             WHERE id = $1 AND review_queue = true AND review_result IS NULL
             RETURNING id, status`,
-          [id, result, req.tenantRole, isLead, temperature]
+          [id, result, autor, isLead, temperature]
         );
         // Feedback de aprendizado (ADR-011 Fase 2): a decisão real da recepção. Mesmo
         // motor de rótulo do requalificar — motivo → correction_context (tópico que a
         // IA aprende), temperatura → corrected_temperature.
         if (r.rows[0]) {
-          await _registrarFeedback(c, req.tenantId, id, isLead ? 'lead' : 'not_lead', req.tenantRole,
+          await _registrarFeedback(c, req.tenantId, id, isLead ? 'lead' : 'not_lead', autor,
             { context: isLead ? null : motivo, temperature: isLead ? temperature : null });
           if (!isLead) await _limparSugestaoEtapa(c, id);   // fatia (b): confirmar "não é lead" limpa a sugestão
         }
@@ -672,10 +680,10 @@ router.post(
         let draft = { ok: false };
         try { draft = await generateDraftForLead(req.tenantId, id); }
         catch (e) { logger.error('tenant.lead.review_draft_error', { tenant_id: req.tenantId, lead_id: id, error: e.message }); }
-        logger.info('tenant.lead.review_confirmed', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole, draft: draft.ok });
+        logger.info('tenant.lead.review_confirmed', { tenant_id: req.tenantId, lead_id: id, by: autor, draft: draft.ok });
         return res.json({ ok: true, result, status: updated.status, draft: draft.ok, approval_id: draft.approvalId || null });
       }
-      logger.info('tenant.lead.review_rejected', { tenant_id: req.tenantId, lead_id: id, by: req.tenantRole });
+      logger.info('tenant.lead.review_rejected', { tenant_id: req.tenantId, lead_id: id, by: autor });
       res.json({ ok: true, result, status: updated.status });
     } catch (err) {
       logger.error('tenant.lead.review_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
@@ -1151,6 +1159,7 @@ router.post('/:tenantId/leads/:id/requalificar', authenticate, requireTenantAcce
   const intent = typeof req.body?.intent === 'string' ? req.body.intent.trim() || null : null;
   const observation = typeof req.body?.observation === 'string' ? req.body.observation.trim() || null : null;
   const temperature = ['quente', 'morno', 'frio'].includes(req.body?.temperature) ? req.body.temperature : null; // opcional p/ 'lead'
+  const autor = _autorHumano(req);
   try {
     const out = await withTenant(req.tenantId, async (c) => {
       // SNAPSHOT do estado ANTES de mutar (p/ o Undo restaurar EXATO — não um QUALIFYING genérico).
@@ -1162,9 +1171,9 @@ router.post('/:tenantId/leads/:id/requalificar', authenticate, requireTenantAcce
         // Marca canônica de descarte + latch (confirmed_not_lead) + review_em (ordenação Descartados).
         await c.query(
           "UPDATE leads SET status = 'NOT_LEAD', review_result = 'confirmed_not_lead', review_em = now(), review_by = $2, updated_at = now() WHERE id = $1",
-          [id, req.tenantRole]
+          [id, autor]
         );
-        const feedbackId = await _registrarFeedback(c, req.tenantId, id, 'not_lead', req.tenantRole, { context: observation });
+        const feedbackId = await _registrarFeedback(c, req.tenantId, id, 'not_lead', autor, { context: observation });
         await _limparSugestaoEtapa(c, id);   // fatia (b): rebaixar p/ não-lead limpa a sugestão de etapa
         // GUARDRAIL Fatia D: arquiva o PENDING do lead (senão vira rascunho órfão em NOT_LEAD).
         const arch = await c.query(
@@ -1178,9 +1187,9 @@ router.post('/:tenantId/leads/:id/requalificar', authenticate, requireTenantAcce
         // latch confirmed_lead + feedback. O rascunho é gerado FORA da tx (abaixo).
         await c.query(
           "UPDATE leads SET status = 'QUALIFYING', review_result = 'confirmed_lead', review_em = now(), review_by = $2, temperatura_manual = COALESCE($3, temperatura_manual), updated_at = now() WHERE id = $1",
-          [id, req.tenantRole, temperature]
+          [id, autor, temperature]
         );
-        const feedbackId = await _registrarFeedback(c, req.tenantId, id, 'lead', req.tenantRole, { temperature });
+        const feedbackId = await _registrarFeedback(c, req.tenantId, id, 'lead', autor, { temperature });
         return { status: 'QUALIFYING', _promote: true, snapshot: { lead_id: id, prior, feedback_id: feedbackId, draft_created_id: null, drafts_archived: [] } };
       }
 
@@ -1197,7 +1206,7 @@ router.post('/:tenantId/leads/:id/requalificar', authenticate, requireTenantAcce
           [req.tenantId, id, instrument]
         );
       }
-      await _registrarFeedback(c, req.tenantId, id, 'lead', req.tenantRole, { context: observation, temperature: cls });
+      await _registrarFeedback(c, req.tenantId, id, 'lead', autor, { context: observation, temperature: cls });
       return { status: 'requalificado', temperatura: cls };
     });
     if (!out) return res.status(404).json({ error: 'lead not found' });
@@ -1212,7 +1221,7 @@ router.post('/:tenantId/leads/:id/requalificar', authenticate, requireTenantAcce
       out.draft = draft.ok;
       delete out._promote;
     }
-    logger.info('tenant.lead.requalificado', { tenant_id: req.tenantId, lead_id: id, classification: cls, by: req.tenantRole });
+    logger.info('tenant.lead.requalificado', { tenant_id: req.tenantId, lead_id: id, classification: cls, by: autor });
     res.json({ ok: true, ...out });
   } catch (err) {
     logger.error('tenant.lead.requalificar_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
