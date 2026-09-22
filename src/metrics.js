@@ -828,6 +828,25 @@ function _ehCloser(text) {
   return words.every((w) => CLOSER_WORDS.has(w));   // toda palavra precisa ser closer
 }
 
+// PORTA DE SAÍDA da etapa "aula experimental agendada". Devolve null enquanto o lead deve MESMO
+// ficar fora da fila (aula ainda por vir), ou { tipo, desde } quando ele precisa voltar.
+// `desde` é a âncora do relógio exibido — a data da aula, não o último contato: o que a recepção
+// precisa saber é "a aula foi há quanto tempo", não "ele escreveu há quanto tempo".
+const EXP_SEM_FATO_MS = 14 * 86400 * 1000;   // sem data nenhuma, o tempo parado é a única evidência
+function _portaDaAulaExperimental(l, agora) {
+  if (l.status !== 'EXPERIMENTAL_AGENDADA') return null;
+  const ts = (v) => (v ? new Date(v).getTime() : null);
+  const realizada = ts(l.exp_realizada_em);
+  if (realizada != null && realizada <= agora) return { tipo: 'aula_feita', desde: realizada };
+  const agendada = ts(l.exp_agendada_em);
+  if (agendada != null) return agendada < agora ? { tipo: 'aula_nao_aconteceu', desde: agendada } : null;
+  // Sem fato da Extranet (5 leads em Valinhos): não dá para dizer que a aula venceu, mas também não
+  // dá para deixar parado sem fim. O relógio é o tempo desde o último movimento do lead.
+  const parado = ts(l.updated_at) || ts(l.created_at);
+  if (parado != null && agora - parado > EXP_SEM_FATO_MS) return { tipo: 'aula_nao_aconteceu', desde: parado };
+  return null;
+}
+
 async function computePainel(tenantId) {
   return withTenant(tenantId, async (c) => {
     const rows = (
@@ -866,16 +885,29 @@ async function computePainel(tenantId) {
            SELECT lead_id FROM reabordagem_tentativas
             WHERE tenant_id = $1 AND status = 'pendente' GROUP BY lead_id
          )
-         SELECT l.id, l.name, l.phone, l.meta_psid, l.status, l.intent, l.desfecho, l.created_at, l.temperatura_manual,
+         SELECT l.id, l.name, l.phone, l.meta_psid, l.status, l.intent, l.desfecho, l.created_at, l.updated_at,
+                l.temperatura_manual,
                 l.review_queue, l.review_result, l.classification_confidence, l.classification_reasoning,
                 l.conversation_state, l.state_computed_at,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
                 i.first_in, i.last_in, i.first_in_turno, i.last_in_turno, i.last_in_body, i.first_in_body, o.first_out, o.last_out, c.channel,
                 i.ts_in, o.ts_out,
                 d.draft_at, COALESCE(d.n, 0) AS drafts,
-                (p.lead_id IS NOT NULL) AS retomada_pendente
+                (p.lead_id IS NOT NULL) AS retomada_pendente,
+                -- PORTA DE SAÍDA DA AULA EXPERIMENTAL (22/09/2026): o fato da Extranet diz QUANDO a
+                -- aula foi marcada e se aconteceu. Sem isso o lead fica parado em "aula marcada" para
+                -- sempre — medido em Valinhos: 55 leads com a aula já passada ou já feita, invisíveis.
+                ex.exp_agendada_em, ex.exp_realizada_em
            FROM leads l
            LEFT JOIN lead_qualifications q ON q.lead_id = l.id
+           LEFT JOIN LATERAL (
+             SELECT el.exp_agendada_em, el.exp_realizada_em
+               FROM extranet_lead el
+              WHERE el.lead_id = l.id
+              ORDER BY el.exp_realizada_em DESC NULLS LAST, el.exp_agendada_em DESC NULLS LAST,
+                       el.last_seen_at DESC NULLS LAST
+              LIMIT 1
+           ) ex ON true
            LEFT JOIN inb  i ON i.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
            LEFT JOIN outb o ON o.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
            LEFT JOIN chan c ON c.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
@@ -924,12 +956,18 @@ async function computePainel(tenantId) {
       // pilha separada maior. Quem está em Revisar não conta como rascunho da fila.
       if (l.review_queue && !l.review_result) { continue; }
       // Leads não-reais ficam fora da fila de ação (igual ao funil): NOT_LEAD/REVIEW_QUEUE.
-      // EXPERIMENTAL_AGENDADA (aula marcada) também sai da fila de ação: está parado
-      // aguardando a aula, não a recepção — não deve aparecer como "esperando resposta".
       const ativo = !l.desfecho && l.status !== 'CONVERTED'
-        && l.status !== 'NOT_LEAD' && l.status !== 'REVIEW_QUEUE'
-        && l.status !== 'EXPERIMENTAL_AGENDADA';
+        && l.status !== 'NOT_LEAD' && l.status !== 'REVIEW_QUEUE';
       if (!ativo) continue;
+      // EXPERIMENTAL_AGENDADA sai da fila ENQUANTO a aula não chega: está parado aguardando a aula,
+      // não a recepção. Depois que a aula PASSA, o silêncio deixa de ser espera e vira abandono —
+      // e era aqui que o lead sumia para sempre (55 em Valinhos, 22/09/2026: 37 com a aula vencida,
+      // 18 com a aula já realizada e ninguém movendo o card). A porta de saída é o próprio fato:
+      //   • aula REALIZADA  → volta como "aula feita" (cobrar a matrícula — é o lead mais quente que existe);
+      //   • aula VENCIDA    → volta como "aula não aconteceu" (remarcar).
+      // Sem fato nenhum não há data para vencer: usa o tempo parado como último recurso (EXP_SEM_FATO_MS).
+      const aula = _portaDaAulaExperimental(l, agora);
+      if (l.status === 'EXPERIMENTAL_AGENDADA' && !aula) continue;
       const fin = l.first_in_turno ? new Date(l.first_in_turno).getTime() : null;   // SLA mede resposta a MENSAGEM
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
       const lin = l.last_in_turno ? new Date(l.last_in_turno).getTime() : null;   // decide: só turno de verdade
@@ -955,7 +993,13 @@ async function computePainel(tenantId) {
       const stateFresh = l.conversation_state && (lin == null || (stateAt != null && stateAt >= lin))
         && !(l.conversation_state === 'AGUARDANDO_RECEPCAO' && saidaPosteriorAoEstado);
       let tipo, detalheSeg;
-      if (stateFresh) {
+      if (aula) {
+        // A aula vencida/feita GOVERNA o bucket: a pergunta "com quem está a bola" não se aplica a
+        // quem já veio à escola. Não entra em `aguardando` — não é dívida de resposta, é dívida de
+        // follow-up; misturar contaminaria o SLA de primeira resposta.
+        tipo = aula.tipo;
+        detalheSeg = (agora - aula.desde) / 1000;
+      } else if (stateFresh) {
         if (l.conversation_state === 'AGUARDANDO_RECEPCAO') {
           // a bola está com a escola → urgência (responder agora / sem resposta).
           detalheSeg = (agora - (lin != null ? lin : (lout != null ? lout : new Date(l.created_at).getTime()))) / 1000;
@@ -1010,7 +1054,14 @@ async function computePainel(tenantId) {
         },
       });
     }
-    const ordem = { responder_agora: 0, sem_resposta: 1, retomada: 2, monitorar: 3 };
+    // Os dois primeiros são dívida de RESPOSTA (alguém está esperando agora); os dois de aula são
+    // dívida de FOLLOW-UP (ninguém espera, mas o dinheiro está na mesa). Retomada e monitorar seguem
+    // onde estavam — a ordem que a recepção já conhece não muda.
+    const ordem = {
+      responder_agora: 0, sem_resposta: 1,
+      aula_feita: 2, aula_nao_aconteceu: 3,
+      retomada: 4, monitorar: 5,
+    };
     fila.sort((a, b) => (ordem[a.tipo] - ordem[b.tipo]) || (b.detalhe_seg - a.detalhe_seg));
 
     return {

@@ -74,7 +74,10 @@ before(async () => {
       status text, intent text, desfecho text, desfecho_em timestamptz, temperatura_manual text, origem text,
       review_queue boolean, review_result text, classification_confidence numeric, classification_reasoning text,
       conversation_state text, state_computed_at timestamptz, suggested_stage text, stage_reasoning text,
-      aborda_renovacao boolean, created_at timestamptz DEFAULT now());
+      aborda_renovacao boolean, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
+    -- porta de saída da aula experimental (22/09): o painel passou a ler o fato da Extranet
+    CREATE TABLE extranet_lead (lead_id uuid, tenant_id uuid, situacao text,
+      exp_agendada_em timestamptz, exp_realizada_em timestamptz, last_seen_at timestamptz);
     CREATE TABLE lead_qualifications (lead_id uuid, tenant_id uuid, instrument text, qualification_complete boolean, name text, availability text, reasked boolean);
     CREATE TABLE conversations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, channel text, external_id text,
       conversation_kind text DEFAULT 'DIRECT', updated_at timestamptz DEFAULT now());
