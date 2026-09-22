@@ -109,6 +109,9 @@ test-ingestao:
 	  for m in $(MIGRATIONS); do \
 	    $(PSQL) -d lm_plataforma < db/migrations/$$m.sql >/dev/null; \
 	  done; \
+	  for g in $(GRANTS); do \
+	    $(PSQL) -d lm_plataforma < db/grants/$$g.sql >/dev/null; \
+	  done; \
 	done
 	@echo "[ingestao] conferindo RLS ATIVA e FORÇADA em toda tabela nova…"
 	@$(PSQL) -d lm_plataforma < test/db/30-confere-rls.sql
