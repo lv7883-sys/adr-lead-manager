@@ -81,8 +81,15 @@ test('com comportamento definido, o "sem emojis" fixo dá lugar ao que a empresa
 
 test('empresa SEM perfil: prompt da unidade sai exatamente como ela escreveu', () => {
   assert.equal(resolveSystemPrompt({ system_prompt_override: 'Prompt da unidade', available_instruments: [], perfil: null }), 'Prompt da unidade');
-  assert.equal(resolveSystemPrompt({ system_prompt_override: 'Prompt da unidade', perfil: perfilIA.doBanco({}) }), 'Prompt da unidade');
-  assert.equal(perfilIA.blocoPerfil({ nao_falar: [], estilo_ia: 'inexistente' }), '');
+});
+
+// Desde 22/09/2026 o bloco do perfil SEMPRE carrega a regra de nome (a IA se apresentava com o nome
+// de uma recepcionista real). Perfil carregado e sem nome configurado = ela fala pela empresa.
+test('perfil carregado sem nome: nada de apresentação pessoal (e nenhum nome chumbado)', () => {
+  const p = resolveSystemPrompt({ system_prompt_override: 'Prompt da unidade', perfil: perfilIA.doBanco({}) });
+  assert.match(p, /^Prompt da unidade\n\nVOCÊ NÃO TEM NOME PRÓPRIO configurado/);
+  assert.match(perfilIA.blocoPerfil({ nao_falar: [], estilo_ia: 'inexistente' }), /NÃO TEM NOME PRÓPRIO/);
+  assert.match(perfilIA.blocoPerfil({ nome_ia: 'Ana' }), /SEU NOME: Ana\./);
 });
 
 test('o texto que veio da empresa não é reescrito pelas trocas de ramo', async () => {
