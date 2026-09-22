@@ -438,3 +438,24 @@ está gravada. O ramo de grupo do webhook já retornava antes do funil; nada dis
 | **A10** | Não existe tela para cadastrar o grupo-fonte: hoje é INSERT à mão em `marketing.grupo_fonte`. Enquanto for assim, `make ingest-status` é o único jeito de saber se a unidade está ligada. |
 | **A11** | O arquivo é escrito no disco **antes** do INSERT. Se o INSERT falhar, sobra arquivo órfão — inofensivo (o nome é o hash, então reescrever é idempotente), mas ninguém o recolhe. Falta uma faxina periódica de arquivos sem linha. |
 | **A12** | A ingestão roda dentro do contexto de unidade aberto com `modulo: 'LEADS'` (o do webhook). Não chama IA, então não há custo atribuído errado hoje — mas quando a curadoria com IA entrar, ela precisa do seu próprio `comUnidade(..., { modulo: 'MARKETING' })`. |
+
+### Correção da dívida A9 (22/09/2026) — medida no lugar certo, o buraco é maior
+A A9 dizia "**zero** conversas com `@lid`". **Está errado, e o erro era de medição:** contava-se
+`conversations.external_id LIKE '%@lid'`, mas `webhook.js:68` faz `jid.split('@')[0]` — o sufixo
+já foi removido ANTES de gravar, então uma conversa nascida de `@lid` fica no banco parecendo
+telefone, só dígitos. Medindo pelo `remoteJid` dentro do raw da mensagem, em Valinhos hoje:
+
+- **39 conversas** com `remoteJid @lid`;
+- **4 existem só sob `@lid`**, sem par com jid normal (`53751599612092`, `5511999210621`,
+  `551128386760`, `5519981252167`) — as três últimas têm 12–13 dígitos e passam por telefone
+  brasileiro sem levantar suspeita;
+- **1 lead já nasceu com telefone falso**: `1165f752-7305-47d2-bd09-61171c9e1788`, phone
+  `+53751599612092`, QUALIFYING, criado em 18/09, visível na lista ativa.
+
+Medição da sessão de WhatsApp (auditoria de QA somente-leitura sobre 719 leads, 22/09).
+**Confirma que a guarda do módulo de origem era necessária:** `_telefoneDoContato()` resolve
+`@lid` pelo mapa `wa_lid` e não grava origem sem telefone confiável — se gravasse a chave a
+partir do `externalId` cru, teria criado origem para um contato que não existe.
+**O combinado não muda:** a normalização da porta de entrada é daquela sessão, com backfill
+(o lead falso + as 4 conversas); ela avisa antes do PR e eu ajusto `vincularLead` no mesmo
+lote, avaliando o backfill das origens órfãs.
