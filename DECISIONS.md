@@ -527,3 +527,17 @@ mas sugere tratar `SERVICE` como **desconhecido**, nunca como automático.
 *Lição, e é a segunda vez no dia:* a migração 128 documentava isso no cabeçalho. Medir a
 coluna sem ler quem a escreve produz um número certo com significado errado — igual ao que
 aconteceu com a contagem de `@lid` na A9.
+
+**Ressalva ao parágrafo acima (mesma data):** `lead_eventos.autor` é melhor, mas **não
+resolve** — o valor `'SERVICE'` aparece lá também, e ali sofre do mesmo defeito: é a
+credencial, não a pessoa (confirmado pela sessão de auditoria, que viu `SERVICE` em Luciana,
+Vanessa e Camila). Somando as duas fontes, **"decidido por humano" só é afirmável quando
+aparece nome próprio** (`Rafaela`). `SERVICE` é desconhecido nos dois lugares, e leads sem
+evento nenhum não respondem nada. Ou seja: hoje o sistema **não tem** como dizer quem decidiu
+na maioria dos casos — e é esse buraco, não uma regra mal calibrada, que o conserto definitivo
+precisa fechar.
+
+*Convergência independente:* a sessão de auditoria chegou ao mesmo erro sobre `SERVICE` na
+auditoria de 18/09 e já o havia retratado com o Leo. Dois caminhos separados tropeçaram na
+mesma coluna — o que é argumento para a ambiguidade ser tratada no esquema, não na cabeça de
+quem consulta.
