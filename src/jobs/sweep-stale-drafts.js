@@ -22,6 +22,7 @@
 
 const { withTenant } = require('../db');
 const { naoEhReacaoSql } = require('../reacao');   // reação/aviso de sistema não é turno do cliente (régua única)
+const { estadoValeSql } = require('../bola');      // "o veredito da IA ainda vale?" — régua única
 
 const TENANT = process.env.VALIDA_TENANT || 'ed731a58-62e5-45ad-acba-a5502ff39e92';
 const APPLY = process.env.APPLY === '1';
@@ -39,8 +40,13 @@ const STALE_CTE = `
     SELECT pa.id AS approval_id, l.id AS lead_id, l.name, l.status, l.desfecho,
            l.conversation_state AS st,
            (l.status IN ('CONVERTED','NOT_LEAD','EXPERIMENTAL_AGENDADA') OR l.desfecho IS NOT NULL) AS inativo,
+           -- FRESCOR do veredito: régua única (src/bola.js). Esta era a QUARTA cópia da pergunta
+           -- "o estado ainda vale?" — e a única que comparava o carimbo com a ENTRADA do cliente
+           -- em vez da SAÍDA nossa. As duas comparações estão certas; são perguntas diferentes, e
+           -- é por isso que o frescor foi exposto separado em vez de forçar esta faxina a usar o
+           -- veredito completo. Mesmo resultado de antes, agora vindo do mesmo lugar.
            (l.conversation_state IN ('RESOLVIDO','AGUARDANDO_CLIENTE')
-              AND (li.last_in IS NULL OR (l.state_computed_at IS NOT NULL AND l.state_computed_at >= li.last_in))) AS estado_stale
+              AND ${estadoValeSql({ lastInTurno: 'li.last_in' })}) AS estado_stale
       FROM lead_manager.pending_approvals pa
       JOIN lead_manager.leads l ON l.id=pa.lead_id
       LEFT JOIN last_in li ON li.ident=regexp_replace(coalesce(l.phone,l.meta_psid,''),'[^0-9]','','g')

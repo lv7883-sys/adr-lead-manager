@@ -15,6 +15,8 @@ const stages = require('./stages');
 // arquivo eram a 4ª cópia que nunca recebeu a régua: um 👍 do cliente contava como contato dele e
 // reabria conversa já respondida como "responder agora" (achado 22/09/2026, lead que esperava 5d17h).
 const { naoEhReacaoSql } = require('./reacao');
+// DE QUEM E A BOLA: regua unica (22/09/2026). Aqui viviam DUAS das quatro copias.
+const { deQuemEhABola, devemosResposta, NOSSA: BOLA_NOSSA, CLIENTE: BOLA_CLIENTE } = require('./bola');
 const { stageKey, funilBucketSql, temFatoExtranetSql } = stages;
 
 const PERIODS = { '1d': 1, '7d': 7, '30d': 30, '90d': 90 };
@@ -368,18 +370,15 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
       // Fatia A: "ativo" canônico (¬TERMINAL) + a especialização do ADR-021 (EXPERIMENTAL_AGENDADA
       // é estado "parado", fora dos buckets de espera/silêncio). ¬TERMINAL = régua única (helper).
       const ativo021 = !isTerminal(l) && l.status !== 'EXPERIMENTAL_AGENDADA';
-      // D1 — "esperando nossa resposta" = a bola está conosco. AGUARDANDO_RECEPCAO só vale se
-      // NÃO houve saída NOSSA posterior ao estado (senão a bola já virou — "estado vencido";
-      // leitura só, não reescreve conversation_state). state_computed_at NULL cai no fallback
-      // por timestamps. Empate (lout == stateAt) resolve como aguardando (viés conservador).
-      const estado = l.conversation_state || null;
-      const stateAt = l.state_computed_at ? new Date(l.state_computed_at).getTime() : null;
-      const saidaPosteriorAoEstado = lout != null && stateAt != null && lout > stateAt;
-      const esperandoNos = ativo021 && (
-        (estado === 'AGUARDANDO_RECEPCAO' && stateAt != null && !saidaPosteriorAoEstado) ||
-        ((estado == null || (estado === 'AGUARDANDO_RECEPCAO' && stateAt == null))
-          && lin != null && (lout == null || lin > lout))
-      );
+      // D1 — "esperando nossa resposta" = a bola está conosco. A régua é ÚNICA e mora em
+      // src/bola.js. Aqui vivia uma das QUATRO cópias — e ela nem era igual às outras: não olhava
+      // se o cliente tinha falado depois do veredito da IA. Medido em produção (Valinhos,
+      // 22/09/2026) ANTES de trocar: nos 239 leads ativos as duas formas dão o mesmo resultado —
+      // 2 devendo resposta, ninguém entra, ninguém sai. Isto é refatoração, não mudança de número.
+      const esperandoNos = ativo021 && devemosResposta({
+        conversation_state: l.conversation_state, state_computed_at: l.state_computed_at,
+        last_in_turno: l.last_in_turno, last_out: l.last_out, created_at: l.created_at,
+      });
       // SLA D1: quem espera nós e AINDA não teve 1ª resposta válida entra no denominador
       // como "fora da meta". Split por horário comercial (chegada da 1ª msg) p/ comparabilidade.
       if (esperandoNos && !respondido) {
@@ -980,18 +979,13 @@ async function computePainel(tenantId) {
       // delta NEGATIVO — EXCLUI (nunca exibir negativo). received_at real, nunca updated_at.
       if (fout != null && fin != null && fout >= fin && fout >= spTodayMs) tempoHoje.push((fout - fin) / 1000);
 
-      // ADR-021 — hierarquia por recência do último contato.
-      const ultLead = lin != null && (lout == null || lin > lout);   // último contato foi DO lead
-      // ESTADO DA CONVERSA pela IA (substitui a heurística de closer). Só vale se foi
-      // computado DEPOIS do último inbound (senão está stale → cai no fallback). Segurança:
-      // INDEFINIDO/ausente NUNCA esconde — fica visível em bucket calmo.
-      const stateAt = l.state_computed_at ? new Date(l.state_computed_at).getTime() : null;
-      // "estado vencido": saída NOSSA depois do estado → a bola já virou (não travar em
-      // AGUARDANDO_RECEPCAO). Mesma regra dos outros dois pontos de leitura (awaiting_reply,
-      // esperandoNos). Leitura só: NÃO reescreve conversation_state. Empate → aguardando.
-      const saidaPosteriorAoEstado = lout != null && stateAt != null && lout > stateAt;
-      const stateFresh = l.conversation_state && (lin == null || (stateAt != null && stateAt >= lin))
-        && !(l.conversation_state === 'AGUARDANDO_RECEPCAO' && saidaPosteriorAoEstado);
+      // DE QUEM É A BOLA — régua ÚNICA (src/bola.js). Aqui ficava a forma mais completa das quatro
+      // cópias que existiam; ela virou a régua, e as outras três passaram a chamá-la. `via` diz se
+      // quem decidiu foi o veredito da IA ou os fatos, e é o que deixa a divergência auditável.
+      const posse = deQuemEhABola({
+        conversation_state: l.conversation_state, state_computed_at: l.state_computed_at,
+        last_in_turno: l.last_in_turno, last_out: l.last_out, created_at: l.created_at,
+      });
       let tipo, detalheSeg;
       if (aula) {
         // A aula vencida/feita GOVERNA o bucket: a pergunta "com quem está a bola" não se aplica a
@@ -999,37 +993,24 @@ async function computePainel(tenantId) {
         // follow-up; misturar contaminaria o SLA de primeira resposta.
         tipo = aula.tipo;
         detalheSeg = (agora - aula.desde) / 1000;
-      } else if (stateFresh) {
-        if (l.conversation_state === 'AGUARDANDO_RECEPCAO') {
-          // a bola está com a escola → urgência (responder agora / sem resposta).
-          detalheSeg = (agora - (lin != null ? lin : (lout != null ? lout : new Date(l.created_at).getTime()))) / 1000;
-          tipo = fout == null ? 'sem_resposta' : 'responder_agora';
-          aguardando++;
-        } else if (l.conversation_state === 'AGUARDANDO_CLIENTE') {
-          // a bola está com o cliente → monitorar / retomada se sumiu há muito.
-          const base = lout != null ? lout : (lin != null ? lin : new Date(l.created_at).getTime());
-          detalheSeg = (agora - base) / 1000;
-          tipo = (agora - base) > TRES_DIAS ? 'retomada' : 'monitorar';
-        } else {
-          // RESOLVIDO ou INDEFINIDO → calmo e VISÍVEL (monitorar), sem urgência.
-          const base = lin != null ? lin : (lout != null ? lout : new Date(l.created_at).getTime());
-          detalheSeg = (agora - base) / 1000;
-          tipo = 'monitorar';
-        }
-      } else if (ultLead) {                                          // FALLBACK heurístico (estado ausente/stale)
-        detalheSeg = (agora - lin) / 1000;
-        if (fout != null && _ehCloser(l.last_in_body)) {
-          tipo = 'monitorar';
-        } else {
-          tipo = fout == null ? 'sem_resposta' : 'responder_agora';
-          aguardando++;
-        }
-      } else if (lout != null) {                                     // último contato foi DA escola
-        detalheSeg = (agora - lout) / 1000;
-        tipo = (agora - lout) > TRES_DIAS ? 'retomada' : 'monitorar';
       } else {
-        tipo = 'monitorar';
-        detalheSeg = (agora - new Date(l.created_at).getTime()) / 1000;
+        detalheSeg = (agora - posse.desde) / 1000;
+        if (posse.bola === BOLA_NOSSA) {
+          // CLOSER: "ok", "obrigado", "👍" fecham o assunto — a recepção não deve resposta a isso.
+          // A heurística só vale quando quem decidiu foram os FATOS: se a IA leu a conversa e disse
+          // que a bola é nossa, o veredito dela vale mais que a lista de palavras.
+          if (posse.via === 'fatos' && fout != null && _ehCloser(l.last_in_body)) {
+            tipo = 'monitorar';
+          } else {
+            tipo = fout == null ? 'sem_resposta' : 'responder_agora';
+            aguardando++;
+          }
+        } else if (posse.bola === BOLA_CLIENTE) {
+          tipo = detalheSeg * 1000 > TRES_DIAS ? 'retomada' : 'monitorar';
+        } else {
+          // RESOLVIDO ou INDEFINIDA → calmo e VISÍVEL. Nunca esconde: some da urgência, não da tela.
+          tipo = 'monitorar';
+        }
       }
       // P5 — engajamento do cliente + bump: 🔴 silenciou sobe pro bucket retomada.
       const eng = classificarEngajamento(l.ts_in, l.ts_out, agora / 1000);
@@ -1121,6 +1102,9 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
             WHERE tenant_id = $1 AND status = 'PENDING' GROUP BY 1
          )
          SELECT l.id, l.name, l.phone, l.status, l.intent, l.desfecho, l.desfecho_em, l.created_at, l.temperatura_manual,
+                -- o veredito da IA passa a chegar aqui: o badge de urgência do kanban decidia só
+                -- por timestamp e contradizia a Fila de Ação sobre o mesmo lead (ver src/bola.js).
+                l.conversation_state, l.state_computed_at,
                 l.suggested_stage, l.stage_reasoning,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
                 i.last_in, i.last_in_turno, o.first_out, o.last_out, c.channel, COALESCE(d.n, 0) AS drafts
@@ -1145,11 +1129,20 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
       const lin = l.last_in_turno ? new Date(l.last_in_turno).getTime() : null;   // decide: só turno de verdade
       const lout = l.last_out ? new Date(l.last_out).getTime() : null;
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
-      // urgência: último contato foi DO lead e estamos devendo resposta. Em
-      // EXPERIMENTAL_AGENDADA não há resposta devida (aula marcada) — sem badge.
-      const ultLead = l.status !== 'EXPERIMENTAL_AGENDADA' && lin != null && (lout == null || lin > lout);
+      // URGÊNCIA — aqui vivia a QUINTA cópia da régua de "de quem é a bola", e a mais surda: decidia
+      // só por timestamp (`lin > lout`) e ignorava o veredito da IA por completo. Efeito prático: um
+      // lead que a IA leu e classificou como AGUARDANDO_CLIENTE acendia badge vermelho no kanban
+      // enquanto a Fila de Ação, olhando o MESMO lead, dizia "monitorar" — o card e a fila se
+      // contradiziam. EXPERIMENTAL_AGENDADA segue sem badge: aula marcada é compromisso, não dívida.
+      const posse = deQuemEhABola({
+        conversation_state: l.conversation_state, state_computed_at: l.state_computed_at,
+        last_in_turno: l.last_in_turno, last_out: l.last_out, created_at: l.created_at,
+      });
       let bucket = null, esperandoSeg = null;
-      if (ultLead) { bucket = fout == null ? 'sem_resposta' : 'responder_agora'; esperandoSeg = Math.max(0, Math.round((agora - lin) / 1000)); }
+      if (l.status !== 'EXPERIMENTAL_AGENDADA' && posse.bola === BOLA_NOSSA) {
+        bucket = fout == null ? 'sem_resposta' : 'responder_agora';
+        esperandoSeg = Math.max(0, Math.round((agora - posse.desde) / 1000));
+      }
       const ultimaMsgMs = Math.max(lin || 0, lout || 0) || null;
       const coluna = kanbanColuna(l.status, l.desfecho);
       // 079: a régua canônica tem estágios que NÃO são coluna ('realizada', 'cliente'). O WHERE já

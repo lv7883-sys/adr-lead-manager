@@ -30,6 +30,8 @@ const { generateDraftForLead, classificarSaida, _isTransientAIError, loadRealHis
 const contractConvert = require('../cadastro/contractConvert');   // 079: fila "confirmar matrícula" (contrato→lead)
 const { fetchTimeline } = require('../timeline');   // ADR-042: timeline compartilhada (fonte única) — /leads/:id e inbox
 const { naoEhReacaoSql } = require('../reacao');    // reação não é turno do cliente (fonte única do marcador)
+// DE QUEM E A BOLA: regua unica (src/bola.js) -- aqui vivia uma das quatro copias.
+const { devemosRespostaSql, bolaSql } = require('../bola');
 const { registrarSaida: _registrarSaida, msgCitada: _msgCitada, resolverKeyMensagem: _resolverKeyMensagem } = require('../outbound');   // ADR-042: outbound compartilhado (fonte única)
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
@@ -470,6 +472,19 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
                  -- de lá quando a coluna estiver vazia. Aditivo e restrito a CANDIDATO.
                  COALESCE(l.intent, CASE WHEN l.classification_signals->>0 = 'CANDIDATO' THEN 'CANDIDATO' END) AS intent,
                  l.conversation_state, l.state_reasoning,
+                 -- BOLA DERIVADA (22/09/2026): a tela de Descartados mostrava "ainda espera nossa
+                 -- resposta" lendo o conversation_state CRU. Medido no mesmo dia: o campo estava
+                 -- errado em 27 dos 28 leads ativos que ele marcava — ninguém o fecha quando a
+                 -- recepção responde pelo celular. Aqui vai a resposta JÁ descontada (src/bola.js),
+                 -- para a tela não precisar saber disso. O campo cru continua no payload porque o
+                 -- Monitor da bola existe justamente para auditar o que a IA gravou.
+                 ${bolaSql({
+    lastInTurno: `(SELECT max(m.received_at) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
+                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT}
+                      AND m.role = 'USER' AND ${naoEhReacaoSql('m')})`,
+    lastOut: `(SELECT max(s.received_at) FROM staff_outbound_samples s
+                WHERE s.tenant_id = $1 AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = ${_IDENT})`,
+  })} AS bola,
                  CASE WHEN l.review_result = 'confirmed_not_lead' THEN 'recepcao' ELSE 'ia' END AS origem_descarte,
                  coalesce(l.review_em, l.created_at) AS descartado_em,   -- ordenação 'mais_recente'
                  (SELECT min(m.received_at) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
@@ -745,7 +760,21 @@ router.get(
              outb AS (
                SELECT regexp_replace(s.external_id, '[^0-9]', '', 'g') AS ident,
                       max(s.received_at) AS last_out,
-                      bool_or(s.received_at >= ${SP_HOJE}) AS responded_today,
+                      -- "RESPONDIDO HOJE" = resposta de verdade, não qualquer saída. Antes era
+                      -- bool_or(received_at >= hoje), que contava disparo proativo (NPS, campanha,
+                      -- Rock Hour) como "respondemos o lead". O painel do LM já contava certo
+                      -- (hoje.leads_respondidos exige inbound ANTES da saida), então o tile da
+                      -- tela de Leads mostrava um número ou outro conforme qual dado chegasse —
+                      -- dois números sob o mesmo rótulo. Agora os dois fazem a MESMA pergunta, e o
+                      -- filtro ?filtro=respondidos_hoje abre exatamente a lista que o número conta.
+                      -- (escopo do tenant vem do RLS; nesta consulta $1 é dormancy_days)
+                      bool_or(s.received_at >= ${SP_HOJE} AND EXISTS (
+                        SELECT 1 FROM messages m2 JOIN conversations cv2 ON cv2.id = m2.conversation_id
+                         WHERE m2.role = 'USER' AND ${naoEhReacaoSql('m2')}
+                           AND regexp_replace(cv2.external_id, '[^0-9]', '', 'g')
+                               = regexp_replace(s.external_id, '[^0-9]', '', 'g')
+                           AND m2.received_at < s.received_at
+                      )) AS responded_today,
                       array_agg(EXTRACT(EPOCH FROM s.received_at) ORDER BY s.received_at) AS ts_out
                  FROM staff_outbound_samples s
                 GROUP BY 1
@@ -794,16 +823,19 @@ router.get(
                              WHERE pa.lead_id = l.id AND pa.status = 'APPROVED' AND pa.decided_at >= ${SP_HOJE}) AS approved_today,
                     EXISTS (SELECT 1 FROM pending_approvals pa
                              WHERE pa.lead_id = l.id AND pa.status = 'EDITED' AND pa.decided_at >= ${SP_HOJE}) AS edited_today,
-                    -- D1 — "aguardando resposta" = a bola está conosco (mesma régua de antes, agora
-                    -- sobre os agregados). AGUARDANDO_RECEPCAO só vale se NÃO houve saída nossa
-                    -- posterior ao estado; fallback por timestamps quando o estado é nulo/vencido.
-                    (l.status <> 'EXPERIMENTAL_AGENDADA' AND l.status <> 'CONVERTED' AND l.desfecho IS NULL AND (
-                      (l.conversation_state = 'AGUARDANDO_RECEPCAO' AND l.state_computed_at IS NOT NULL
-                        AND NOT COALESCE(ob.last_out > l.state_computed_at, false))
-                      OR ((l.conversation_state IS NULL
-                           OR (l.conversation_state = 'AGUARDANDO_RECEPCAO' AND l.state_computed_at IS NULL)) AND
-                          mg.last_in_turno > COALESCE(ob.last_out, 'epoch'::timestamptz))
-                    )) AS awaiting_reply,
+                    -- D1 — "aguardando resposta" = a bola está conosco. A régua é ÚNICA e mora em
+                    -- src/bola.js; aqui vivia uma das QUATRO cópias. O comentário antigo dizia
+                    -- "mesma régua de antes" e não era: faltava descontar o cliente ter falado
+                    -- depois do veredito da IA. Medido ANTES de trocar (Valinhos, 22/09/2026):
+                    -- mesmo resultado nos 239 leads ativos — refatoração, não mudança de número.
+                    -- O veredito COMPLETO ('nossa'|'cliente'|'resolvido'|'indefinida') viaja junto:
+                    -- awaiting_reply responde so "devemos resposta?", e as telas precisavam do
+                    -- resto para dizer "aguardando cliente" — o que estavam fazendo lendo o campo
+                    -- CRU. Um payload, uma régua.
+                    ${bolaSql({ lastInTurno: 'mg.last_in_turno', lastOut: 'ob.last_out' })} AS bola,
+                    (l.status <> 'EXPERIMENTAL_AGENDADA' AND l.status <> 'CONVERTED' AND l.desfecho IS NULL
+                     AND ${devemosRespostaSql({ lastInTurno: 'mg.last_in_turno', lastOut: 'ob.last_out' })}
+                    ) AS awaiting_reply,
                     -- FATO DA EXTRANET (2026-09-02). O que a Extranet sabe sobre o lead precisa
                     -- chegar às telas: sem isso, o Regente classifica por conta própria e discorda
                     -- da realidade. Foi a reclamação das recepcionistas sobre a Reativação — leads
