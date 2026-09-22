@@ -505,3 +505,25 @@ para colidir.
 vez do `externalId` cru. É arquivo meu e régua minha — **não encosta em `br_phone_key` nem em
 `telefoneBR.js`**, respeitando o combinado. Ficou fora agora para não virar mais uma correção
 pontual antes do raio-X de causas que a sessão de WhatsApp está levando ao Leo.
+
+### Correção — `review_by='SERVICE'` NÃO quer dizer "sem humano" (22/09/2026)
+Afirmei, medindo `leads.review_by` em produção (214 `SERVICE`, 102 nulo, **0** pessoa), que
+"nenhum humano jamais confirmou um NOT_LEAD nesta base", e daí que o sync cede a um veredito
+que ninguém deu. **A leitura estava errada.** O cabeçalho da migração 128 já dizia o que eu
+não fui ler: `SERVICE` é a **credencial do DASHBOARD** — "pode ter sido alguém da recepção
+clicando" (caso Camila Santana, 17/09 17:29). Apontado pela sessão da Extranet.
+
+A medição continua válida; a conclusão, não. **O que fica é melhor:** o sinal de autoria é
+ambíguo POR CONSTRUÇÃO. O latch do sync (`sync-extranet-leads.js:138`) decide "isto foi gente?"
+testando `review_by <> 'SERVICE'` — numa coluna que mistura serviço automático e recepção
+clicando. Qualquer regra nova por cima dela herda a ambiguidade, e é por isso que já houve
+quatro rodadas de correção pontual.
+
+**Sinal melhor:** `lead_eventos.autor`, que traz nome de pessoa. Medido nos leads em NOT_LEAD:
+`ia_auto` 30, `extranet_auto` 12, `migracao-127` 7, `SERVICE` 6, **`Rafaela` 3**,
+`migracao-128` 1. Cobertura parcial (59 leads com evento, de 316), então não decide sozinho —
+mas sugere tratar `SERVICE` como **desconhecido**, nunca como automático.
+
+*Lição, e é a segunda vez no dia:* a migração 128 documentava isso no cabeçalho. Medir a
+coluna sem ler quem a escreve produz um número certo com significado errado — igual ao que
+aconteceu com a contagem de `@lid` na A9.
