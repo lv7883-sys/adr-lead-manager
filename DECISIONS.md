@@ -485,7 +485,7 @@ assistente, aquela tag deixou de ser "o estado imediatamente anterior ao meu có
 nela desfaria trabalho de outra frente junto. **O caminho limpo para reverter só a ingestão é
 `git revert` do merge + rebuild**, não a imagem antiga. (Apontado pela sessão de WhatsApp.)
 
-### A13 — `vincularLead` usa o `external_id` cru (encontrado em 22/09/2026)
+### A13 — `vincularLead` usava o `external_id` cru — **FECHADA em 22/09/2026** (`43325ee`)
 `src/routes/webhook.js:746` chama `origemLead.vincularLead(tenant.id, msg.externalId, log)`, e
 `msg.externalId` é o `jid.split('@')[0]` da linha 68 — **sem a régua de jid**. Dentro,
 `src/origemLead.js:253` faz `br_phone_key($3)` em cima disso.
@@ -556,3 +556,19 @@ decisão do Leo. Forma combinada entre as três frentes:
 Os **12 leads com `extranet_auto`** hoje em NOT_LEAD são, pela leitura da sessão da Extranet,
 leads que o sync avançou e o roteador rebaixou **antes** do fix de 18/09 — reforçam o caso.
 **Ninguém toca o arquivo sem combinar antes.**
+
+### A13 fechada (22/09/2026) — `43325ee`
+`vincularLead` passou a receber `(msg, rawBody)` e a derivar o telefone pelo **mesmo**
+`_telefoneDoContato()` da gravação. **Nada de `br_phone_key`, `telefoneBR.js` ou das migrações
+085/094/112/113 foi alterado** — e a linha 68 do webhook continua intocada, como combinado:
+só o meu chamador passou a respeitar a régua que já existia.
+
+Três testes novos na suíte da origem: (24) `@lid` sem mapa não gruda a origem de um contato
+real no lead fantasma — o cenário é o `+53751599612092` medido em produção; (25) o sufixo
+`:12` vincula o **mesmo** contato em vez de inventar outro; (26) grupo nunca vincula.
+Suíte na VPS: 68 puros + **26** origem + 13 isolamento + 6 ingestão = **113, zero falhas**.
+
+*Por que não esperou o raio-X:* o conserto é de um chamador só, dentro do meu arquivo, e
+**não antecipa** a normalização da porta de entrada — quando a linha 68 passar a normalizar, o
+caminho aqui não muda, porque ele deriva do `rawBody` e não do `externalId`. Fechar agora tira
+uma dependência do caminho daquela frente em vez de criar uma.
