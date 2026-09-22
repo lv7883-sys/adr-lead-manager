@@ -1803,7 +1803,11 @@ async function marcarComoLead(tenantId, conversationId, sender) {
 router.post('/:tenantId/inbox/conversations/:conversationId/marcar-lead', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
   try {
-    const out = await marcarComoLead(req.tenantId, req.params.conversationId, req.tenantRole);
+    // Autoria real (decisão Leo 22/09/2026): `by_name` do dashboard vira o review_by;
+    // sem o campo, cai no papel do token — mesma regra do _autorHumano de tenant.js.
+    const autor = (typeof req.body?.by_name === 'string' && req.body.by_name.trim())
+      ? req.body.by_name.trim().slice(0, 80) : req.tenantRole;
+    const out = await marcarComoLead(req.tenantId, req.params.conversationId, autor);
     if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
     if (out.noPhone) return res.status(422).json({ error: 'sem_telefone' });
     res.json(out);
@@ -1847,7 +1851,11 @@ async function marcarComoNaoLead(tenantId, conversationId, sender) {
 router.post('/:tenantId/inbox/conversations/:conversationId/desmarcar-lead', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
   try {
-    const out = await marcarComoNaoLead(req.tenantId, req.params.conversationId, req.tenantRole);
+    // Autoria real — inverso do marcar-lead acima; "não é lead" da conversa também
+    // grava o nome de quem clicou (review_by).
+    const autor = (typeof req.body?.by_name === 'string' && req.body.by_name.trim())
+      ? req.body.by_name.trim().slice(0, 80) : req.tenantRole;
+    const out = await marcarComoNaoLead(req.tenantId, req.params.conversationId, autor);
     if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
     if (out.noPhone) return res.status(422).json({ error: 'sem_telefone' });
     res.json(out);

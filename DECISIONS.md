@@ -608,3 +608,20 @@ enquanto o dado não existir.
 *Terceiro caso no mesmo dia de número certo com significado errado* — depois da contagem de
 `@lid` e da leitura de `review_by`. Os três vieram de medir sem checar a granularidade ou a
 origem da coluna.
+
+### Item 3 executado — `by_name` na família confirma/descarta (22/09/2026, frente do Scheduler)
+O "conserto estrutural" da convergência acima: o dashboard agora manda `by_name` (nome do
+usuário logado) em TODAS as escritas com autoria, e este repo passou a lê-lo nas rotas de
+confirmar/descartar — `/leads/:id/review`, `/requalificar`, `/unclassified/:id/{promote,
+ignore,marcar-interno}` (tenant.js, helper `_autorHumano`) e `marcar-lead`/`desmarcar-lead`
+(inbox.js). `review_by` e `classification_feedback.feedback_by` recebem o nome; sem o campo,
+fallback no `req.tenantRole` idêntico ao de hoje (aditivo; nenhum chamador quebra).
+
+Semântica combinada com a frente de WhatsApp (que confirmou a fronteira): **pessoa = nome
+próprio; serviço sem identidade = 'SERVICE'; automação = 'ia_auto'/'extranet_auto'/NULL** —
+e o dashboard garante que clique de humano logado sem nome cadastrado vira
+`humano sem nome (<papel>)`, nunca 'SERVICE'. O estoque velho continua ambíguo (por isso a
+pendência humana do item 2 fica como está); daqui pra frente a coluna responde "quem decidiu".
+NÃO tocado: `sync-extranet-leads.js`, latch do `contractConvert`, e a autoria de mudanças de
+STATUS (`mover-kanban`/`lead_eventos.autor`) — Passo 4 da frente de WhatsApp; o campo já chega
+do dashboard quando ela for ligar.
