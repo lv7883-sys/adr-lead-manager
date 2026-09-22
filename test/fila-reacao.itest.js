@@ -126,7 +126,8 @@ test('(1) reação depois da nossa resposta NÃO devolve o lead para "responder 
   assert.ok(l, 'o lead continua na tela (não some)');
   assert.notEqual(l.tipo, 'responder_agora', 'a bola é do cliente: 🙏 não é pedido de resposta');
   assert.notEqual(l.tipo, 'sem_resposta');
-  assert.equal(l.tipo, 'monitorar', 'o veredito da IA (AGUARDANDO_CLIENTE) deixou de ser invalidado pela reação');
+  // bola com o cliente: 'monitorar' se recente, 'retomada' se sumiu há mais de 3 dias (é o caso do print)
+  assert.ok(['monitorar', 'retomada'].includes(l.tipo), 'o veredito da IA (AGUARDANDO_CLIENTE) deixou de ser invalidado pela reação; veio ' + l.tipo);
 });
 
 test('(2) aviso de sistema do WhatsApp também não conta como turno do cliente', async () => {
@@ -159,7 +160,7 @@ test('(5) kanban: o badge de urgência segue a mesma régua da fila', async () =
 
 test('(6) painel/SLA: reação não entra como "aguardando nós" nem como 1ª mensagem do lead', async () => {
   const m = await computeMetrics(T, { period: '90d' });
-  const aguardando = ((m.atencao && m.atencao.aguardando_lista) || m.aguardando_lista || []).map((x) => x.id);
+  const aguardando = (((m.bloco1_sla || {}).aguardando_lista) || []).map((x) => x.id);
   assert.ok(!aguardando.includes(idReacao), 'lead do caso não aparece como "devemos resposta"');
   assert.ok(aguardando.includes(idEsperando), 'quem escreveu mesmo continua aparecendo');
 });
