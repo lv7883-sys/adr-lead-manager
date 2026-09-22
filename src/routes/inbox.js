@@ -20,6 +20,7 @@
 const { SQL_PERFIL } = require('../perfilAssistente');   // perfil da assistente junto da config (migr. 119)
 const stages = require('../stages');   // etapa do funil (mesma régua do kanban) na lista e na conversa
 const { sanitizarIdentidade } = require('../temaProibido');   // sugestão nunca chega com nome de recepcionista
+const { autorHumano } = require('../autoria');   // by_name do dashboard → review_by (autoria real)
 const express = require('express');
 const { withTenant } = require('../db');
 const { authenticate } = require('../auth');
@@ -1804,10 +1805,8 @@ router.post('/:tenantId/inbox/conversations/:conversationId/marcar-lead', authen
   if (!isUuid(req.params.conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
   try {
     // Autoria real (decisão Leo 22/09/2026): `by_name` do dashboard vira o review_by;
-    // sem o campo, cai no papel do token — mesma regra do _autorHumano de tenant.js.
-    const autor = (typeof req.body?.by_name === 'string' && req.body.by_name.trim())
-      ? req.body.by_name.trim().slice(0, 80) : req.tenantRole;
-    const out = await marcarComoLead(req.tenantId, req.params.conversationId, autor);
+    // semântica e sanitização em src/autoria.js.
+    const out = await marcarComoLead(req.tenantId, req.params.conversationId, autorHumano(req));
     if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
     if (out.noPhone) return res.status(422).json({ error: 'sem_telefone' });
     res.json(out);
@@ -1853,9 +1852,7 @@ router.post('/:tenantId/inbox/conversations/:conversationId/desmarcar-lead', aut
   try {
     // Autoria real — inverso do marcar-lead acima; "não é lead" da conversa também
     // grava o nome de quem clicou (review_by).
-    const autor = (typeof req.body?.by_name === 'string' && req.body.by_name.trim())
-      ? req.body.by_name.trim().slice(0, 80) : req.tenantRole;
-    const out = await marcarComoNaoLead(req.tenantId, req.params.conversationId, autor);
+    const out = await marcarComoNaoLead(req.tenantId, req.params.conversationId, autorHumano(req));
     if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
     if (out.noPhone) return res.status(422).json({ error: 'sem_telefone' });
     res.json(out);

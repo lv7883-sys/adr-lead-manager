@@ -625,3 +625,14 @@ pendência humana do item 2 fica como está); daqui pra frente a coluna responde
 NÃO tocado: `sync-extranet-leads.js`, latch do `contractConvert`, e a autoria de mudanças de
 STATUS (`mover-kanban`/`lead_eventos.autor`) — Passo 4 da frente de WhatsApp; o campo já chega
 do dashboard quando ela for ligar.
+
+**Adendos da revisão da frente da Extranet (mesma data, incorporados antes do merge):**
+1. **Isto ATIVA uma guarda hoje dormente — é mudança de comportamento, não só de dado.**
+   `contractConvert._humanLatched` (`review_by <> 'SERVICE'`) nunca disparou porque a base
+   tem zero nomes; com `by_name`, cada clique novo de recepcionista em "não é lead" vira
+   latch forte e o contractConvert deixa de considerar aquele lead para cliente/convertido.
+   Semântica desejada (humano > tudo), mas deliberada — está aqui para não parecer regressão.
+2. **Sanitização** (`src/autoria.js`, teste puro em `test/autoria.test.js`): trim, teto de
+   80, e valores RESERVADOS ('SERVICE', 'ia_auto', 'extranet_auto', 'migracao-*', caso-
+   insensível, match do valor inteiro) caem no papel do token — um payload malformado do
+   dashboard não fabrica "humano" nem "máquina" falsos.

@@ -502,16 +502,9 @@ router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROL
   }
 });
 
-// Autoria real nas ações de confirmar/descartar (decisão Leo 22/09/2026, item 3 — conserto
-// estrutural da frente do Scheduler): o dashboard manda `by_name` (nome do usuário logado)
-// no corpo — mesma convenção do /desfecho e /automacao. Sem o campo, cai no papel do token
-// ('SERVICE'), que segue significando "chamador de serviço sem identidade" — NUNCA "a máquina
-// decidiu": automação interna não passa por estas rotas (grava 'ia_auto'/'extranet_auto'/NULL
-// direto). Assim review_by distingue pessoa (nome próprio) × serviço × automação.
-function _autorHumano(req) {
-  const v = typeof req.body?.by_name === 'string' ? req.body.by_name.trim() : '';
-  return (v ? v.slice(0, 80) : null) || req.tenantRole;
-}
+// Autoria real nas ações de confirmar/descartar — semântica e sanitização (valores
+// reservados nunca viram "humano") em src/autoria.js.
+const { autorHumano: _autorHumano } = require('../autoria.js');
 
 // Helpers de resolução de item não classificado (lead | message).
 async function _msgInfo(c, msgId) {
