@@ -21,6 +21,7 @@
 // ============================================================================
 
 const { withTenant } = require('../db');
+const { naoEhReacaoSql } = require('../reacao');   // reação/aviso de sistema não é turno do cliente (régua única)
 
 const TENANT = process.env.VALIDA_TENANT || 'ed731a58-62e5-45ad-acba-a5502ff39e92';
 const APPLY = process.env.APPLY === '1';
@@ -29,9 +30,11 @@ const SNAP = `bkp_stale_drafts_${new Date().toISOString().slice(0, 10).replace(/
 // Predicado do que é STALE (a ∪ b). Compartilhado entre dry-run e apply.
 const STALE_CTE = `
   WITH last_in AS (
+    -- só TURNO de verdade: com a reação aqui dentro, um 👍 fazia o estado parecer vencido e o
+    -- rascunho morto NÃO era arquivado (mesmo defeito corrigido no metrics.js em 22/09/2026).
     SELECT regexp_replace(cv.external_id,'[^0-9]','','g') AS ident, max(m.received_at) AS last_in
       FROM lead_manager.messages m JOIN lead_manager.conversations cv ON cv.id=m.conversation_id
-     WHERE cv.tenant_id=$1 AND m.role='USER' GROUP BY 1),
+     WHERE cv.tenant_id=$1 AND m.role='USER' AND ${naoEhReacaoSql('m')} GROUP BY 1),
   stale AS (
     SELECT pa.id AS approval_id, l.id AS lead_id, l.name, l.status, l.desfecho,
            l.conversation_state AS st,
