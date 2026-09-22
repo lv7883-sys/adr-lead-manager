@@ -293,15 +293,31 @@ async function syncExtranetLeads(c, { tenantId, snapshot, mode }) {
   // só o que a Extranet devolveu NESTA rodada, e o que ela devolve varia. Dois ciclos seguidos
   // deram 7 e 6 sem NADA ter mudado no banco: a Vanessa Faria não voltou nas páginas do segundo.
   // Quem olha o número duas vezes desconfia do sistema, com razão. Este é o número que o card do
-  // Plantão mostra e que um humano quer ver; e a divergência lote×estoque vira DIAGNÓSTICO
-  // (estoque > lote = fetch incompleto naquele ciclo). Mesma régua do card: temFatoExtranetSql —
-  // não reescrever o predicado. Degrada elegante (null) onde aula_experimental não existe.
+  // Plantão mostra e que um humano quer ver. Mesma régua do card: temFatoExtranetSql — não
+  // reescrever o predicado. Degrada elegante (null) onde aula_experimental não existe.
+  //
+  // FORA DA JANELA separa ENVELHECIMENTO de FETCH INCOMPLETO. Sem essa distinção o detector viraria
+  // alarme que não desliga: a Vanessa (cadastro 22/06, janela começa 24/06 — fora por DOIS DIAS)
+  // acusaria "fetch incompleto" em todo ciclo, para sempre. Ela não é falha de busca; é lead que o
+  // fetch de leads não alcança mais. A conta que vale:
+  //     estoque − fora_da_janela ≈ lote      → tudo explicado
+  //     estoque − fora_da_janela  >  lote    → aí sim, fetch incompleto naquele ciclo
+  // "Fora do alcance" = nenhuma linha de espelho dentro da janela (inclui quem só tem fato de
+  // agenda, migr 129, que nunca vem por este fetch). Sem windowStart (itest sintético, snapshot
+  // completo) nada está fora do alcance.
   try {
-    stats.pendencia_estoque = (await c.query(
-      `SELECT count(*)::int n FROM lead_manager.leads l
+    const q = (await c.query(
+      `SELECT count(*)::int total,
+              count(*) FILTER (
+                WHERE $2::date IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM lead_manager.extranet_lead e
+                   WHERE e.lead_id = l.id AND e.data_cadastro >= $2::date))::int fora
+         FROM lead_manager.leads l
         WHERE l.tenant_id=$1 AND l.status IN ('NOT_LEAD','REVIEW_QUEUE') AND l.desfecho IS NULL
-          AND ${stages.temFatoExtranetSql('l')}`, [tenantId])).rows[0].n;
-  } catch { stats.pendencia_estoque = null; }
+          AND ${stages.temFatoExtranetSql('l')}`, [tenantId, snapshot.windowStart || null])).rows[0];
+    stats.pendencia_estoque = q.total;
+    stats.pendencia_fora_da_janela = q.fora;
+  } catch { stats.pendencia_estoque = null; stats.pendencia_fora_da_janela = null; }
   return stats;
 }
 

@@ -594,8 +594,25 @@ nenhum lead mudou de estado, a **Vanessa Faria simplesmente não voltou nas pág
 para rodada — quem olha duas vezes desconfia do sistema, com razão. Conserto: `pendencia_humana`
 virou **`pendencia_no_lote`** (honesto sobre o que mede) e entrou **`pendencia_estoque`**, uma
 consulta ao banco independente do fetch, com a **mesma régua do card** (`temFatoExtranetSql`). A
-divergência entre os dois deixa de ser mistério e vira **diagnóstico**: `estoque > lote` = fetch
-incompleto naquele ciclo. Caso `r9` do itest reproduz exatamente o fenômeno.
+divergência entre os dois deixa de ser mistério e vira **diagnóstico**. Caso `r9` do itest
+reproduz exatamente o fenômeno.
+
+**Emenda no mesmo dia — o detector não pode virar alarme que não desliga.** A causa da Vanessa
+foi medida: `data_cadastro` **22/06**, janela começa **24/06** — ela saiu por **dois dias**. A
+paginação está correta; é envelhecimento, não falha de busca. Só que, com a régua acima, ela
+acusaria "fetch incompleto" **em todo ciclo, para sempre** — exatamente o tipo de número que não
+zera e ensina a ignorar o painel. Entrou `pendencia_fora_da_janela` (quem não tem nenhuma linha
+de espelho dentro da janela, incluindo quem só tem fato de agenda/migr 129) e a conta ficou
+honesta: `estoque − fora_da_janela ≈ lote` → tudo explicado; `>` → aí sim fetch incompleto.
+
+**Pendência de DESENHO (não é para hoje, é do Leo):** a janela de 90 dias ancora no
+`data_cadastro`, não no FATO. A Vanessa cadastrou-se em 22/06 e tem **aula de 27/08** — fato de
+menos de um mês — e mesmo assim saiu do radar do sync de leads. O prejuízo é limitado por
+redundância (matrícula chega pelo `contractConvert`; aula chega pela agenda/129), mas mudanças de
+situação dela deixam de ser vistas. Opções, quando o Leo quiser decidir: (a) deixar como está;
+(b) ancorar a janela no fato mais recente; (c) um fetch extra por `statusA` ativo (a tela filtra
+por situação), que traz os ativos independentemente da idade do cadastro por 1–2 requisições a
+mais — sem ampliar a janela para todo mundo.
 
 ### A13 fechada (22/09/2026) — `43325ee`
 `vincularLead` passou a receber `(msg, rawBody)` e a derivar o telefone pelo **mesmo**

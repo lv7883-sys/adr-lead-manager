@@ -333,5 +333,10 @@ test('(r9) LOTE × ESTOQUE: quem não veio no fetch some do lote mas CONTINUA no
     tenantId: B, snapshot: { leads: [], windowStart: '2099-01-01' }, mode: 'auto' }));
   assert.equal(st2.pendencia_no_lote, 0, 'não veio no fetch → fora do lote');
   assert.equal(st2.pendencia_estoque, 1, 'MAS continua aguardando decisão — estoque não depende do fetch');
+  // ENVELHECIMENTO ≠ FETCH INCOMPLETO: a linha dela está fora da janela, então a ausência está
+  // EXPLICADA (estoque − fora = lote). Sem isso o detector acusaria falha de busca para sempre.
+  assert.equal(st2.pendencia_fora_da_janela, 1, 'ausência explicada por envelhecimento');
+  assert.equal(st2.pendencia_estoque - st2.pendencia_fora_da_janela, st2.pendencia_no_lote,
+    'a conta fecha: nada de fetch incompleto');
   assert.equal((await lead(B, nl)).status, 'NOT_LEAD', 'e nada foi tocado');
 });
