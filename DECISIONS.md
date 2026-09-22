@@ -459,3 +459,28 @@ partir do `externalId` cru, teria criado origem para um contato que não existe.
 **O combinado não muda:** a normalização da porta de entrada é daquela sessão, com backfill
 (o lead falso + as 4 conversas); ela avisa antes do PR e eu ajusto `vincularLead` no mesmo
 lote, avaliando o backfill das origens órfãs.
+
+### Publicação da ingestão (22/09/2026, 18h32 UTC)
+**No ar.** Migração 175 aplicada em produção (duas vezes, idempotente), com backup verificado
+antes: `/root/lm-backups/pre-175-20260922-1820.sql.gz` (74 MB, `gzip -t` ok, 281.579 linhas).
+RLS `ENABLE+FORCE` e política conferidas nas duas tabelas novas; privilégios conferidos —
+`raw_asset` **sem DELETE** e `grupo_fonte` com DELETE, como desenhado (a checagem existe por
+causa da migração 174).
+
+Suíte na VPS, Postgres descartável: 68 puros + 23 origem + 13 isolamento + 6 ingestão =
+**110, zero falhas**.
+
+**O código subiu no deploy da sessão de WhatsApp**, não no meu: o merge `3c4f592` já estava no
+`main` quando ela publicou `c8e87ae` às 18h32. Container saudável, **zero erros** desde o
+restart, webhooks e inbox seguindo normalmente. `make ingest-status` rodou em produção e
+respondeu o esperado: *"grupos-fonte: NENHUM — a ingestão está desligada para esta unidade"*.
+
+**A ingestão está LIGADA no código e DESLIGADA por configuração**: sem linha em
+`marketing.grupo_fonte`, a captura devolve `grupo_nao_e_fonte` antes de qualquer trabalho.
+Ligar uma unidade é um INSERT (não há tela — dívida A10).
+
+⚠ **Correção sobre o rollback.** Marquei `adr-lead-manager:rollback-pre-175` antes de publicar,
+mas como a imagem seguinte subiu com a ingestão **e** com as correções de identidade da
+assistente, aquela tag deixou de ser "o estado imediatamente anterior ao meu código" — voltar
+nela desfaria trabalho de outra frente junto. **O caminho limpo para reverter só a ingestão é
+`git revert` do merge + rebuild**, não a imagem antiga. (Apontado pela sessão de WhatsApp.)
