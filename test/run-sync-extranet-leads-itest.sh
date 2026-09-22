@@ -69,9 +69,14 @@ CREATE TABLE lead_manager.internal_contacts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, phone text NOT NULL,
   name text NOT NULL, type text NOT NULL, created_at timestamptz DEFAULT now(),
   UNIQUE (tenant_id, phone));
+-- aula_experimental (migr 129): o OUTRO braço de stages.temFatoExtranetSql, que o contador de
+-- ESTOQUE usa. Shape mínimo — o predicado só olha lead_id e status_cod.
+CREATE TABLE lead_manager.aula_experimental (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, lead_id uuid,
+  status_cod int, created_at timestamptz DEFAULT now());
 GRANT SELECT, INSERT, UPDATE, DELETE ON lead_manager.leads, lead_manager.lead_eventos,
   lead_manager.tenant_lead_config, lead_manager.stage_autoapply_log,
-  lead_manager.internal_contacts TO lead_manager_user;
+  lead_manager.internal_contacts, lead_manager.aula_experimental TO lead_manager_user;
 SQL
 
 echo "[itest] migrations 085 (br_phone_key) + 102 (extranet_lead) + 106 (carimbos exp_*) + 130 (created_at do cadastro)…"

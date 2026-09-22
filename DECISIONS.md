@@ -587,6 +587,16 @@ são da casa); a máquina segue NUNCA devolvendo interno sozinha. Custo aceito e
 casos "Leo fez aula de canto" voltam a contar de vez em quando. Aferição do próximo ciclo:
 `ressuscitados:0, pendencia_humana:7 (interno_pendencia:1)`.
 
+**Lição do 2º ciclo (22/09, 21h13) — o contador media o LOTE, não o estoque.** Saiu `6`, não `7`:
+nenhum lead mudou de estado, a **Vanessa Faria simplesmente não voltou nas páginas daquele fetch**
+(`last_seen_at` dela ficou em 20/09; não foi soft-deletada porque a régua de ausência é escopada
+à janela). Ou seja: o número dizia "6 dos que eu vi nesta rodada", e o que se vê varia de rodada
+para rodada — quem olha duas vezes desconfia do sistema, com razão. Conserto: `pendencia_humana`
+virou **`pendencia_no_lote`** (honesto sobre o que mede) e entrou **`pendencia_estoque`**, uma
+consulta ao banco independente do fetch, com a **mesma régua do card** (`temFatoExtranetSql`). A
+divergência entre os dois deixa de ser mistério e vira **diagnóstico**: `estoque > lote` = fetch
+incompleto naquele ciclo. Caso `r9` do itest reproduz exatamente o fenômeno.
+
 ### A13 fechada (22/09/2026) — `43325ee`
 `vincularLead` passou a receber `(msg, rawBody)` e a derivar o telefone pelo **mesmo**
 `_telefoneDoContato()` da gravação. **Nada de `br_phone_key`, `telefoneBR.js` ou das migrações

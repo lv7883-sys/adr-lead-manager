@@ -262,7 +262,7 @@ test('(r3) CONFIRMADO (SERVICE = ambíguo) → pendência humana, nunca override
   const nl = await mkLead(A, { phone: '+5519999990103', status: 'NOT_LEAD', review_result: 'confirmed_not_lead', review_by: 'SERVICE' });
   const st = await sync(A, [row('R3', { foneRaw: '(19)99999-0103', situacao: 'Exp. Agendada' })]);
   assert.equal(st.ressuscitados, 0);
-  assert.ok(st.pendencia_humana >= 1);
+  assert.ok(st.pendencia_no_lote >= 1);
   const l = await lead(A, nl);
   assert.equal(l.status, 'NOT_LEAD', 'fica para o card do Plantão — recepção decide');
 });
@@ -277,7 +277,7 @@ test('(r4) INTERNO com fato: NUNCA auto-ressuscita, mas vira PENDÊNCIA (caso Al
   const st = await sync(A, [row('R4', { foneRaw: '(19)99999-0104', situacao: 'Ganhou' })]);
   assert.equal(st.ressuscitados, 0, 'máquina nunca devolve interno sozinha');
   assert.equal(st.interno_pendencia, 1, 'sub-contador diz que o pendente é da casa');
-  assert.equal(st.pendencia_humana, 1, 'e ele CONTA como pendência (recepção decide)');
+  assert.equal(st.pendencia_no_lote, 1, 'e ele CONTA como pendência (recepção decide)');
   assert.equal((await lead(A, nl)).status, 'NOT_LEAD');
   // interno SEM confirmação nenhuma: idem — pendência, nunca auto (a guarda não depende do review)
   await withTenant(A, (c) => c.query(
@@ -296,7 +296,7 @@ test('(r7) pendência conta por LEAD distinto, não por linha do espelho (Extran
     row('R7A', { foneRaw: '(19)99999-0107', situacao: 'Exp. Agendada' }),
     row('R7B', { foneRaw: '19 99999 0107', situacao: 'Exp. Agendada' }),
   ]);
-  assert.equal(st.pendencia_humana, 1, '2 linhas, 1 lead, 1 pendência');
+  assert.equal(st.pendencia_no_lote, 1, '2 linhas, 1 lead, 1 pendência');
   assert.equal((await lead(A, nl)).status, 'NOT_LEAD');
 });
 
@@ -313,8 +313,25 @@ test('(r6) SUGGESTION mode não devolve (sugestão é inerte em terminal) → pe
   const nl = await mkLead(A, { phone: '+5519999990106', status: 'NOT_LEAD' });
   const st = await sync(A, [row('R6', { foneRaw: '(19)99999-0106', situacao: 'Ganhou' })], 'suggestion');
   assert.equal(st.ressuscitados, 0);
-  assert.ok(st.pendencia_humana >= 1);
+  assert.ok(st.pendencia_no_lote >= 1);
   const l = await lead(A, nl);
   assert.equal(l.status, 'NOT_LEAD');
   assert.equal(l.suggested_stage, null, 'nada gravado — sugestão seria invisível em lead terminal');
+});
+
+test('(r9) LOTE × ESTOQUE: quem não veio no fetch some do lote mas CONTINUA no estoque (caso Vanessa)', async () => {
+  // 22/09: dois ciclos seguidos deram 7 e 6 sem nada mudar no banco — a Vanessa simplesmente não
+  // voltou nas páginas do segundo fetch. O contador de lote é honesto sobre o lote; o de estoque é
+  // que responde "quantos aguardam decisão", e a divergência entre os dois denuncia fetch incompleto.
+  const nl = await mkLead(B, { phone: '+5519777770001', status: 'NOT_LEAD', review_result: 'confirmed_not_lead', review_by: 'SERVICE' });
+  const st1 = await sync(B, [row('V1', { foneRaw: '(19)77777-0001', situacao: 'Exp. Agendada' })]);
+  assert.equal(st1.pendencia_no_lote, 1, 'veio no fetch → conta no lote');
+  assert.equal(st1.pendencia_estoque, 1, 'e está no estoque');
+
+  // ciclo seguinte SEM a linha dela (janela evita o soft-delete: data_cadastro fora do windowStart)
+  const st2 = await withTenant(B, (c) => syncExtranetLeads(c, {
+    tenantId: B, snapshot: { leads: [], windowStart: '2099-01-01' }, mode: 'auto' }));
+  assert.equal(st2.pendencia_no_lote, 0, 'não veio no fetch → fora do lote');
+  assert.equal(st2.pendencia_estoque, 1, 'MAS continua aguardando decisão — estoque não depende do fetch');
+  assert.equal((await lead(B, nl)).status, 'NOT_LEAD', 'e nada foi tocado');
 });

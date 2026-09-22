@@ -286,9 +286,22 @@ async function syncExtranetLeads(c, { tenantId, snapshot, mode }) {
   }
   stats.situacao_desconhecida = [...stats._desconhecidas];
   delete stats._desconhecidas;
-  stats.pendencia_humana = stats._pendencias.size;
-  stats.interno_pendencia = stats._internos.size;   // subconjunto: quantos pendentes são da casa
+  stats.pendencia_no_lote = stats._pendencias.size;
+  stats.interno_pendencia = stats._internos.size;   // subconjunto DO LOTE: quantos são da casa
   delete stats._pendencias; delete stats._internos;
+  // ESTOQUE (consulta ao banco, INDEPENDENTE do fetch) — lição de 22/09: o contador de lote conta
+  // só o que a Extranet devolveu NESTA rodada, e o que ela devolve varia. Dois ciclos seguidos
+  // deram 7 e 6 sem NADA ter mudado no banco: a Vanessa Faria não voltou nas páginas do segundo.
+  // Quem olha o número duas vezes desconfia do sistema, com razão. Este é o número que o card do
+  // Plantão mostra e que um humano quer ver; e a divergência lote×estoque vira DIAGNÓSTICO
+  // (estoque > lote = fetch incompleto naquele ciclo). Mesma régua do card: temFatoExtranetSql —
+  // não reescrever o predicado. Degrada elegante (null) onde aula_experimental não existe.
+  try {
+    stats.pendencia_estoque = (await c.query(
+      `SELECT count(*)::int n FROM lead_manager.leads l
+        WHERE l.tenant_id=$1 AND l.status IN ('NOT_LEAD','REVIEW_QUEUE') AND l.desfecho IS NULL
+          AND ${stages.temFatoExtranetSql('l')}`, [tenantId])).rows[0].n;
+  } catch { stats.pendencia_estoque = null; }
   return stats;
 }
 
