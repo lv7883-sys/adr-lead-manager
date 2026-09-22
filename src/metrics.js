@@ -11,6 +11,10 @@ const { terminalSql, isTerminal, isConvertido } = require('./lifecycle');   // F
 // Passo 1 — régua canônica de estágios (fonte única; substitui kanbanColuna/_ETAPAS_TRABALHO/
 // KANBAN_TRANSICOES/PERDIDO_DESFECHOS locais e o OR-proxy inline do computeFunil).
 const stages = require('./stages');
+// Régua ÚNICA de "reação/aviso de sistema não é turno do cliente" (src/reacao.js). As consultas deste
+// arquivo eram a 4ª cópia que nunca recebeu a régua: um 👍 do cliente contava como contato dele e
+// reabria conversa já respondida como "responder agora" (achado 22/09/2026, lead que esperava 5d17h).
+const { naoEhReacaoSql } = require('./reacao');
 const { stageKey, funilBucketSql, temFatoExtranetSql } = stages;
 
 const PERIODS = { '1d': 1, '7d': 7, '30d': 30, '90d': 90 };
@@ -146,7 +150,11 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
            -- de um ano atrás. created_at >= now()-days (base) garante que as msgs do
            -- próprio lead estão dentro da janela.
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
-                  min(m.received_at) AS first_in, max(m.received_at) AS last_in
+                  min(m.received_at) AS first_in, max(m.received_at) AS last_in,
+                  -- TURNO = mensagem de verdade (reação e aviso de sistema fora). last_in fica só p/ exibir
+                  -- "último contato"; QUEM DECIDE (bola de quem, SLA, fila) usa os _turno.
+                  min(m.received_at) FILTER (WHERE ${naoEhReacaoSql('m')}) AS first_in_turno,
+                  max(m.received_at) FILTER (WHERE ${naoEhReacaoSql('m')}) AS last_in_turno
              FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
             WHERE cv.tenant_id = $1 AND m.role = 'USER'
               AND m.received_at >= now() - ($2 || ' days')::interval
@@ -169,7 +177,7 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
          )
          SELECT b.id, b.name, b.status, b.intent, b.created_at, b.desfecho, b.desfecho_em, b.temperatura_manual,
                 b.instrument, b.qualif, b.conversation_state, b.state_computed_at,
-                i.first_in, i.last_in, o.first_out, o.last_out, o.first_sender,
+                i.first_in, i.last_in, i.first_in_turno, i.last_in_turno, o.first_out, o.last_out, o.first_sender,
                 -- FONTE estável: origem (first-touch, imutável) vence o canal da conversa
                 -- mais recente (que migra pra WhatsApp no 1º reply). Fallback p/ leads legados.
                 COALESCE(b.origem, c.channel) AS channel
@@ -314,9 +322,9 @@ async function computeMetrics(tenantId, { period = '30d', channel = null } = {})
     const porRecep = new Map(); // sender -> { n, somaSeg, comTempo }
     const agora = Date.now();   // Fatia E: leadsTabela podado (leads_tabela morto, lista grande no payload)
     for (const l of rows) {
-      const fin = l.first_in ? new Date(l.first_in).getTime() : null;
+      const fin = l.first_in_turno ? new Date(l.first_in_turno).getTime() : null;   // SLA mede resposta a MENSAGEM
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
-      const lin = l.last_in ? new Date(l.last_in).getTime() : null;
+      const lin = l.last_in_turno ? new Date(l.last_in_turno).getTime() : null;   // decide: só turno de verdade
       const lout = l.last_out ? new Date(l.last_out).getTime() : null;
       if (fin) comInbound++;
       const respondido = fout != null && (fin == null || fout >= fin);
@@ -825,7 +833,11 @@ async function computePainel(tenantId) {
         `WITH inb AS (
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
                   min(m.received_at) AS first_in, max(m.received_at) AS last_in,
-                  (array_agg(coalesce(m.media_transcription, m.body) ORDER BY m.received_at DESC))[1] AS last_in_body,
+                  -- TURNO = mensagem de verdade (reação/aviso de sistema fora) — é o que DECIDE a fila.
+                  min(m.received_at) FILTER (WHERE ${naoEhReacaoSql('m')}) AS first_in_turno,
+                  max(m.received_at) FILTER (WHERE ${naoEhReacaoSql('m')}) AS last_in_turno,
+                  (array_agg(coalesce(m.media_transcription, m.body) ORDER BY m.received_at DESC)
+                     FILTER (WHERE ${naoEhReacaoSql('m')}))[1] AS last_in_body,
                   (array_agg(coalesce(m.media_transcription, m.body) ORDER BY m.received_at ASC))[1] AS first_in_body,
                   array_agg(EXTRACT(EPOCH FROM m.received_at) ORDER BY m.received_at) AS ts_in
              FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
@@ -856,7 +868,7 @@ async function computePainel(tenantId) {
                 l.review_queue, l.review_result, l.classification_confidence, l.classification_reasoning,
                 l.conversation_state, l.state_computed_at,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
-                i.first_in, i.last_in, i.last_in_body, i.first_in_body, o.first_out, o.last_out, c.channel,
+                i.first_in, i.last_in, i.first_in_turno, i.last_in_turno, i.last_in_body, i.first_in_body, o.first_out, o.last_out, c.channel,
                 i.ts_in, o.ts_out,
                 d.draft_at, COALESCE(d.n, 0) AS drafts,
                 (p.lead_id IS NOT NULL) AS retomada_pendente
@@ -916,9 +928,9 @@ async function computePainel(tenantId) {
         && l.status !== 'NOT_LEAD' && l.status !== 'REVIEW_QUEUE'
         && l.status !== 'EXPERIMENTAL_AGENDADA';
       if (!ativo) continue;
-      const fin = l.first_in ? new Date(l.first_in).getTime() : null;
+      const fin = l.first_in_turno ? new Date(l.first_in_turno).getTime() : null;   // SLA mede resposta a MENSAGEM
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
-      const lin = l.last_in ? new Date(l.last_in).getTime() : null;
+      const lin = l.last_in_turno ? new Date(l.last_in_turno).getTime() : null;   // decide: só turno de verdade
       const lout = l.last_out ? new Date(l.last_out).getTime() : null;
       leadsAtivos++;
       if (l.drafts > 0) comRascunho++;
@@ -1034,7 +1046,8 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
       await c.query(
         `WITH inb AS (
            SELECT regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
-                  max(m.received_at) AS last_in
+                  max(m.received_at) AS last_in,
+                  max(m.received_at) FILTER (WHERE ${naoEhReacaoSql('m')}) AS last_in_turno   -- reação não é contato do cliente
              FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
             WHERE cv.tenant_id = $1 AND m.role = 'USER' GROUP BY 1
          ),
@@ -1057,7 +1070,7 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
          SELECT l.id, l.name, l.phone, l.status, l.intent, l.desfecho, l.desfecho_em, l.created_at, l.temperatura_manual,
                 l.suggested_stage, l.stage_reasoning,
                 q.instrument, COALESCE(q.qualification_complete, false) AS qualif,
-                i.last_in, o.first_out, o.last_out, c.channel, COALESCE(d.n, 0) AS drafts
+                i.last_in, i.last_in_turno, o.first_out, o.last_out, c.channel, COALESCE(d.n, 0) AS drafts
            FROM leads l
            LEFT JOIN lead_qualifications q ON q.lead_id = l.id
            LEFT JOIN inb  i ON i.ident = regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')
@@ -1076,7 +1089,7 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
     const agora = Date.now();
     const cols = { novo: [], qualificando: [], qualificado: [], experimental: [], convertido: [], perdido: [] };
     for (const l of rows) {
-      const lin = l.last_in ? new Date(l.last_in).getTime() : null;
+      const lin = l.last_in_turno ? new Date(l.last_in_turno).getTime() : null;   // decide: só turno de verdade
       const lout = l.last_out ? new Date(l.last_out).getTime() : null;
       const fout = l.first_out ? new Date(l.first_out).getTime() : null;
       // urgência: último contato foi DO lead e estamos devendo resposta. Em
