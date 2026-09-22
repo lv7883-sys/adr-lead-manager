@@ -6,6 +6,7 @@ const logger = require('./logger');
 const { toE164 } = require('./validation');
 const telBR = require('./telefoneBR');
 const { resolveSystemPrompt } = require('./templates');
+const { sanitizarIdentidade } = require('./temaProibido');   // rascunho nunca sai com nome de recepcionista
 const gemini = require('./gemini');
 const { getRescuePolicy } = require('./roleLeadPolicy');   // ADR-036 E1.4: rescue question por papel (config por tenant)
 const notifyModule = require('./notify');
@@ -987,6 +988,19 @@ async function captureRoutedEstablished(tenantId, channel, externalId, msg, rawB
 // Só OBSERVA a saída da recepção e loga o estado/relógio SUGERIDOS em bola_shadow_log.
 // ============================================================================
 
+// TRAVA DE IDENTIDADE do rascunho — MULTI-TENANT: o único nome aceito é o que a unidade configurou
+// (automacao_config.nome_ia). Nada de nome de produto no código. Best-effort: se a leitura falhar,
+// sanitiza sem nome (tira a apresentação pessoal) — nunca deixa passar nome de recepcionista.
+async function _semNomeDeRecepcionista(c, tenantId, texto, log, extra = {}) {
+  let nomeIa = '';
+  try {
+    nomeIa = (await c.query('SELECT nome_ia FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0]?.nome_ia || '';
+  } catch { nomeIa = ''; }
+  const { texto: limpo, trocas } = sanitizarIdentidade(texto, { nomeIa });
+  if (trocas.length && log && log.warn) log.warn('rascunho.identidade_corrigida', { ...extra, trocas, nome_ia: nomeIa || null });
+  return limpo;
+}
+
 // Marco imutável do CICLO de posse ("desde quando a bola é nossa"). Preserva o valor já
 // fixado (feature 'on'); em shadow, sugere o último inbound do cliente (estável durante
 // todo o ciclo — não muda enquanto o cliente não escreve de novo). Fallback: created_at.
@@ -1835,12 +1849,16 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
       "UPDATE pending_approvals SET status = 'ARCHIVED' WHERE tenant_id = $1 AND lead_id = $2 AND status = 'PENDING'",
       [tenantId, ctx.leadId]
     );
+    // TRAVA DE IDENTIDADE (22/09/2026): o prompt da unidade chegou a MANDAR a IA se apresentar com o
+    // nome de uma recepcionista. Prompt não é trava — aqui o nome de pessoa da equipe vira o nome que a
+    // unidade configurou (automacao_config.nome_ia). Sem nome configurado, a apresentação pessoal sai.
+    const respostaLimpa = await _semNomeDeRecepcionista(c, tenantId, reply, log2, { lead_id: ctx.leadId });
     const pa = await c.query(
       `INSERT INTO pending_approvals
          (tenant_id, lead_id, conversation_id, suggested_response, status)
        VALUES ($1, $2, $3, $4, 'PENDING')
        RETURNING id`,
-      [tenantId, ctx.leadId, ctx.conversationId, reply]
+      [tenantId, ctx.leadId, ctx.conversationId, respostaLimpa]
     );
     return { approvalId: pa.rows[0].id };
   });
@@ -1928,10 +1946,11 @@ async function generateDraftForLead(tenantId, leadId, deps = {}) {
       [tenantId, leadId]
     );
     if (exist.rowCount) return { id: exist.rows[0].id, dup: true };
+    const respostaLimpa = await _semNomeDeRecepcionista(c, tenantId, reply, log, { lead_id: leadId });
     const r = await c.query(
       `INSERT INTO pending_approvals (tenant_id, lead_id, conversation_id, suggested_response, status)
        VALUES ($1, $2, $3, $4, 'PENDING') RETURNING id`,
-      [tenantId, leadId, info.conversationId, reply]
+      [tenantId, leadId, info.conversationId, respostaLimpa]
     );
     return { id: r.rows[0].id };
   });

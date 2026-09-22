@@ -107,6 +107,47 @@ function detectarSaida(texto, { permitidos = [], nomeIa = '' } = {}) {
   return { agenda, contrato: _achou(RE_CONTRATO_SAIDA, t), valores: _achou(RE_VALORES_SAIDA, t), identidade };
 }
 
+// ---- IDENTIDADE no RASCUNHO (22/09/2026) ---------------------------------------------------------
+// A trava de identidade acima só valia onde a mensagem sai SOZINHA (resposta fora do horário). O
+// rascunho que a recepção aprova nunca passou por ela — e a IA vinha se apresentando com o nome de
+// uma recepcionista real ("Aqui é a Fulana da Escola X"): 45 mensagens em 30 dias e 5 rascunhos
+// esperando aprovação. A raiz estava no prompt da unidade, que MANDAVA se apresentar assim; mas
+// prompt não é trava, então aqui fica a rede de segurança, em código.
+//
+// MULTI-TENANT: o único nome aceito é o que a unidade configurou (automacao_config.nome_ia). Nada de
+// nome de produto chumbado — sem nome configurado, a apresentação pessoal simplesmente sai do texto.
+const RE_APRESENTACAO_TXT = /\b(aqui (?:é|e) (?:a|o)|(?:eu )?sou (?:a|o)|meu nome (?:é|e))\s+([A-Za-zÀ-ÿ]+)/gi;
+const RE_ASSINATURA_LINHA = /(^|\n)[ \t]*\*([^*\n]{2,40})\*[ \t]*(?=\n|$)/g;
+// "Janis J. (assistente virtual)" → "Janis J." (o que dá para escrever no meio de uma frase).
+function nomeUsavel(nomeIa) {
+  return String(nomeIa || '').replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
+}
+// Troca nome de pessoa da equipe pelo nome configurado da assistente (ou tira a apresentação, se a
+// unidade não configurou nome). Devolve { texto, trocas: [...] } — trocas vazio = nada a fazer.
+function sanitizarIdentidade(texto, { nomeIa = '' } = {}) {
+  const original = String(texto == null ? '' : texto);
+  if (!original.trim()) return { texto: original, trocas: [] };
+  const nome = nomeUsavel(nomeIa);
+  const meuPrimeiro = _norm(nome).split(/[^a-z]+/).filter(Boolean)[0] || '';
+  const trocas = [];
+  let saida = original.replace(RE_APRESENTACAO_TXT, (all, abre, quem) => {
+    const q = _norm(quem);
+    if (!q || q === meuPrimeiro || _APRESENTACAO_OK.has(q)) return all;   // ela mesma / "assistente"
+    trocas.push(all.trim());
+    if (!nome) return '';                       // sem nome configurado: some a apresentação pessoal
+    return `${abre} ${nome}`;
+  });
+  saida = saida.replace(RE_ASSINATURA_LINHA, (all, antes, assinatura) => {
+    const a = _norm(assinatura);
+    if (!a || a === _norm(nome) || _APRESENTACAO_OK.has(a)) return all;
+    trocas.push(`*${assinatura}*`);
+    return nome ? `${antes}*${nome}*` : antes;
+  });
+  // limpeza de sobra ("Olá!  da Escola" / espaço duplo) quando a apresentação foi removida
+  if (trocas.length) saida = saida.replace(/[ \t]{2,}/g, ' ').replace(/ +([,.!?])/g, '$1');
+  return { texto: saida, trocas };
+}
+
 // Travas da unidade (agenda/valores: nulo/ausente = ligada) + as que valem para todas as unidades.
 function regrasDoTenant(cfg) {
   const c = cfg || {};
@@ -136,4 +177,4 @@ function mensagemEncaminhamento({ nome, escola, proxima } = {}) {
   return `${oi} Recebemos sua mensagem 🙌 Isso vai ser avaliado ${quem} durante o horário de atendimento${quando}.`;
 }
 
-module.exports = { detectarEntrada, detectarSaida, regrasDoTenant, bloqueio, mensagemEncaminhamento, _norm };
+module.exports = { detectarEntrada, detectarSaida, regrasDoTenant, bloqueio, mensagemEncaminhamento, sanitizarIdentidade, nomeUsavel, _norm };

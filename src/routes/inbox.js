@@ -19,6 +19,7 @@
 
 const { SQL_PERFIL } = require('../perfilAssistente');   // perfil da assistente junto da config (migr. 119)
 const stages = require('../stages');   // etapa do funil (mesma régua do kanban) na lista e na conversa
+const { sanitizarIdentidade } = require('../temaProibido');   // sugestão nunca chega com nome de recepcionista
 const express = require('express');
 const { withTenant } = require('../db');
 const { authenticate } = require('../auth');
@@ -1598,8 +1599,10 @@ async function suggestReply(tenantId, conversationId, contexto = 'lead', deps = 
       `SELECT school_name, system_prompt_override, available_instruments, business_hours, notification_whatsapp, ${SQL_PERFIL}
          FROM tenant_lead_config WHERE tenant_id = $1`, [tenantId])).rows[0];
     const tname = (await c.query('SELECT name FROM tenants WHERE id = $1', [tenantId])).rows[0]?.name;
+    let nomeIa = '';
+    try { nomeIa = (await c.query('SELECT nome_ia FROM automacao_config WHERE tenant_id = $1', [tenantId])).rows[0]?.nome_ia || ''; } catch { /* opcional */ }
     return {
-      convId: cv.id, ident: cv.ident, leadId: (leadRow && leadRow.id) || null, lastBody: (last && last.body) || '',
+      convId: cv.id, ident: cv.ident, leadId: (leadRow && leadRow.id) || null, lastBody: (last && last.body) || '', nomeIa,
       config: cfg || { school_name: tname || 'Escola', system_prompt_override: null, available_instruments: [], business_hours: {}, notification_whatsapp: null },
     };
   });
@@ -1613,7 +1616,11 @@ async function suggestReply(tenantId, conversationId, contexto = 'lead', deps = 
       retomada: history.length > 0, vendas, contexto: contexto === 'renovacao' ? 'renovacao' : 'lead',
       perfil: info.config && info.config.perfil,
     });
-    return { ok: true, suggestion };
+    // A sugestão vai para a recepção revisar, mas o nome de uma recepcionista NÃO pode aparecer nela:
+    // vira o nome configurado da unidade (ou sai, se não houver nome configurado).
+    const { texto: limpa, trocas } = sanitizarIdentidade(suggestion, { nomeIa: info.nomeIa || '' });
+    if (trocas.length) logger.warn('sugestao.identidade_corrigida', { tenant_id: tenantId, trocas });
+    return { ok: true, suggestion: limpa };
   } catch (e) {
     return { reason: 'generate_error', detail: e.message };
   }
@@ -1657,7 +1664,8 @@ async function _estrategiaCtx(c, tenantId, conversationId) {
   return {
     cv, leadId: (leadRow && leadRow.id) || null, status: (leadRow && leadRow.status) || null,
     cfg: cfg || { school_name: tname || 'Escola', system_prompt_override: null, available_instruments: [], business_hours: {}, notification_whatsapp: null },
-    escola: (cfg && cfg.school_name) || tname || 'Escola', nomeIa: nomeIa || 'Janis',
+    // sem nome configurado, rótulo NEUTRO: o nome da assistente é de cada unidade (nunca chumbado)
+    escola: (cfg && cfg.school_name) || tname || 'Escola', nomeIa: nomeIa || 'Assistente',
   };
 }
 function _ctxDeStatus(status) {

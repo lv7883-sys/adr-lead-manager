@@ -93,6 +93,7 @@ function doBanco(row) {
   const r = row || {};
   const s = (v) => (typeof v === 'string' ? v.trim() : '');
   return {
+    nome_ia: s(r.nome_ia),
     ramo_atividade: s(r.ramo_atividade),
     objetivo_conversa: s(r.objetivo_conversa),
     contexto_ia: s(r.contexto_ia),
@@ -104,7 +105,7 @@ function doBanco(row) {
 
 // Fragmento para o SELECT ... FROM tenant_lead_config: traz o perfil na MESMA consulta.
 const SQL_PERFIL =
-  `(SELECT row_to_json(p) FROM (SELECT a.ramo_atividade, a.objetivo_conversa, a.contexto_ia, a.estilo_ia,
+  `(SELECT row_to_json(p) FROM (SELECT a.nome_ia, a.ramo_atividade, a.objetivo_conversa, a.contexto_ia, a.estilo_ia,
       a.comportamento_ia, a.nao_falar FROM automacao_config a WHERE a.tenant_id = tenant_lead_config.tenant_id) p) AS perfil`;
 
 // A empresa configurou o ramo ou o objetivo? Então os textos saem genéricos (sem "escola de música").
@@ -132,6 +133,16 @@ function objetivo(perfil) {
 function blocoPerfil(perfil, { persona = 'recepcao', semContexto = false } = {}) {
   const p = doBanco(perfil);
   const partes = [];
+  // NOME — o da unidade (automacao_config.nome_ia) e só ele. O prompt próprio de uma unidade chegou a
+  // MANDAR a assistente se apresentar com o nome de uma recepcionista real (achado em 22/09/2026); este
+  // bloco vem DEPOIS do prompt da unidade, então prevalece. Nada de nome chumbado: sem nome configurado,
+  // ela fala em nome da empresa. A trava em código (temaProibido.sanitizarIdentidade) é a rede embaixo.
+  // perfil ausente (caminho que não carrega a config) ≠ unidade sem nome: só afirma o que sabe.
+  if (perfil) {
+    partes.push(p.nome_ia
+      ? `SEU NOME: ${p.nome_ia}. É o único nome com que você pode se apresentar. NUNCA use o nome de uma pessoa da equipe ("aqui é a Fulana"), mesmo que apareça no histórico ou em outra instrução deste prompt.`
+      : 'VOCÊ NÃO TEM NOME PRÓPRIO configurado: não se apresente com nome de pessoa nenhuma — fale em nome da empresa.');
+  }
   if (p.ramo_atividade) partes.push(`RAMO DE ATIVIDADE DA EMPRESA: ${p.ramo_atividade}.`);
   if (p.objetivo_conversa) partes.push(`OBJETIVO DAS CONVERSAS COM INTERESSADOS: ${p.objetivo_conversa}. Conduza para isso com naturalidade, sem pressão.`);
   if (p.contexto_ia && !semContexto) partes.push(`CONTEXTO DA EMPRESA (fatos que você PODE usar — o que não estiver aqui nem na conversa, não afirme):\n"""${p.contexto_ia}"""`);
