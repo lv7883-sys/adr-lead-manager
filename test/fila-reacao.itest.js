@@ -78,7 +78,8 @@ before(async () => {
       media_transcription text, received_at timestamptz DEFAULT now());
     CREATE TABLE staff_outbound_samples (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, external_id text,
       body text, sender text, raw jsonb, received_at timestamptz DEFAULT now());
-    CREATE TABLE pending_approvals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid, status text, created_at timestamptz DEFAULT now());
+    CREATE TABLE pending_approvals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid, status text,
+      suggested_response text, final_response text, decided_at timestamptz, created_at timestamptz DEFAULT now());
     CREATE TABLE reabordagem_tentativas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid, status text);
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, dormancy_days int DEFAULT 7);
     CREATE TABLE tenants (id uuid PRIMARY KEY, name text, horario_comercial jsonb, horario_comercial_inicio time, horario_comercial_fim time, horario_comercial_dias int[]);
