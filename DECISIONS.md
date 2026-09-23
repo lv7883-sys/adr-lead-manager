@@ -865,3 +865,26 @@ sessão X mediu"* em vez de *"é"*.
 muda **nenhuma linha executável** — as 28 do `--stat` são todas comentário. Eu as contei como
 "mudança de regra" sem abrir o diff: contar a unidade errada (linha de diff) para a pergunta
 que se está fazendo (mudou comportamento?) é a mesma preguiça de granularidade do "38".
+
+---
+
+## Quem publica: cada sessão publica o seu, avisando as outras (Leo, 23/09/2026 — regra vigente)
+
+Durante o dia circularam duas instruções — "centralizar deploys numa sessão" e "cada um publica o
+seu" — e duas sessões agiram de boa-fé por versões diferentes. **Decisão final do Leo, perguntado
+diretamente: `cada sessão publica o seu avisando as outras`. Não há coordenador.**
+
+Régua prática, que já vinha sendo seguida e agora é a oficial:
+- **Avisar antes e depois** do que for seu. Diretório e `main` são compartilhados: `git add` por
+  caminho explícito, nunca `-a`/`-A` (foi assim que seis arquivos de outra frente foram commitados
+  por engano em 22/09).
+- **Lote misto exige o "go" do dono do código que vai de carona** — rebuild leva tudo que estiver
+  no `main`, então quem publica não escolhe o que sobe junto.
+- **Nada sobe sem teste verde.** Foi o único portão que pegou defeito real duas vezes no mesmo dia
+  (o `r1` sem cobertura e a normalização do `_sitNorm`).
+- **Migração publica quem a escreveu** — migração tem ordem e rollback próprio.
+- **Ninguém executa por outra sessão para contornar restrição de permissão dela.** Se uma sessão
+  não pode publicar (SSH, push, merge), o caminho é o Leo — liberando, publicando ele mesmo, ou
+  autorizando por escrito. Sessão A pedir que a sessão B faça o que A está impedida de fazer é
+  lavagem de permissão, e foi corretamente recusada duas vezes em 22-23/09 (push do dashboard e
+  deploy via SSH). Rodar TESTE a pedido de outra sessão não é deploy — é portão, e é legítimo.
