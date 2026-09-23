@@ -273,3 +273,44 @@ test('(6) download quebrado não derruba o webhook: vira linha "falhou"', async 
   await ingestao.capturarMidia({ id: A }, msg, rawBody, log);
   assert.equal((await linhas(A)).filter((l) => l.situacao === 'falhou').length, 1);
 });
+
+// ── PROVA 7 — o privilégio, que teste de código não pega ────────────────────────────────
+
+test('(7) a aplicação NÃO consegue apagar matéria-prima (privilégio, não código)', async () => {
+  // Por que isto existe: em 21/09 a `origem_lead` nasceu APAGÁVEL em produção, e nenhum teste
+  // viu. O schema `lead_manager` tem um `ALTER DEFAULT PRIVILEGES ... GRANT ALL` antigo, então
+  // toda tabela nova ganha DELETE de brinde — e o banco descartável, rodando como superusuário,
+  // não reproduzia isso. Foi preciso a migração 174 para tapar.
+  //
+  // O mesmo defeito tem duas direções: privilégio A MAIS (aquele caso) e privilégio A MENOS
+  // (o `permission denied for table campanha_alvo` que a sessão de WhatsApp levou a produção
+  // hoje). Mecanismo idêntico: **o teste roda como superusuário e não prova acesso nenhum.**
+  // Aqui a conexão é `lead_manager_user`, como em produção — é isso que dá valor à asserção.
+  const [alguma] = await linhas(A);
+  assert.ok(alguma, 'precisa existir linha para a prova valer');
+
+  await assert.rejects(
+    withTenant(A, (c) => c.query('DELETE FROM marketing.raw_asset WHERE id = $1', [alguma.id])),
+    (e) => e.code === '42501',   // insufficient_privilege
+    'a aplicação tem DELETE em raw_asset — matéria-prima do professor pode ser apagada por bug');
+
+  assert.equal((await linhas(A)).length, (await linhas(A)).length, 'e a linha continua lá');
+
+  // O outro lado: o que a aplicação PRECISA poder fazer tem de funcionar sob o mesmo papel.
+  // A curadoria muda `situacao`; se o UPDATE faltasse, a fase seguinte morreria em silêncio.
+  await withTenant(A, (c) => c.query(
+    'UPDATE marketing.raw_asset SET motivo = motivo WHERE id = $1', [alguma.id]));
+});
+
+test('(8) o grupo-fonte é apagável — configuração não é matéria-prima', async () => {
+  // Assimetria deliberada: a recepção descadastra um grupo pela tela (precisa de DELETE), mas
+  // a mídia que já entrou não se apaga pela aplicação. Se um dia alguém "uniformizar" os grants,
+  // este teste diz qual das duas tabelas perdeu a regra.
+  await withTenant(A, (c) => c.query(
+    'INSERT INTO marketing.grupo_fonte (tenant_id, jid, nome) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+    [A, '120363000000000777@g.us', 'Grupo temporário']));
+  const n = await withTenant(A, (c) => c.query(
+    'DELETE FROM marketing.grupo_fonte WHERE tenant_id = $1 AND jid = $2',
+    [A, '120363000000000777@g.us']).then((r) => r.rowCount));
+  assert.equal(n, 1, 'a recepção precisa poder descadastrar o grupo pela tela');
+});
