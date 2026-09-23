@@ -856,6 +856,11 @@ verificado. Eu fiz o mesmo com o "uma pessoa nas duas listas" (eram duas, inclui
 **Número herdado de terceiro vira fato próprio ao ser repetido sem a fonte.** Ao repassar,
 dizer de quem é — e, quando vira argumento, re-verificar.
 
+*Assimetria que a distingue (sessão de WhatsApp):* as quatro primeiras se corrigem **medindo
+de novo**; esta só se corrige **citando a fonte**, porque o número pode estar perfeito e ainda
+assim não ser seu para afirmar. **O antídoto é de redação, não de consulta:** escrever *"a
+sessão X mediu"* em vez de *"é"*.
+
 *Epílogo útil:* nenhum dos dois estava errado no conteúdo. Conferido no fim, o `d0c42cb` não
 muda **nenhuma linha executável** — as 28 do `--stat` são todas comentário. Eu as contei como
 "mudança de regra" sem abrir o diff: contar a unidade errada (linha de diff) para a pergunta
