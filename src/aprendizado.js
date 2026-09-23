@@ -113,6 +113,17 @@ function sqlSugestoesComResposta({ janelaHoras = JANELA_PADRAO_H } = {}) {
                AND so.received_at >  s.criada_em
                AND so.received_at <= s.criada_em + make_interval(hours => ${Number(janelaHoras)})
                AND coalesce(so.body, '') <> ''
+               -- NÃO é resposta a uma sugestão:
+               --  • 'historico' é mensagem IMPORTADA do WhatsApp, não saída de agora;
+               --  • DISPARO DE CAMPANHA (Rock Hour, NPS, renovação) sai pela mesma porta e com o
+               --    mesmo source='api' da recepcionista respondendo pelo Regente — não dá para
+               --    separar por source. Dá para separar pelo id da mensagem: todo disparo tem
+               --    linha em app.campanha_alvo. Sem isto, um convite do Rock Hour caindo na
+               --    janela seria comparado com a sugestão e contado como "escreveu do zero".
+               AND coalesce(so.source, '') <> 'historico'
+               AND NOT EXISTS (SELECT 1 FROM app.campanha_alvo ca
+                                WHERE ca.wa_message_id IS NOT NULL
+                                  AND ca.wa_message_id = so.external_message_id)
              ORDER BY so.received_at ASC LIMIT 1) AS enviado
       FROM lead_manager.sugestao_ia s
       LEFT JOIN lead_manager.conversations cv ON cv.id = s.conversation_id

@@ -79,6 +79,17 @@ test('a consulta casa a PRIMEIRA saída dentro da janela, e a janela é explíci
   assert.match(sql, /regexp_replace\(so\.external_id/);
 });
 
+test('DISPARO não é resposta: campanha e histórico importado ficam fora da comparação', () => {
+  // O caso que motiva: um convite do Rock Hour sai pela MESMA porta e com o MESMO source='api'
+  // da recepcionista respondendo pelo Regente. Se cair na janela, seria comparado com a sugestão
+  // e contado como "escreveu do zero" — a IA levaria a culpa por um disparo automático.
+  // Não dá para separar por source; dá pelo id da mensagem, que todo disparo registra.
+  const sql = apr.sqlSugestoesComResposta();
+  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM app\.campanha_alvo/, 'disparo de campanha fora');
+  assert.match(sql, /ca\.wa_message_id = so\.external_message_id/, 'casado pelo id da mensagem, não por texto');
+  assert.match(sql, /so\.source, ''\) <> 'historico'/, 'mensagem importada não é resposta de agora');
+});
+
 test('sugestão vazia dos dois lados não inventa acerto', () => {
   assert.equal(apr.desfechoDaSugestao('', '').desfecho, apr.NAO_RESPONDEU);
   assert.equal(apr.similaridade('', 'qualquer coisa'), 0);
