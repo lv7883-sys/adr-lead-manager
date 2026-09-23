@@ -774,3 +774,32 @@ pessoa (`uq_origem_lead_contato`, `uq_origem_lead_lead`) — "uma origem por pes
 está no ESQUEMA, não só no código, e a migração **não seria aditiva**.
 
 **Nenhuma decisão tomada.** Fica aqui para quando o volume justificar.
+
+### As quatro formas de um número certo dizer coisa errada (23/09/2026)
+Fechando o fim de semana, o padrão dos erros de medição ficou com **quatro** formas, não duas.
+Todas foram encontradas por alguém desconfiar de um número que não batia — **nenhuma por
+teste**, e nenhuma delas é erro de consulta:
+
+1. **Granularidade** — *o que está sendo contado?* Linha, pessoa, evento. Pegou três vezes: o
+   "38 leads" que eram linhas de `extranet_lead` (são 7); os 592 papéis (população) lidos como
+   os 165 do resgate (tráfego de 90 dias).
+2. **Procedência** — *quem escreve esse valor?* `review_by='SERVICE'` é a credencial do
+   dashboard, não "automático". E flag em código é **default**: o estado real mora em
+   `tenant_lead_config`, por tenant. *"O código diz o padrão, o banco diz a verdade."*
+3. **Validade** — *quando isso foi verificado?* Tratei `c8e87ae` como produção porque o
+   verifiquei às 18h32 de 22/09; às 00h03 de 23/09 o deploy da frente de WhatsApp moveu para
+   `01590d1` e eu segui dimensionando em cima do estado velho. **Fato verificado carrega a hora
+   em que foi verificado; baseline de produção se re-mede na hora de usar, nunca se herda da
+   conversa.** É a mais difícil das quatro: granularidade e procedência se conferem olhando a
+   consulta; validade só se percebe re-medindo.
+4. **Moldura** — *este número é do conjunto sobre o qual estou argumentando?* Os números do
+   motor de resgate (940 resgates, 13 leads, 3 matrículas) são do universo de 165 pessoas, e
+   foram apresentados dentro de uma seção que argumentava sobre os **5** contatos internos,
+   com a frase "três matrículas que o descarte cego teria comido". Números certos, título
+   errado em cima deles — e a inferência chegou ao Leo antes da correção. (Registrada pela
+   sessão de WhatsApp.) **Declarar unidade e procedência não basta se a moldura falar de outro
+   conjunto.**
+
+*No meu caso da validade o custo foi só dimensionamento — achei que faltava publicar 12
+commits quando faltavam 4. Na ordem inversa (publicar achando que sobe pouco e subir muito)
+teria sido incidente.*
