@@ -333,10 +333,29 @@ test('(r9) LOTE × ESTOQUE: quem não veio no fetch some do lote mas CONTINUA no
     tenantId: B, snapshot: { leads: [], windowStart: '2099-01-01' }, mode: 'auto' }));
   assert.equal(st2.pendencia_no_lote, 0, 'não veio no fetch → fora do lote');
   assert.equal(st2.pendencia_estoque, 1, 'MAS continua aguardando decisão — estoque não depende do fetch');
-  // ENVELHECIMENTO ≠ FETCH INCOMPLETO: a linha dela está fora da janela, então a ausência está
-  // EXPLICADA (estoque − fora = lote). Sem isso o detector acusaria falha de busca para sempre.
+  // ENVELHECIMENTO ≠ FETCH INCOMPLETO. fora_da_janela mede COBERTURA (quantos o fetch não alcança
+  // mais); o detector de fetch incompleto é o soft_deleted, que NÃO dispara aqui justamente porque
+  // a linha dela está fora da janela.
   assert.equal(st2.pendencia_fora_da_janela, 1, 'ausência explicada por envelhecimento');
-  assert.equal(st2.pendencia_estoque - st2.pendencia_fora_da_janela, st2.pendencia_no_lote,
-    'a conta fecha: nada de fetch incompleto');
+  assert.equal(st2.soft_deleted, 0, 'fora da janela não é "sumiu da fonte"');
   assert.equal((await lead(B, nl)).status, 'NOT_LEAD', 'e nada foi tocado');
+});
+
+test('(r10) MIRROR-ONLY no estoque e fora do lote é LEGÍTIMO, não fetch incompleto (caso Taize)', async () => {
+  // A Taize tem exp_agendada_em (entra no estoque pela régua larga do card) e situação
+  // 'Exp. Cancelada', que o mapa manda para mirror-only — então NUNCA chega ao
+  // ressuscitarDescartado. A divergência estoque×lote é permanente e correta: foi a 2ª tentativa
+  // de "fechar a conta" virando alarme que não desliga (23/09).
+  const nl = await mkLead(B, { phone: '+5519777770002', status: 'NOT_LEAD' });
+  // 1º ciclo: Exp. Agendada carimba exp_agendada_em e conta no lote
+  const st1 = await sync(B, [row('T1', { foneRaw: '(19)77777-0002', situacao: 'Exp. Agendada' })]);
+  assert.equal(st1.ressuscitados, 1, 'sem confirmação nem interno → devolve');
+  // agora a aula é CANCELADA: lead volta a NOT_LEAD pela recepção e a situação vira mirror-only
+  await withTenant(B, (c) => c.query(
+    "UPDATE lead_manager.leads SET status='NOT_LEAD', review_result='confirmed_not_lead', review_by='SERVICE' WHERE id=$1", [nl]));
+  const st2 = await sync(B, [row('T1', { foneRaw: '(19)77777-0002', situacao: 'Exp. Cancelada' })]);
+  assert.equal(st2.ressuscitados, 0, 'cancelada não ressuscita');
+  assert.equal(st2.pendencia_no_lote, 0, 'mirror-only nem chega à régua → fora do lote');
+  assert.ok(st2.pendencia_estoque >= 1, 'mas o carimbo mantém no estoque (régua do card)');
+  assert.equal(st2.soft_deleted, 0, 'e nada disso é fetch incompleto');
 });

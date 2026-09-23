@@ -605,6 +605,20 @@ zera e ensina a ignorar o painel. Entrou `pendencia_fora_da_janela` (quem não t
 de espelho dentro da janela, incluindo quem só tem fato de agenda/migr 129) e a conta ficou
 honesta: `estoque − fora_da_janela ≈ lote` → tudo explicado; `>` → aí sim fetch incompleto.
 
+**Segunda emenda (23/09) — parar de fechar conta entre réguas diferentes.** O ciclo pós-deploy deu
+`estoque 9 − fora 2 = 7` contra `lote 6`: a sobra é a **Taize** (`Exp. Cancelada`), que tem
+`exp_agendada_em` (entra no estoque pela régua LARGA do card) e nunca chega ao
+`ressuscitarDescartado` (mirror-only: cancelar ≠ avançar). Foi a **segunda** vez no mesmo dia que a
+identidade `estoque − fora = lote` produziu alarme permanente — antes por envelhecimento, agora por
+predicado. Diagnóstico: os dois números medem coisas diferentes **por desenho** (estoque = universo
+do card; lote = o que a regra processa), e cada guarda nova (dispensa, confirmação, interno,
+mirror-only) é uma fonte legítima de divergência. Fechar a conta exigiria replicar todas as guardas
+no contador — duplicação de régua que quebraria na guarda seguinte. **Decisão: a identidade foi
+abandonada.** `pendencia_fora_da_janela` fica como medida de **cobertura**, e o detector de fetch
+incompleto volta a ser o que já existia e é direto: **`soft_deleted`** (linha DENTRO da janela que
+não veio no snapshot é marcada ausente pelo próprio `upsertEspelho`). Caso `r10` no itest congela
+o cenário da Taize como comportamento correto.
+
 **Pendência de DESENHO (não é para hoje, é do Leo):** a janela de 90 dias ancora no
 `data_cadastro`, não no FATO. A Vanessa cadastrou-se em 22/06 e tem **aula de 27/08** — fato de
 menos de um mês — e mesmo assim saiu do radar do sync de leads. O prejuízo é limitado por

@@ -296,15 +296,25 @@ async function syncExtranetLeads(c, { tenantId, snapshot, mode }) {
   // Plantão mostra e que um humano quer ver. Mesma régua do card: temFatoExtranetSql — não
   // reescrever o predicado. Degrada elegante (null) onde aula_experimental não existe.
   //
-  // FORA DA JANELA separa ENVELHECIMENTO de FETCH INCOMPLETO. Sem essa distinção o detector viraria
-  // alarme que não desliga: a Vanessa (cadastro 22/06, janela começa 24/06 — fora por DOIS DIAS)
-  // acusaria "fetch incompleto" em todo ciclo, para sempre. Ela não é falha de busca; é lead que o
-  // fetch de leads não alcança mais. A conta que vale:
-  //     estoque − fora_da_janela ≈ lote      → tudo explicado
-  //     estoque − fora_da_janela  >  lote    → aí sim, fetch incompleto naquele ciclo
-  // "Fora do alcance" = nenhuma linha de espelho dentro da janela (inclui quem só tem fato de
-  // agenda, migr 129, que nunca vem por este fetch). Sem windowStart (itest sintético, snapshot
-  // completo) nada está fora do alcance.
+  // ⚠ OS DOIS NÚMEROS NÃO FECHAM CONTA, E ISSO É POR DESENHO (correção de 23/09). A primeira versão
+  // deste bloco prometia `estoque − fora_da_janela = lote` e tratava a sobra como "fetch
+  // incompleto". Errado: o ESTOQUE usa a régua LARGA do card (qualquer fato) e o LOTE conta só o
+  // que a REGRA processa (situação que mapeia para etapa ≥ experimental). Divergências LEGÍTIMAS,
+  // todas permanentes enquanto durarem:
+  //   • mirror-only — Taize, 'Exp. Cancelada': tem exp_agendada_em (entra no estoque) e nunca chega
+  //     ao ressuscitarDescartado (cancelar ≠ avançar);
+  //   • fora da janela — Vanessa, cadastro 22/06 com a janela começando em 24/06;
+  //   • quem só tem fato de AGENDA (migr 129), que nunca vem por este fetch;
+  //   • dispensados no Monitor, confirmados, internos — cada guarda é uma fonte de divergência.
+  // Fechar a conta exigiria replicar TODAS as guardas aqui: duplicação de régua que quebraria na
+  // próxima guarda nova. Duas vezes seguidas a tentativa produziu ALARME QUE NÃO DESLIGA (Vanessa,
+  // depois Taize) — o defeito que ensina a ignorar o painel.
+  //
+  // DETECTOR DE FETCH INCOMPLETO é outro, e já existia: `soft_deleted`. Linha DENTRO da janela que
+  // não veio no snapshot é marcada ausente pelo upsertEspelho — é exatamente "a Extranet não me
+  // devolveu o que devia". Fetch instável aparece como soft_deleted > 0 seguido de reaparecimento
+  // no ciclo seguinte. `fora_da_janela` fica como medida de COBERTURA (quantos do estoque este
+  // fetch não alcança mais), não como termo de conta.
   try {
     const q = (await c.query(
       `SELECT count(*)::int total,
