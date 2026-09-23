@@ -721,7 +721,17 @@ justamente por isso que a decisão se sustenta. Os ~22 professores vivem em `con
 como papel **prestador** (mesma população que o `fc66145` tirou do `internal_contacts` em junho)
 e **já passam pelo resgate**, com a pergunta do papel. **O Allan é a exceção**: está nas DUAS
 listas, e a interna vence porque retorna antes. Ou seja, o que sobra não é defeito de mecanismo —
-é uma inconsistência de cadastro de UMA pessoa, e o Leo decidiu mantê-la assim.
+é uma inconsistência de cadastro de DUAS pessoas, e o Leo decidiu mantê-la assim.
+
+> **Correção (mesma data):** escrevi "UMA pessoa" e estava errado — são **duas**. Além do Allan
+> (`professor` na interna, `prestador` no motor), o **Leo Vecchi** também está nas duas:
+> `gestor` em `internal_contacts`, e `prestador` **+ `beneficiario`** em `contact_role_member`.
+> O caso dele é até mais forte, porque `beneficiario` é quem consome o serviço — o cadastro já
+> registra que ele faz aula, exatamente o exemplo que ele deu. Não reabre a decisão (tomada com
+> o mecanismo à vista), mas o número no registro tinha que ser o certo.
+> Detalhe técnico que vale como lição repetida: as duas linhas dele têm o telefone em formatos
+> diferentes (uma com hífen, outra só dígitos) — **casamento exato acharia uma só**; por dígitos
+> (`br_phone_key`/`matchKeys`) acha as duas. É a mesma armadilha do 38×28.
 
 **Se alguém reabrir isto no futuro**, a pergunta não é "qual mecanismo?" (respondida igual três
 vezes), é: *o ganho de velocidade de descoberta justifica tocar na ingestão?* Em 23/09 a resposta
@@ -753,7 +763,7 @@ antes), não defeito de mecanismo.
 
 ---
 
-## ABERTO — oportunidade por curso (1 contato → N oportunidades)
+## Oportunidade por curso — DECIDIDO: lista de trabalho, sem virar card (Leo, 23/09/2026)
 
 Levantado pelo Leo em 23/09 ao perguntar se a regra de devolver descartado considera o CURSO:
 *"temos alunos que fazem mais de um curso"*. **Não considera.** O LM trabalha por PESSOA
@@ -773,7 +783,28 @@ escola.
 pessoa (`uq_origem_lead_contato`, `uq_origem_lead_lead`) — "uma origem por pessoa, para sempre"
 está no ESQUEMA, não só no código, e a migração **não seria aditiva**.
 
-**Nenhuma decisão tomada.** Fica aqui para quando o volume justificar.
+**DECISÃO (23/09):** caminho CURTO — uma **lista de trabalho** para a recepção vender, e
+explicitamente **NÃO** um card no funil nem entrada na taxa de conversão. O modelo
+pessoa×oportunidade fica fora de escopo; o índice único de telefone (migr 004) e os da
+`origem_lead` **não são tocados**.
+
+**Implementação (`src/cadastro/expansaoCurso.js`):** consulta **DERIVADA, sem estado** — não há
+tabela nova, nada para sincronizar e nada para limpar. Régua: é ALUNO (desfecho
+matriculado/cliente OU ficha `Ganhou`) **e** tem ficha ATIVA (situação que mapeia para etapa de
+trabalho; mirror-only fica de fora) **e** o curso difere — ficha sem curso informado ENTRA (melhor
+a recepção olhar e descartar do que perder a venda). As listas de situação saem do `SITUACAO_MAP`,
+não são reescritas à mão.
+
+Superfícies: `GET /tenant/:id/oportunidades/expansao` (para o dashboard montar a tela) e um card
+no Plantão — **sempre 'cinza'**, que por desenho não escala o pior: aviso de venda não pode fazer
+o painel dizer que o sistema está doente. Zero casos → o card não aparece.
+
+**Por que sem estado:** é a lição das três armadilhas de 22-23/09 — número derivado de estado
+paralelo diverge. Aqui, quando a venda fecha (a ficha vira `Ganhou`) ou a pessoa desiste, o caso
+sai da lista sozinho. Teste `x3` congela isso.
+
+**O que continua ABERTO:** o modelo completo (1 contato → N oportunidades da spec de jun/2026),
+para quando o volume justificar. Aí sim mexe em índice único e exige a frente de atribuição.
 
 ### As quatro formas de um número certo dizer coisa errada (23/09/2026)
 Fechando o fim de semana, o padrão dos erros de medição ficou com **quatro** formas, não duas.

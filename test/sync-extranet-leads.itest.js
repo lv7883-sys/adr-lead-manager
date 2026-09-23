@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
 const { pool, withTenant } = require('../src/db');
 const { syncExtranetLeads } = require('../src/cadastro/sync-extranet-leads');
 const { mapSituacao, normSituacao, sustainedStageKey } = require('../src/cadastro/extranetLeadStage');
+const { listarExpansoes } = require('../src/cadastro/expansaoCurso');
 
 const A = process.env.RESOURCES_TENANT_A;
 const B = process.env.RESOURCES_TENANT_B;
@@ -358,4 +359,58 @@ test('(r10) MIRROR-ONLY no estoque e fora do lote é LEGÍTIMO, não fetch incom
   assert.equal(st2.pendencia_no_lote, 0, 'mirror-only nem chega à régua → fora do lote');
   assert.ok(st2.pendencia_estoque >= 1, 'mas o carimbo mantém no estoque (régua do card)');
   assert.equal(st2.soft_deleted, 0, 'e nada disso é fetch incompleto');
+});
+
+// ---- LISTA DE SEGUNDO CURSO (decisão do Leo 23/09) --------------------------------------------
+// Aluno matriculado com ficha ATIVA de OUTRO curso aparece numa lista de trabalho. De propósito
+// NÃO vira card no funil: a régua não toca quem tem desfecho (o card segue "matriculado").
+
+test('(x1) ALUNO com ficha ativa de OUTRO curso entra na lista (caso Juliana Revelk)', async () => {
+  const aluno = await mkLead(B, { phone: '+5519666660001', status: 'CONVERTED', desfecho: 'matriculado', desfecho_em: new Date() });
+  const st = await sync(B, [
+    row('C1', { foneRaw: '(19)66666-0001', situacao: 'Ganhou', curso: 'Musicalização Individual' }),
+    row('C2', { foneRaw: '(19)66666-0001', situacao: 'Conexão', curso: 'Musicalização em Grupo' }),
+  ]);
+  assert.equal(st.movidos, 0, 'desfecho é intocável — o card NÃO volta ao funil');
+  const itens = await withTenant(B, (c) => listarExpansoes(c, { tenantId: B }));
+  const meu = itens.filter((i) => i.lead_id === aluno);
+  assert.equal(meu.length, 1, 'uma linha de trabalho');
+  assert.equal(meu[0].curso_novo, 'Musicalização em Grupo');
+  assert.ok((meu[0].cursos_atuais || []).includes('Musicalização Individual'), 'mostra o que ela já faz');
+  assert.equal((await lead(B, aluno)).desfecho, 'matriculado', 'segue matriculada — não entra na taxa de conversão');
+});
+
+test('(x2) NÃO entra: mesmo curso, quem não é aluno, e ficha mirror-only', async () => {
+  const mesmo = await mkLead(B, { phone: '+5519666660002', status: 'CONVERTED', desfecho: 'matriculado', desfecho_em: new Date() });
+  const naoAluno = await mkLead(B, { phone: '+5519666660003', status: 'NEW' });
+  const cancelou = await mkLead(B, { phone: '+5519666660004', status: 'CONVERTED', desfecho: 'matriculado', desfecho_em: new Date() });
+  await sync(B, [
+    row('D1', { foneRaw: '(19)66666-0002', situacao: 'Ganhou', curso: 'Piano' }),
+    row('D2', { foneRaw: '(19)66666-0002', situacao: 'Exp. Agendada', curso: 'Piano' }),   // MESMO curso
+    row('D3', { foneRaw: '(19)66666-0003', situacao: 'Exp. Agendada', curso: 'Bateria' }), // não é aluno
+    row('D4', { foneRaw: '(19)66666-0004', situacao: 'Ganhou', curso: 'Violino' }),
+    row('D5', { foneRaw: '(19)66666-0004', situacao: 'Exp. Cancelada', curso: 'Canto' }),  // mirror-only
+  ]);
+  const itens = await withTenant(B, (c) => listarExpansoes(c, { tenantId: B }));
+  const ids = itens.map((i) => i.lead_id);
+  assert.ok(!ids.includes(mesmo), 'mesmo curso não é oportunidade nova');
+  assert.ok(!ids.includes(naoAluno), 'quem não é aluno já aparece no funil normal');
+  assert.ok(!ids.includes(cancelou), 'aula cancelada não é interesse ativo');
+});
+
+test('(x3) SAI DA LISTA sozinho quando a venda fecha (lista derivada, sem estado)', async () => {
+  const aluno = await mkLead(B, { phone: '+5519666660005', status: 'CONVERTED', desfecho: 'matriculado', desfecho_em: new Date() });
+  await sync(B, [
+    row('E1', { foneRaw: '(19)66666-0005', situacao: 'Ganhou', curso: 'Guitarra' }),
+    row('E2', { foneRaw: '(19)66666-0005', situacao: 'Exp. Agendada', curso: 'Baixo' }),
+  ]);
+  const antes = await withTenant(B, (c) => listarExpansoes(c, { tenantId: B }));
+  assert.equal(antes.filter((i) => i.lead_id === aluno).length, 1);
+  // a recepção vendeu: a ficha de Baixo vira Ganhou na Extranet
+  await sync(B, [
+    row('E1', { foneRaw: '(19)66666-0005', situacao: 'Ganhou', curso: 'Guitarra' }),
+    row('E2', { foneRaw: '(19)66666-0005', situacao: 'Ganhou', curso: 'Baixo' }),
+  ]);
+  const depois = await withTenant(B, (c) => listarExpansoes(c, { tenantId: B }));
+  assert.equal(depois.filter((i) => i.lead_id === aluno).length, 0, 'saiu sozinha — nada a limpar');
 });

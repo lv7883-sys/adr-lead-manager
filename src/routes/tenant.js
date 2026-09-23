@@ -15,6 +15,7 @@ const { isUuid } = require('../validation');
 const { fromLegacy, canonicaliza, validaHorarioJson, normaliza, minToHm } = require('../horario'); // H1: horário por-dia
 const logger = require('../logger');
 const { resumoPlantao } = require('../plantao');   // ADR-040: plantão (resumo de saúde)
+const expansaoCurso = require('../cadastro/expansaoCurso');   // 23/09: aluno querendo 2º curso
 const { retomadaCtes, identLateral } = require('../reativacao');   // #8 Fatia B: fonte única da retomada (forma em janela)
 const evolution = require('../evolution');   // E4: envio direto via Evolution
 const meta = require('../meta');              // E6: envio outbound via Messenger/IG
@@ -155,6 +156,20 @@ router.get(
 
 // GET /tenant/:tid/leads/kanban?period=30d|90d — ADR-010: leads agrupados por coluna
 // do ciclo de vida (novo/qualificando/qualificado/convertido/perdido). READ-ONLY.
+// OPORTUNIDADES DE SEGUNDO CURSO (decisão do Leo, 23/09/2026) — aluno que já matriculou e tem
+// ficha ATIVA de outro curso na Extranet. Lista de TRABALHO para a recepção vender: de propósito
+// NÃO é card do kanban e NÃO entra na taxa de conversão (o modelo pessoa×oportunidade ficou fora
+// de escopo). Consulta DERIVADA, sem estado: fechou a venda ou desistiu, sai sozinho da lista.
+router.get('/:tenantId/oportunidades/expansao', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const itens = await withTenant(req.tenantId, (c) => expansaoCurso.listarExpansoes(c, { tenantId: req.tenantId }));
+    res.json({ total: itens.length, itens });
+  } catch (err) {
+    logger.error('tenant.expansao.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao listar oportunidades de segundo curso' });
+  }
+});
+
 router.get('/:tenantId/leads/kanban', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   const period = ['30d', '90d'].includes(String(req.query.period)) ? String(req.query.period) : '30d';
   try {

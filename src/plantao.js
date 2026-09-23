@@ -9,6 +9,7 @@
 const { withTenant } = require('./db');
 const { retomadaCtes, identLateral } = require('./reativacao');   // #8 Fatia B: fonte única da retomada (forma em janela)
 const { temFatoExtranetSql } = require('./stages');               // prova externa de que o descartado ERA lead
+const { contarExpansoes } = require('./cadastro/expansaoCurso');   // 23/09: aluno querendo 2º curso
 
 // ------------------------------------------------------------------------------------------------
 // VOCABULÁRIO DE ESTADO (auditoria de indicadores 2026-08-26). O card existe pra dizer se o sistema
@@ -235,6 +236,15 @@ async function resumoPlantao(tenantId) {
     else if (ok) push({ key: 'scrape', label: 'Scrape', status: 'verde', numeros: 'sem falha (48h)', detalhe: 'último run OK', link: null });
     else push({ key: 'scrape', label: 'Scrape', status: 'cinza', numeros: 'sem coleta (48h)',
       detalhe: 'nenhum run, nem OK nem falha — silêncio não é saúde', link: null });
+
+    // ---- SEGUNDO CURSO (23/09) — aluno matriculado com ficha ATIVA de outro curso na Extranet.
+    // É OPORTUNIDADE, não falha: status sempre 'cinza' (neutro), que por desenho NÃO escala o
+    // pior do plantão — um aviso de venda não pode fazer o painel dizer que o sistema está doente.
+    // Zero → não mostra o card (nada a trabalhar não é notícia).
+    const exp = await _safe(() => contarExpansoes(c, { tenantId }), null);
+    if (exp) push({ key: 'expansao', label: 'Segundo curso', status: 'cinza',
+      numeros: `${exp} aluno(s) querendo outro curso`,
+      detalhe: 'já matriculado com ficha ativa de curso diferente', link: '/leads' });
 
     // 'cinza' (neutro) NÃO escala o pior — "não rodou" não é alerta.
     const ordem = { cinza: 0, verde: 0, amarelo: 1, vermelho: 2 };
