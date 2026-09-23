@@ -36,10 +36,17 @@ const ATIVAS = _norm.filter(([, v]) => v && v !== 'convertido').map(([k]) => k);
 const MATRICULA = _norm.filter(([, v]) => v === 'convertido').map(([k]) => k);
 
 // Normalização da situação em SQL, espelhando extranetLeadStage.normSituacao (minúscula, sem
-// acento, sem pontuação, espaços colapsados). unaccent não é garantido no banco → translate.
+// acento, sem pontuação, espaços COLAPSADOS). unaccent não é garantido no banco → translate.
+//
+// ⚠ O ESPAÇO FICA FORA da classe negada, de propósito. A 1ª versão usava '[^a-z0-9 ]+' (espaço
+// DENTRO da classe permitida) e o ponto de "Exp. Agendada" virava um espaço que SOMAVA com o que
+// já existia → 'exp  agendada', que não casa com o 'exp agendada' do JS. Efeito em produção:
+// NENHUMA situação com pontuação entrava na lista — justamente as mais quentes (Exp. Agendada,
+// Exp. Realizada). Com '[^a-z0-9]+', a sequência ". " inteira vira UM espaço só. O caso x3 do
+// itest pegou isto antes de publicar; x1/x2 passavam porque usam situações sem pontuação.
 const _sitNorm = (col) => `btrim(regexp_replace(
   lower(translate(${col}, 'áàâãäéèêëíìîïóòôõöúùûüçÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ', 'aaaaaeeeeiiiiooooouuuucAAAAAEEEEIIIIOOOOOUUUUC')),
-  '[^a-z0-9 ]+', ' ', 'g'), ' ')`;
+  '[^a-z0-9]+', ' ', 'g'), ' ')`;
 
 // Lista as oportunidades de expansão do tenant. Uma linha por (lead × ficha ativa) — a mesma
 // pessoa pode querer DOIS cursos novos, e cada um é uma linha de trabalho.
@@ -80,4 +87,6 @@ async function contarExpansoes(c, { tenantId } = {}) {
   } catch { return null; }
 }
 
-module.exports = { listarExpansoes, contarExpansoes, ATIVAS, MATRICULA };
+// _sitNorm é exportado SÓ para o itest provar SQL ≡ JS (mesmo padrão do stages.stageSql). Não
+// usar fora daqui: quem precisa normalizar situação em JS chama extranetLeadStage.normSituacao.
+module.exports = { listarExpansoes, contarExpansoes, ATIVAS, MATRICULA, _sitNorm };

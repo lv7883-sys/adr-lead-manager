@@ -10,7 +10,7 @@ const assert = require('node:assert/strict');
 const { pool, withTenant } = require('../src/db');
 const { syncExtranetLeads } = require('../src/cadastro/sync-extranet-leads');
 const { mapSituacao, normSituacao, sustainedStageKey } = require('../src/cadastro/extranetLeadStage');
-const { listarExpansoes } = require('../src/cadastro/expansaoCurso');
+const { listarExpansoes, _sitNorm } = require('../src/cadastro/expansaoCurso');
 
 const A = process.env.RESOURCES_TENANT_A;
 const B = process.env.RESOURCES_TENANT_B;
@@ -413,4 +413,18 @@ test('(x3) SAI DA LISTA sozinho quando a venda fecha (lista derivada, sem estado
   ]);
   const depois = await withTenant(B, (c) => listarExpansoes(c, { tenantId: B }));
   assert.equal(depois.filter((i) => i.lead_id === aluno).length, 0, 'saiu sozinha — nada a limpar');
+});
+
+test('(x4) SQL ≡ JS na normalização da situação (regressão do bug do ponto)', async () => {
+  // O x3 pegou em produção-de-teste o que este caso pega direto: a versão SQL gerava
+  // 'exp  agendada' (dois espaços) para "Exp. Agendada" e NENHUMA situação com pontuação casava —
+  // as mais quentes, justamente. Aqui as DUAS réguas julgam as situações REAIS do <select> da
+  // Extranet (probe 2026-08-11) e têm de concordar, sempre.
+  const REAIS = ['Pendente', 'Conexão', 'Atendido', 'Exp. Agendada', 'Exp. Realizada',
+    'Exp. Cancelada - Reagendar', 'Ganhou', 'Perdeu', 'Sem Retorno', 'Stand By', 'Desqualificado'];
+  for (const s of REAIS) {
+    const noBanco = await withTenant(B, async (c) => (await c.query(
+      `SELECT ${_sitNorm('$1::text')} AS v`, [s])).rows[0].v);
+    assert.equal(noBanco, normSituacao(s), `divergiu em "${s}"`);
+  }
 });
