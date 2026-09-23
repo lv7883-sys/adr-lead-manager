@@ -1586,6 +1586,7 @@ router.post('/:tenantId/inbox/conversations/:conversationId/audio', authenticate
 // generateDraftForLead, mas SEM criar pending_approval — só devolve o texto p/ preencher o campo).
 async function suggestReply(tenantId, conversationId, contexto = 'lead', deps = {}) {
   const generate = deps.generate || gemini.generateReply;
+  const pedidaPor = deps.pedidaPor || null;   // nome do usuário logado (by_name), quando o dashboard manda
   const info = await withTenant(tenantId, async (c) => {
     const cv = (await c.query(
       `SELECT id, regexp_replace(external_id, '[^0-9]', '', 'g') AS ident
@@ -1621,6 +1622,18 @@ async function suggestReply(tenantId, conversationId, contexto = 'lead', deps = 
     // vira o nome configurado da unidade (ou sai, se não houver nome configurado).
     const { texto: limpa, trocas } = sanitizarIdentidade(suggestion, { nomeIa: info.nomeIa || '' });
     if (trocas.length) logger.warn('sugestao.identidade_corrigida', { tenant_id: tenantId, trocas });
+    // APRENDIZADO (migr. 176): registra o que a IA propôs. Até 22/09/2026 este caminho — o que a
+    // recepção de fato usa — não guardava NADA: gerava o texto, mostrava na tela e acabava. Sem
+    // isso não existe evidência para decidir se a resposta automática pode ser ligada um dia.
+    // Best-effort de propósito: se a gravação falhar, a recepcionista recebe a sugestão do mesmo
+    // jeito. Aprender importa; atrapalhar o atendimento para aprender, não.
+    try {
+      await withTenant(tenantId, (c) => c.query(
+        `INSERT INTO sugestao_ia (tenant_id, conversation_id, lead_id, origem, contexto, texto, modelo, pedida_por)
+         VALUES ($1, $2, $3, 'inbox', $4, $5, $6, $7)`,
+        [tenantId, info.convId, info.leadId || null, contexto || 'geral', limpa,
+          process.env.GEMINI_MODEL || null, pedidaPor]));
+    } catch (e) { logger.warn('sugestao.nao_registrada', { tenant_id: tenantId, error: e.message }); }
     return { ok: true, suggestion: limpa };
   } catch (e) {
     return { reason: 'generate_error', detail: e.message };
@@ -1632,7 +1645,10 @@ router.post('/:tenantId/inbox/conversations/:conversationId/sugerir', authentica
     // contexto: 'lead' | 'renovacao' habilitam o modo-venda; qualquer outro (não-lead) → tom normal.
     const cbody = req.body && req.body.contexto;
     const contexto = (cbody === 'renovacao' || cbody === 'lead') ? cbody : '';
-    const out = await suggestReply(req.tenantId, req.params.conversationId, contexto);
+    // by_name: o dashboard manda o nome de quem clicou (mesma convenção das rotas de autoria).
+    // Serve para saber DE QUEM a IA está aprendendo — recepcionistas diferentes escrevem diferente.
+    const byName = req.body && typeof req.body.by_name === 'string' ? req.body.by_name.trim().slice(0, 120) : '';
+    const out = await suggestReply(req.tenantId, req.params.conversationId, contexto, { pedidaPor: byName || null });
     if (out.notFound) return res.status(404).json({ error: 'conversation_not_found' });
     if (out.reason) return res.status(502).json({ error: out.reason, detail: out.detail });
     res.json(out);
