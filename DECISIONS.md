@@ -901,3 +901,50 @@ trava fazendo o trabalho dela?**
 
 O que continua legítimo entre sessões, e foi usado o dia todo: **rodar teste a pedido** (é
 portão, não deploy) e **publicar lote misto com o go do dono** do código que vai junto.
+
+---
+
+## contract_convert fica DESLIGADO — decisão de 18/09 confirmada e agora registrada (23/09/2026)
+
+**Por que este registro existe:** o Leo mandou ligar o mecanismo e, no mesmo pedido, disse *"mas
+pergunte às outras sessões por que ele não foi ligado, deve haver um motivo"*. Havia. A decisão
+era de **18/09** e estava **só na memória de sessão**, não no repositório — por isso a busca no
+repo não achou nada e eu quase propus ligar. **É a falha de registro que este arquivo existe para
+evitar**, e vale mais que a decisão em si.
+
+**A decisão de 18/09 (auditoria do funil), palavra por palavra:**
+> *"`contract_convert_mode='off'` em Valinhos **e deve continuar**: casar por telefone marca como
+> 'cliente' a MÃE de aluno que fez aula ela mesma (Cristiane, Vanessa Faria, Luciana) — são leads
+> legítimos."*
+
+**A medição de 23/09 confirma, nominalmente.** Dos 11 cards presos em etapa de trabalho cuja
+pessoa tem contrato vigente, **em 6 o titular do contrato é outra pessoa — o filho**: Cristiane →
+Bernardo, IG → Nina, Rejane → Catarina, Viviane → Gabriel e Giovanna, Vanessa → Benício. São
+**pais e mães que agendaram aula PARA SI** enquanto o filho estuda. O card está aberto porque
+**deve** estar. A assinatura no dado é o **gap NEGATIVO** (matrícula anterior ao marco do lead):
+Vanessa −186d, Cristiane −119d.
+
+**Três riscos medidos hoje, qualquer um suficiente para não ligar:**
+1. **Apaga lead legítimo** — fechar os 11 como matriculado/cliente tiraria do funil 6+ pais que
+   são oportunidade real, e creditaria a matrícula DO FILHO à conversão da mãe.
+2. **O funil muda RETROATIVAMENTE** — o BI exclui `desfecho='cliente'`, então os 63 sairiam dos
+   meses em que nasceram: **46 de junho, 13 de julho, 2 de agosto**; e até 49 entrariam como
+   matrícula. Meses já publicados mudariam **depois de apresentados** — e a apresentação à
+   franqueadora está próxima. (Precedente conhecido: o caso Caue, junho caindo de 11 para 10.)
+3. **Não há teto de gap** — `Gabriela Giordano 386d`, `Rejane 322d`, `Fê 261d`. A
+   `janela_dias=7` separa renovação de matrícula nova, mas **não limita para cima**: fechar card
+   cuja 1ª mensagem foi mais de um ano antes da matrícula é atribuição, não fato.
+
+**NÃO há dupla contagem** com a `aula_experimental` (migr 129) — medido: o funil conta por lead,
+união de fato com proxy, e dos 53 "converte" 4 já têm `Ganhou`. E a 129 **não** torna o mecanismo
+redundante: ela traz a AULA, ele traz o CONTRATO — há matrícula sem aula e aula sem matrícula.
+
+**Dívida conhecida, se algum dia for ligado:** `contractConvert.eligibleLeads` **não tem guarda de
+`internal_contacts`** — ligar hoje marcaria **Késsia como convertida e Daniele como cliente**
+(mesma família do caso Allan). E o caminho seria `suggestion` antes de `auto`, com backfill
+restrito a quem está em etapa de trabalho, gap positivo e abaixo de um teto — nunca `auto` com
+backfill completo, que faria os 104 sozinho.
+
+**O que sobra dos 11, e não é técnico:** são 11 pais e mães que marcaram aula e estão parados
+desde junho/julho. Isso é oportunidade comercial esfriando — trabalho de recepção, não conserto
+de sistema.
