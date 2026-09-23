@@ -688,3 +688,41 @@ do dashboard quando ela for ligar.
    80, e valores RESERVADOS ('SERVICE', 'ia_auto', 'extranet_auto', 'migracao-*', caso-
    insensível, match do valor inteiro) caem no papel do token — um payload malformado do
    dashboard não fabrica "humano" nem "máquina" falsos.
+
+---
+
+## Contato interno × lead: a "carona" do ADR-036 NÃO será feita (decisão do Leo, 23/09/2026)
+
+**A pergunta:** por que contato interno é descartado na entrada, sem a IA avaliar se aquela
+conversa é uma oportunidade? O Leo levantou lembrando do desenho certo — e o desenho existe,
+duas vezes: `c2c518c` (12/06, `known_contacts` + `knownContactType`, morto por lista vazia e
+depois REMOVIDO do código) e o **ADR-036** (07/07), cuja tese é literalmente *"o papel do
+contato escolhe qual pergunta o classificador faz ao conteúdo"* e cujo "próximo passo" previa
+que `internal_contacts` **pegaria carona** no E1.3a. O E1.3a foi feito; a carona nunca saiu.
+
+**Medições que fecharam a decisão (23/09, produção, Valinhos):**
+- O motor do ADR-036 está **vivo e ligado** (`gate_suppression_mode='on'`, `rescue_conv_mode='on'`):
+  592 pessoas com papel; em 90 dias, 940 mensagens resgatadas de 108 pessoas → 13 viraram lead
+  e **3 viraram matrícula**. ⚠ Esses 3 são do universo GERAL, **não** dos contatos internos.
+- `internal_contacts` tem **5 pessoas**. Delas, 3 têm fato na Extranet (Leo, Daniele, Allan).
+- **Leads perdidos por causa do descarte de contato interno: ZERO medidos.** Os dois casos
+  conhecidos (aula de canto do Leo; aula do filho do Allan) foram capturados pela Extranet.
+- Custo da mudança seria irrisório (R$ 3,78/mês) e o impacto em latência, nulo — o `autoReply`
+  da Janis é caminho separado e **já responde** a contato interno hoje; a porta decide apenas
+  se um LEAD é criado.
+
+**Decisão: NÃO fazer.** O ganho real seria apenas *velocidade de descoberta* (ver o interesse na
+mensagem em vez de esperar o cadastro na Extranet), em troca de mexer no caminho por onde passa
+toda mensagem, para beneficiar 5 pessoas em casos que já estão sendo capturados. O conserto de
+22/09 (interno-com-fato aparece no card) já cobre o cenário sem tocar na ingestão.
+
+**Nota do Leo que completa o quadro:** *"temos vários professores, não é só o Allan"* — e é
+justamente por isso que a decisão se sustenta. Os ~22 professores vivem em `contact_role_member`
+como papel **prestador** (mesma população que o `fc66145` tirou do `internal_contacts` em junho)
+e **já passam pelo resgate**, com a pergunta do papel. **O Allan é a exceção**: está nas DUAS
+listas, e a interna vence porque retorna antes. Ou seja, o que sobra não é defeito de mecanismo —
+é uma inconsistência de cadastro de UMA pessoa, e o Leo decidiu mantê-la assim.
+
+**Se alguém reabrir isto no futuro**, a pergunta não é "qual mecanismo?" (respondida igual três
+vezes), é: *o ganho de velocidade de descoberta justifica tocar na ingestão?* Em 23/09 a resposta
+medida foi não.
