@@ -726,3 +726,27 @@ listas, e a interna vence porque retorna antes. Ou seja, o que sobra não é def
 **Se alguém reabrir isto no futuro**, a pergunta não é "qual mecanismo?" (respondida igual três
 vezes), é: *o ganho de velocidade de descoberta justifica tocar na ingestão?* Em 23/09 a resposta
 medida foi não.
+
+### Lição de medição — "o código diz o padrão, o banco diz a verdade" (23/09/2026)
+Afirmei que o ADR-036 estava desligado. **Estava ligado**: `gate_suppression_mode='on'` e
+`rescue_conv_mode='on'` em Valinhos. O erro foi ler o **fallback** de `_gateConfig`
+(`engine.js:93`, `off` quando o tenant não configurou) e o comentário do `engine.js:1280`
+("INERTE com mode='off'", que descreve o padrão) como se fossem o estado real. A configuração
+mora em `tenant_lead_config`, **por tenant** — e eu nunca abri a tabela. A sessão da Extranet
+cometeu o mesmo erro na mesma hora, pelo mesmo motivo.
+
+**Quarto caso em dois dias de leitura certa com significado errado**, somando aos três já
+registrados acima (`@lid` contado onde o sufixo já sumira; `review_by` lido sem saber que
+`SERVICE` é credencial; "38" que eram linhas e não leads). Padrão único em duas regras:
+
+1. **Granularidade:** toda contagem declara *a unidade contada* (linha? pessoa? evento?).
+   Pegou três vezes — o "38"→28→7, e os 592 (população) confundidos com 165 (tráfego de 90d).
+2. **Procedência:** flag em código é *default*; o estado real é por tenant, no banco. Comentário
+   que descreve o padrão não descreve a produção.
+
+*Fecho:* a decisão do Leo foi **não** fazer a carona do `internal_contacts` pelo ADR-036
+(registrado em `4b8021f` pela sessão da Extranet, com o motivo medido). Confirmada a suspeita
+de que os ~22 do papel `prestador` **são** os professores que o `fc66145` tirou do
+`internal_contacts` em junho — a tomada é a mesma para professor; o caso do Allan é
+inconsistência de cadastro de uma pessoa (está nas duas listas, e a interna vence por retornar
+antes), não defeito de mecanismo.
