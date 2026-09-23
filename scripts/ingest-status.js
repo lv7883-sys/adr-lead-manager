@@ -25,6 +25,7 @@
 const fs = require('node:fs');
 const { pool, withTenant } = require('../src/db');
 const ingestao = require('../src/marketing/ingestao');
+const licenca = require('../src/plataforma/licenca');
 
 function args() {
   const a = process.argv.slice(2);
@@ -110,12 +111,29 @@ function porSituacao(linhas) {
   return out;
 }
 
+/**
+ * A unidade contratou o módulo? É a PRIMEIRA chave, e a que o painel esquecia: sem ela a
+ * captura para no portão do contrato mesmo com grupo escolhido, e a tela dizia apenas
+ * "nenhum grupo" — mandando a pessoa configurar o que não ia resolver.
+ */
+async function contratacao(tenantId) {
+  try {
+    await licenca.garantirModulo(tenantId, ingestao.MODULO);
+    return { contratado: true, motivo: null };
+  } catch (e) {
+    return { contratado: false, motivo: e.motivo || e.message };
+  }
+}
+
 function humano(u, p, disco, dias) {
   const s = porSituacao(p.mes);
   const limite = p.cota[ingestao.COTA_CHAVE];
   const ativos = p.grupos.filter((g) => g.ativo);
 
   console.log(`\n── ${u.name}  (${u.id})`);
+  console.log(p.contrato.contratado
+    ? '   módulo MARKETING: contratado'
+    : `   módulo MARKETING: NÃO CONTRATADO (${p.contrato.motivo}) — a captura não roda, mesmo com grupo.`);
   if (!p.grupos.length) {
     console.log('   grupos-fonte: NENHUM — a ingestão está desligada para esta unidade.');
   } else {
@@ -137,9 +155,15 @@ function humano(u, p, disco, dias) {
       + (disco.faltando.length ? `  ⚠ FALTAM ${disco.faltando.length}` : ''));
     for (const f of disco.faltando.slice(0, 3)) console.log(`     falta: ${f}`);
   }
-  // O diagnóstico que a pessoa de plantão realmente quer:
-  if (ativos.length && !s.pendente_curadoria && !s.cota_excedida && !s.falhou) {
-    console.log('   ⚠ grupo configurado e nada entrou este mês — conferir se o número está no grupo.');
+  // O diagnóstico que a pessoa de plantão realmente quer — e as DUAS chaves separadas,
+  // porque são decisões de gente diferente (contratar é comercial; escolher o grupo é da
+  // recepção) e mandar configurar a errada é fazer alguém trabalhar à toa.
+  if (!p.contrato.contratado) {
+    console.log('   → para ligar: contratar o módulo MARKETING' + (ativos.length ? '' : ' E escolher o grupo na tela') + '.');
+  } else if (!ativos.length) {
+    console.log('   → para ligar: escolher o grupo na tela de configuração da unidade.');
+  } else if (!s.pendente_curadoria && !s.cota_excedida && !s.falhou) {
+    console.log('   ⚠ tudo ligado e nada entrou este mês — conferir se o número está no grupo.');
   }
 }
 
@@ -160,10 +184,12 @@ function humano(u, p, disco, dias) {
       else console.log(`\n── ${u.name}  (${u.id})\n   erro: ${msg}`);
       continue;
     }
+    p.contrato = await contratacao(tenantId);
     const disco = conferirDisco(p.amostra);
     if (o.json) {
       console.log(JSON.stringify({
-        tenant_id: u.id, nome: u.name,
+        tenant_id: u.id, nome: u.name, contrato: p.contrato,
+        capturando: p.contrato.contratado && p.grupos.some((g) => g.ativo),
         grupos: p.grupos, cota: p.cota, mes: porSituacao(p.mes),
         ultima: p.ultima, recusas: p.recusas, disco,
       }));

@@ -99,6 +99,9 @@ app.use('/tenant', tenantLimiter, require('./routes/inbox'));
 // ADR-050 — Boas-vindas: fila da recepção (aba da Caixa de Entrada) e configuração da unidade.
 app.use('/tenant', tenantLimiter, require('./routes/boas-vindas'));
 
+// ADR-053 — Captura de mídia do grupo: a unidade escolhe o SEU grupo pela tela.
+app.use('/tenant', tenantLimiter, require('./routes/marketing'));
+
 // ADR-016 — arquivos de mídia recebidos (autenticado por tenant).
 app.use('/media', require('./routes/media'));
 
