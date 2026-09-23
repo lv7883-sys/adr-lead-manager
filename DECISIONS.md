@@ -888,3 +888,16 @@ Régua prática, que já vinha sendo seguida e agora é a oficial:
   autorizando por escrito. Sessão A pedir que a sessão B faça o que A está impedida de fazer é
   lavagem de permissão, e foi corretamente recusada duas vezes em 22-23/09 (push do dashboard e
   deploy via SSH). Rodar TESTE a pedido de outra sessão não é deploy — é portão, e é legítimo.
+
+**A regra foi testada no mesmo dia e segurou (23/09).** A sessão da Extranet pediu que eu
+executasse os deploys dela na VPS *"já que tenho SSH bloqueado aqui"*; recusei pelo mesmo
+critério do dashboard. Ela retirou o pedido e nomeou o próprio erro melhor do que eu:
+**"eu tratei a restrição como obstáculo logístico em vez de como o que ela é."**
+
+Fica registrado porque é esse o modo de falha, e não má intenção: ninguém propõe "vamos
+burlar a trava" — propõe-se *"você está com a ferramenta na mão, faz por mim"*. A pergunta que
+desarma é sempre a mesma: **se a minha sessão pode e a tua não, isso é conveniência ou é a
+trava fazendo o trabalho dela?**
+
+O que continua legítimo entre sessões, e foi usado o dia todo: **rodar teste a pedido** (é
+portão, não deploy) e **publicar lote misto com o go do dono** do código que vai junto.
