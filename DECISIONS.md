@@ -750,3 +750,27 @@ de que os ~22 do papel `prestador` **são** os professores que o `fc66145` tirou
 `internal_contacts` em junho — a tomada é a mesma para professor; o caso do Allan é
 inconsistência de cadastro de uma pessoa (está nas duas listas, e a interna vence por retornar
 antes), não defeito de mecanismo.
+
+---
+
+## ABERTO — oportunidade por curso (1 contato → N oportunidades)
+
+Levantado pelo Leo em 23/09 ao perguntar se a regra de devolver descartado considera o CURSO:
+*"temos alunos que fazem mais de um curso"*. **Não considera.** O LM trabalha por PESSOA
+(telefone); a Extranet trabalha por FICHA (uma por curso). Duas fichas da mesma pessoa viram UM
+card, no estágio mais avançado — então quem já é aluno e quer outro curso **some do funil**.
+
+Não é lacuna nova: a `spec-contato-oportunidade.md` (jun/2026) §3 já define o modelo alvo
+(**1 contato → N oportunidades tipadas**, tier no contato e estado de funil na oportunidade) com
+o exemplo do próprio Leo. Design acordado, nunca implementado.
+
+**Tamanho medido (23/09, Valinhos):** 10 leads têm 2+ fichas com cursos diferentes; **1** tem
+ficha `Ganhou` + outra ativa — Juliana Revelk (`Musicalização Individual [Ganhou]` +
+`Musicalização em Grupo [Conexão]`). Defeito estrutural, prejuízo hoje pequeno, cresce com a
+escola.
+
+**Se isto andar, chamar a frente de atribuição ANTES:** `origem_lead` tem índice único por
+pessoa (`uq_origem_lead_contato`, `uq_origem_lead_lead`) — "uma origem por pessoa, para sempre"
+está no ESQUEMA, não só no código, e a migração **não seria aditiva**.
+
+**Nenhuma decisão tomada.** Fica aqui para quando o volume justificar.
