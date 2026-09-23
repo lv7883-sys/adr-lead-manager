@@ -33,6 +33,8 @@ const { fetchTimeline } = require('../timeline');   // ADR-042: timeline compart
 const { naoEhReacaoSql } = require('../reacao');    // reação não é turno do cliente (fonte única do marcador)
 // DE QUEM E A BOLA: regua unica (src/bola.js) -- aqui vivia uma das quatro copias.
 const { devemosRespostaSql, bolaSql } = require('../bola');
+// regua de nome de professor: a MESMA do sync-professores, importada (nunca reescrita)
+const { normNome: normNomeProfessor } = require('../cadastro/sync-professores');
 const { registrarSaida: _registrarSaida, msgCitada: _msgCitada, resolverKeyMensagem: _resolverKeyMensagem } = require('../outbound');   // ADR-042: outbound compartilhado (fonte única)
 const { notificarRecepcao } = require('../notificacao'); // ADR-006: warning de mudança de automação
 const redisClient = require('../redisClient');           // PARTE 3: cache 24h da sugestão
@@ -2976,6 +2978,56 @@ router.get('/:tenantId/cadastro/contratos', authenticate, requireTenantAccess(RE
   } catch (err) {
     logger.error('cadastro.contratos.list.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'falha ao listar contratos' });
+  }
+});
+
+// GET professores canônicos — o de-para que OUTRAS APLICAÇÕES consomem, em vez de ler a tabela.
+//
+// Combinado com a frente do Diapasão (23/09/2026): ela precisa resolver nome→professor na ingestão
+// do cadastro raspado e ia criar uma TERCEIRA identidade de professor (a dela, além desta e do id
+// da Extranet). A identidade canônica é do Lead Manager — `person` + `external_ref` —, então ela se
+// pendura aqui. Se lesse a tabela direto, mudar o formato interno a quebraria em silêncio; é essa
+// dependência que esta rota existe para evitar.
+//
+// DUAS LISTAS, e é o ponto da rota:
+//   `professores` — resolvidos, um id confiável cada. Pode gravar.
+//   `ambiguos`    — a mesma chave normalizada casou com MAIS DE UMA pessoa. NÃO devolve id: quem
+//                   consome grava só o nome e manda para a tela de divergências que a recepção já
+//                   abre. "Id errado é pior que id nenhum, porque id errado é invisível e nome
+//                   ambíguo alguém percebe" — formulação da sessão do Diapasão.
+// A detecção da colisão mora AQUI, com o dono da identidade, e não no consumidor: senão ele
+// precisaria conhecer a régua de normalização daqui para saber que houve colisão, e a dependência
+// do interno voltaria pela porta dos fundos.
+//
+// Hoje em Valinhos: 34 professores, nenhuma colisão. O risco é da unidade grande, com homônimo.
+router.get('/:tenantId/cadastro/professores', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const linhas = await withTenant(req.tenantId, (c) => c.query(
+      `SELECT p.id::text AS person_id, p.display_name AS nome, er.external_id
+         FROM lead_manager.external_ref er
+         JOIN lead_manager.person p ON p.id = er.entity_id
+        WHERE er.entity_kind = 'person' AND er.external_type = 'professor'
+        ORDER BY p.display_name`).then((r) => r.rows));
+
+    // Colisão = a mesma chave normalizada apontando para pessoas diferentes. A régua vem do
+    // sync-professores (importada, nunca reescrita) — régua duplicada é o defeito que esta semana
+    // inteira foi gasta eliminando.
+    const porChave = new Map();
+    for (const l of linhas) {
+      const k = normNomeProfessor(l.nome);
+      if (!porChave.has(k)) porChave.set(k, []);
+      porChave.get(k).push(l);
+    }
+    const professores = [];
+    const ambiguos = [];
+    for (const [chave, grupo] of porChave) {
+      if (grupo.length === 1) professores.push(grupo[0]);
+      else ambiguos.push({ chave, pessoas: grupo.map((g) => ({ person_id: g.person_id, nome: g.nome })) });
+    }
+    res.json({ tenant_id: req.tenantId, total: linhas.length, professores, ambiguos });
+  } catch (err) {
+    logger.error('cadastro.professores.list.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'falha ao listar professores' });
   }
 });
 
