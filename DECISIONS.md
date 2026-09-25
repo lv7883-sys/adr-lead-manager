@@ -948,3 +948,20 @@ backfill completo, que faria os 104 sozinho.
 **O que sobra dos 11, e não é técnico:** são 11 pais e mães que marcaram aula e estão parados
 desde junho/julho. Isso é oportunidade comercial esfriando — trabalho de recepção, não conserto
 de sistema.
+
+### Risco cruzado entre repositórios — quem manda no webhook da Evolution (25/09/2026)
+A lista de eventos que a Evolution entrega ao Lead Manager é escrita pelo **dashboard**
+(`adr-whatsapp-scheduler`, `dashboard/lib/evolution.js:84`), não por nós. Ela inclui o
+`MESSAGES_UPSERT`, do qual dependem a Caixa de Entrada **e** a ingestão de mídia de grupo.
+Um deploy lá pode, em tese, derrubar coisa aqui — e a causa estaria em outro repositório,
+o que torna o diagnóstico lento.
+
+**Conferido no código (não na lembrança), a pedido de um aviso de deploy da frente de
+extratos:** `setWebhook` roda **só** em ação de administrador (`routes/admin.js`) e no
+"conectar" da franquia (`routes/franquia.js:2281`) — **nunca no arranque**. Portanto:
+
+> **Reinício do dashboard é inofensivo. "Conectar instância" é que reescreve os eventos.**
+
+Combinado com aquela sessão: quem for mexer nesse caminho avisa antes, porque o estrago
+aparece no repositório do outro. Vale como lembrete de que a régua de "o que é meu" não é o
+repositório — é o **efeito**.
