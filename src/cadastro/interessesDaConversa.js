@@ -73,15 +73,34 @@ function _fundirNomesParecidos(itens) {
   });
 }
 
+// ⚠ DUAS TRAVAS CONTRA CONVERSA DE TRABALHO, medidas na 1ª rodada real (50 conversas, 25/09):
+// 116 interesses extraídos, e MAIS DA METADE era ruído operacional. Quem fala com a escola sobre
+// MUITOS alunos não é uma família — é a equipe. Os campeões eram Daniele, Leo Vecchi e Allan
+// Azevedo, com 11 "interesses" cada: conversas sobre alunos da casa, lidas como pedidos de aula.
+//
+//   TRAVA 1 — CONTATO INTERNO só vale PARA SI. Medido: 4 internos geraram 39 interesses, dos quais
+//     32 eram "para outra pessoa" (alunos que eles administram) e 6 eram "para si" — e esses 6 são
+//     VERDADE: o Leo faz aula de canto e violão, o Allan de violão. Então não se exclui o interno
+//     (ele PODE ser lead, palavras do Leo: "todos podem ser novos leads, eu mesmo estou fazendo
+//     aula de canto") — exclui-se o que ele diz sobre TERCEIROS.
+//   TRAVA 2 — TETO DE BENEFICIÁRIOS. Conversa que produz 5+ pessoas distintas é lista de alunos,
+//     não família: 7 conversas assim concentravam 67 dos 116 interesses. Uma família real tem 2 ou
+//     3 filhos. Descarta a conversa inteira e CONTA no stats (conversa_operacional) — ruído
+//     silencioso é o que faz ninguém confiar no dado.
+const MAX_BENEFICIARIOS = 5;
+
 // Leads candidatos: têm conversa e ainda não foram lidos por este job (ou têm mensagem mais nova
 // que a última leitura). Não filtra por status: um interesse existe mesmo em lead descartado —
-// e registrar não muda decisão nenhuma.
+// e registrar não muda decisão nenhuma. Marca se o telefone é de CONTATO INTERNO (trava 1).
 const SQL_CANDIDATOS = `
   SELECT l.id AS lead_id, cv.id AS conversation_id,
          regexp_replace(cv.external_id, '[^0-9]', '', 'g') AS ident,
          max(m.received_at) AS ultima_msg,
          (SELECT max(i.ultimo_visto_em) FROM lead_manager.lead_interesse i
-           WHERE i.lead_id = l.id AND i.fonte = 'conversa') AS lido_ate
+           WHERE i.lead_id = l.id AND i.fonte = 'conversa') AS lido_ate,
+         EXISTS (SELECT 1 FROM lead_manager.internal_contacts ic
+                  WHERE ic.tenant_id = l.tenant_id
+                    AND lead_manager.br_phone_key(ic.phone) = lead_manager.br_phone_key(l.phone)) AS interno
     FROM lead_manager.leads l
     JOIN lead_manager.conversations cv
          ON cv.tenant_id = l.tenant_id
@@ -132,7 +151,8 @@ async function run(tenantId, opcoes = {}) {
 
 async function _run(tenantId, { limite = 50, dryRun = false } = {}) {
   const cands = await withTenant(tenantId, (c) => c.query(SQL_CANDIDATOS, [tenantId, limite]).then((r) => r.rows));
-  const stats = { candidatos: cands.length, lidos: 0, novos: 0, revistos: 0, sem_interesse: 0, erros: 0, amostra: [] };
+  const stats = { candidatos: cands.length, lidos: 0, novos: 0, revistos: 0, sem_interesse: 0,
+    conversa_operacional: 0, interno_so_para_si: 0, erros: 0, amostra: [] };
   for (const cand of cands) {
     let itens;
     try {
@@ -145,6 +165,16 @@ async function _run(tenantId, { limite = 50, dryRun = false } = {}) {
       stats.erros++;
       logger.warn('interesses_conversa.falha', { tenant_id: tenantId, lead_id: cand.lead_id, error: e.message });
       continue;
+    }
+    // TRAVA 2 — muitos beneficiários distintos = lista de alunos, não família. Descarta a conversa
+    // inteira, e o contador diz que descartou (ruído silencioso é o que mata a confiança no dado).
+    const distintos = new Set(itens.filter((x) => x.beneficiario).map((x) => norm(x.beneficiario)));
+    if (distintos.size >= MAX_BENEFICIARIOS) { stats.conversa_operacional++; continue; }
+    // TRAVA 1 — de contato interno só vale o que é PARA SI; o que ele diz de terceiros é trabalho.
+    if (cand.interno) {
+      const antes = itens.length;
+      itens = itens.filter((x) => x.para_si === true && !x.beneficiario);
+      if (antes !== itens.length) stats.interno_so_para_si++;
     }
     if (!itens.length) { stats.sem_interesse++; continue; }
     if (stats.amostra.length < 8) stats.amostra.push({ lead_id: cand.lead_id, itens });
