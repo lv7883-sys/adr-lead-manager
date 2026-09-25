@@ -22,8 +22,8 @@ const mkContrato = (over = {}) => withTenant(A, async (c) => {
     `INSERT INTO lead_manager.person (tenant_id, display_name) VALUES ($1,$2) RETURNING id`,
     [A, over.beneficiario || 'Aluno'])).rows[0].id;
   await c.query(
-    `INSERT INTO lead_manager.contact_point (tenant_id, person_id, kind, value_raw, source)
-     VALUES ($1,$2,'phone',$3,'extranet')`, [A, p, over.phone]);
+    `INSERT INTO lead_manager.contact_point (tenant_id, person_id, kind, value_raw, source, confidence)
+     VALUES ($1,$2,'phone',$3,'extranet','alegado')`, [A, p, over.phone]);
   const sa = (await c.query(
     `INSERT INTO lead_manager.service_account (tenant_id, servico_label, ini_vigencia, fim_vigencia, status)
      VALUES ($1,$2,$3,$4,'Ativo') RETURNING id`,
