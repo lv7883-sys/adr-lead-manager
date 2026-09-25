@@ -1,0 +1,31 @@
+# FECHAMENTO AUTOMÁTICO DO CARD POR CONTRATO (decisão do Leo 23-25/09/2026):
+#   "tem que olhar na extranet e se tem contrato o sistema fecha como matriculado"
+#   "a Extranet é fonte confiável 100% de que o lead virou matrícula e isso a gente precisa usar
+#    no funil"
+#
+# QUANDO: 16:00 UTC = 13:00 SP, DEPOIS do sync de cadastro (que termina ~12h30 SP) — o fechamento
+# depende dos contratos estarem atualizados no dia. Rodar antes seria decidir com dado de ontem.
+#
+# ⚠ HORÁRIO EM UTC: o cron do host roda em UTC e IGNORA CRON_TZ (corrigido em 18/09 depois de os
+# jobs rodarem 3h antes do anunciado). SP = UTC-3, sem horário de verão desde 2019.
+#
+# O QUE FAZ: fecha como matriculado o card de quem está em ETAPA DE TRABALHO e tem contrato com
+# início >= a data de criação do lead. desfecho_em = data do contrato (o funil conta no mês certo).
+# Reversível card a card no Monitor.
+#
+# O QUE NÃO FAZ: não toca NOT_LEAD/REVIEW_QUEUE (os 104 que o Leo mandou não mexer), não toca quem
+# já tem desfecho, não toca contato interno (Késsia/Daniele), e não re-fecha quem a recepção
+# reverteu. Não altera como um lead é IDENTIFICADO — gate, IA e régua de etapa seguem intactos.
+#
+# SIMULAR ANTES (não escreve nada) — é o portão, use sempre que desconfiar:
+#   docker exec adr-lead-manager node /app/src/cadastro/fechaPorContrato.js <tenantId>
+# APLICAR manualmente:
+#   docker exec adr-lead-manager node /app/src/cadastro/fechaPorContrato.js <tenantId> --aplicar
+#
+# Instalar no HOST (crontab do root) — idempotente:
+#   ( crontab -l 2>/dev/null | grep -v 'fechaPorContrato'; \
+#     grep -vE '^\s*#' /apps/lead-manager/deploy/crontab.fecha-por-contrato.txt ) | crontab -
+#
+# Conferir:  crontab -l | grep fechaPorContrato
+# Log:       /var/log/fecha-por-contrato.log
+0 16 * * * docker exec adr-lead-manager node /app/src/cadastro/fechaPorContrato.js ed731a58-62e5-45ad-acba-a5502ff39e92 --aplicar >> /var/log/fecha-por-contrato.log 2>&1
