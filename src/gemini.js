@@ -285,6 +285,61 @@ async function classifyConversa({ conversation, examples, stageDefinitions, lead
   });
 }
 
+// ---- INTERESSES DA CONVERSA (passo 2 do modelo contato↔oportunidade, 25/09/2026) --------------
+// Leitura SEPARADA e read-only: descobre QUEM QUER O QUÊ PARA QUEM. NÃO decide se é lead, não
+// sugere etapa, não devolve confiança — nada do que ela produz entra em decisão do pipeline.
+//
+// ⚠ POR QUE É UMA CHAMADA PRÓPRIA, e não um campo a mais no classifyConversa: regra do Leo — "a
+// identificação de leads já funciona muito bem e isso não pode em hipótese nenhuma se perder". Se
+// isto vivesse no mesmo prompt que decide, qualquer regressão na extração cairia sobre a decisão.
+// Custa uma chamada a mais por lead (≈R$0,005 pela tabela do projeto), e em troca é IMPOSSÍVEL
+// quebrar a classificação por aqui — ela nem consulta este resultado. Escolha do Leo entre os dois
+// caminhos que ofereci: "vamos pelo caminho seguro".
+//
+// A saída é deliberadamente pobre: lista de {beneficiario, instrumento, para_si}. Sem estado, sem
+// etapa, sem score. `para_si` só é `true` quando a conversa DIZ que é para quem está falando; na
+// dúvida vem null (= não sei), porque afirmar "é para ele mesmo" funde duas pessoas numa só e o
+// erro é invisível (ver migr 181).
+const _INTERESSES_PROMPT = `Você lê uma conversa entre uma escola de música e um contato, e extrai
+APENAS os INTERESSES EM AULA mencionados: qual instrumento/curso, e PARA QUEM.
+
+REGRAS
+- Uma pessoa pode querer aula PARA SI e TAMBÉM para filhos/parentes/amigos. Liste cada combinação
+  (pessoa × instrumento) uma vez.
+- "para_si": true SÓ se a conversa deixa claro que a aula é para quem está falando. Se a aula é
+  para outra pessoa, use false e escreva o nome em "beneficiario". Se NÃO DÁ PARA SABER, use null.
+  Nunca chute true.
+- "beneficiario": o nome da pessoa que vai fazer a aula, como aparece na conversa ("meu filho
+  Pedro" -> "Pedro"; "para minha filha" sem nome -> "filha"). null quando for para si.
+- "instrumento": o curso/instrumento como foi dito ("bateria", "canto", "violão"). null se a pessoa
+  demonstrou interesse mas não disse qual.
+- NÃO invente. Se a conversa não menciona interesse em aula nenhuma, devolva lista vazia.
+- Ignore assunto administrativo (remarcação, pagamento, horário de aula já existente).
+
+Responda SOMENTE JSON: {"interesses":[{"beneficiario":string|null,"instrumento":string|null,"para_si":true|false|null}]}`;
+
+async function extrairInteresses({ conversation }) {
+  return withModelFallback(async (modelName) => {
+    const model = ia.modelo({
+      model: modelName,
+      generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+    });
+    const res = await model.generateContent(
+      `${_INTERESSES_PROMPT}\n\nCONVERSA (mais antigo -> mais novo):\n${_formatConversa(conversation)}`
+    );
+    const parsed = JSON.parse(res.response.text());
+    const bruto = Array.isArray(parsed.interesses) ? parsed.interesses : [];
+    // Saneamento: o que não for reconhecível vira null, nunca palpite.
+    return bruto.slice(0, 12).map((x) => ({
+      beneficiario: typeof x.beneficiario === 'string' && x.beneficiario.trim()
+        ? x.beneficiario.trim().slice(0, 80) : null,
+      instrumento: typeof x.instrumento === 'string' && x.instrumento.trim()
+        ? x.instrumento.trim().slice(0, 60) : null,
+      para_si: x.para_si === true ? true : (x.para_si === false ? false : null),
+    })).filter((x) => x.beneficiario || x.instrumento);
+  }, { tipo: 'IA_TEXTO', origem: 'extrair_interesses' });
+}
+
 // Portão 2 — geração da resposta, com system prompt do tenant + histórico.
 // `clarification` (opcional): instrução para repergunta de dado ambíguo (E1-03).
 // Intervalo (horas) acima do qual uma retomada pode reabrir com saudação leve —
@@ -1004,6 +1059,7 @@ module.exports = {
   extractQualification,
   classifySongGenres,        // Rock Hour (ADR-039)
   extractAndClassifySongs,   // Rock Hour (ADR-039)
+  extrairInteresses,         // passo 2 contato↔oportunidade — leitura SEPARADA, fora de decisão
   INTENTS,
   CANDIDATES,
   getActiveModel,
