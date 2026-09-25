@@ -109,6 +109,9 @@ test('(f) SIMULAÇÃO não escreve nada', async () => {
 test('(g) TELEFONE em formatos diferentes casa mesmo assim (br_phone_key nos dois lados)', async () => {
   const id = await mkLead({ name: 'Formato', phone: '+5519977770007', created_at: '2026-07-01' });
   await mkContrato({ phone: '19 9 7777-0007', ini: '2026-08-15' });   // grafia diferente
-  assert.equal((await run(A, { dryRun: false })).fechados, 1);
-  assert.equal((await lead(id)).desfecho, 'matriculado');
+  // conta o LEAD, não o total do run: o caso (f) deixou de propósito um elegível não fechado
+  // (simulação não escreve), e ele é fechado agora — comportamento certo, mas polui o total.
+  const r = await run(A, { dryRun: false });
+  assert.ok(r.fechados >= 1);
+  assert.equal((await lead(id)).desfecho, 'matriculado', 'casou apesar da grafia diferente');
 });
