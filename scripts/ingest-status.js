@@ -163,7 +163,13 @@ function humano(u, p, disco, dias) {
   } else if (!ativos.length) {
     console.log('   → para ligar: escolher o grupo na tela de configuração da unidade.');
   } else if (!s.pendente_curadoria && !s.cota_excedida && !s.falhou) {
-    console.log('   ⚠ tudo ligado e nada entrou este mês — conferir se o número está no grupo.');
+    // "Nada entrou" quer dizer coisas opostas conforme a idade da configuração: num grupo
+    // ligado há semanas é defeito; num ligado hoje é só ninguém ter mandado foto ainda.
+    // O alarme que não distingue os dois gasta o plantão e, pior, ensina a ignorá-lo.
+    const horas = (Date.now() - new Date(ativos[0].criado_em)) / 3_600_000;
+    console.log(horas < 48
+      ? `   recém-ligado (há ${Math.max(1, Math.round(horas))}h) — aguardando a primeira foto ou vídeo no grupo.`
+      : '   ⚠ tudo ligado e nada entrou este mês — conferir se o número está no grupo.');
   }
 }
 
