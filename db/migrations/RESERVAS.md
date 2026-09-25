@@ -17,7 +17,9 @@ colisão de 20/09/2026 (faixa 140–149 ocupada por engano por duas frentes ao m
 | 150–169 | ADR-051 | continuação do núcleo canônico | não |
 | **170–174** | **atribuição + plataforma** | 170 mapa_campanha, 171 origem_lead, 172 plataforma, 173 marketing, 174 privilégios da origem | **SIM — aplicadas em 21/09/2026** |
 | **175** | **ingestão de mídia** | 175 grupo_fonte + raw_asset (matéria-prima vinda do grupo de WhatsApp) | **SIM — aplicada em 22/09/2026** |
-| 176–199 | livre | — | — |
+| **176–177** | **sugestão de IA / aprendizado** | 176 sugestao_ia, 177 aprendizado_le_campanha | sim |
+| **178–181** | **funil / leads** | 178 fecha matrículas, 179 view contrato × origem, 180–181 interesse do beneficiário | **SIM** (aplicadas) |
+| 182–199 | livre | — | — |
 
 ## Nomes já reservados dentro do schema `plataforma`
 
