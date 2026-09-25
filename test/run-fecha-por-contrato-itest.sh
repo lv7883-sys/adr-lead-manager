@@ -34,7 +34,10 @@ docker exec -i "$CTR" psql -v ON_ERROR_STOP=1 -U postgres -d lm_itest >/dev/null
 CREATE SCHEMA lead_manager;
 ALTER ROLE lead_manager_user SET search_path = lead_manager, public;
 CREATE TABLE lead_manager.tenants (id uuid PRIMARY KEY, name text);
-INSERT INTO lead_manager.tenants (id, name) VALUES ('${TENANT_A}','A');
+-- Valinhos entra só para satisfazer a FK do seed de papéis da migration 069 (mesmo motivo do
+-- run-sync-cadastro-itest.sh). Nenhum teste usa este tenant.
+INSERT INTO lead_manager.tenants (id, name)
+  VALUES ('${TENANT_A}','A'), ('ed731a58-62e5-45ad-acba-a5502ff39e92','Valinhos (só p/ FK do seed)');
 GRANT USAGE ON SCHEMA lead_manager TO lead_manager_user;
 GRANT SELECT ON lead_manager.tenants TO lead_manager_user;
 SQL
