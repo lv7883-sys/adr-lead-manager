@@ -29,9 +29,49 @@ const { withTenant } = require('../db');
 const logger = require('../logger');
 const gemini = require('../gemini');
 const { loadRealHistory } = require('../engine');   // só LEITURA de histórico; nada é reprocessado
+const { comUnidade } = require('../plataforma/contexto');   // custo de IA tem dono (senão vira órfão)
 
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
   .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+// FUNDE NOMES QUASE IGUAIS DENTRO DA MESMA CONVERSA. Na 1ª amostra a IA devolveu "Lucas" e "Luca"
+// na mesma conversa — quase certamente a mesma criança, escrita de dois jeitos pela mãe. Duas
+// linhas ali seriam duas pessoas inventadas.
+//
+// ⚠ O ESCOPO É O QUE TORNA ISTO SEGURO: só funde DENTRO DA MESMA CONVERSA, onde "Luca" e "Lucas"
+// ditos pela mesma pessoa quase sempre são o mesmo filho. NUNCA entre conversas — lá, nome
+// parecido é homônimo (há dois leads chamados "Carolina" nesta base), e fundir seria o erro
+// invisível que a semana inteira ensinou a evitar. Critério conservador: um nome é prefixo do
+// outro e a diferença é de no máximo 2 letras. "Ana" e "Antonio" não fundem (diferença 4).
+function _fundirNomesParecidos(itens) {
+  const out = [];
+  for (const it of itens) {
+    const n = norm(it.beneficiario);
+    const irmao = n && out.find((o) => {
+      const m = norm(o.beneficiario);
+      if (!m) return false;
+      const [curto, longo] = m.length <= n.length ? [m, n] : [n, m];
+      return longo.startsWith(curto) && longo.length - curto.length <= 2;
+    });
+    if (irmao) {
+      // fica com a grafia MAIS LONGA (mais informativa) e acumula o instrumento como item próprio
+      if (norm(it.beneficiario).length > norm(irmao.beneficiario).length) irmao.beneficiario = it.beneficiario;
+      if (it.instrumento && norm(it.instrumento) !== norm(irmao.instrumento)) out.push({ ...it, beneficiario: irmao.beneficiario });
+      continue;
+    }
+    out.push({ ...it });
+  }
+  // depois de fundir as grafias, sobram combinações idênticas ("Lucas|bateria" duas vezes, uma
+  // delas vinda de "Luca"): colapsa. O _gravar também protege no banco, mas aqui os contadores
+  // do job passam a dizer a verdade.
+  const vistos = new Set();
+  return out.filter((x) => {
+    const k = norm(x.beneficiario) + '|' + norm(x.instrumento);
+    if (vistos.has(k)) return false;
+    vistos.add(k);
+    return true;
+  });
+}
 
 // Leads candidatos: têm conversa e ainda não foram lidos por este job (ou têm mensagem mais nova
 // que a última leitura). Não filtra por status: um interesse existe mesmo em lead descartado —
@@ -83,7 +123,14 @@ async function _gravar(c, tenantId, leadId, item) {
   return true;
 }
 
-async function run(tenantId, { limite = 50, dryRun = false } = {}) {
+// ⚠ TODO o corpo roda dentro de comUnidade: sem isso, cada chamada de IA vira "custo órfão" (o
+// próprio ia.js avisa no log) e a unidade dona não é cobrada. Flagrado na 1ª amostra de 25/09,
+// com 5 órfãos em 5 leituras — corrigido antes de rodar em escala, não depois.
+async function run(tenantId, opcoes = {}) {
+  return comUnidade(tenantId, { modulo: 'LEADS' }, () => _run(tenantId, opcoes));
+}
+
+async function _run(tenantId, { limite = 50, dryRun = false } = {}) {
   const cands = await withTenant(tenantId, (c) => c.query(SQL_CANDIDATOS, [tenantId, limite]).then((r) => r.rows));
   const stats = { candidatos: cands.length, lidos: 0, novos: 0, revistos: 0, sem_interesse: 0, erros: 0, amostra: [] };
   for (const cand of cands) {
@@ -92,7 +139,7 @@ async function run(tenantId, { limite = 50, dryRun = false } = {}) {
       const history = await loadRealHistory(tenantId, {
         conversationId: cand.conversation_id, ident: cand.ident, leadId: cand.lead_id });
       if (!history || !history.length) { stats.sem_interesse++; continue; }
-      itens = await gemini.extrairInteresses({ conversation: history });
+      itens = _fundirNomesParecidos(await gemini.extrairInteresses({ conversation: history }));
       stats.lidos++;
     } catch (e) {
       stats.erros++;
