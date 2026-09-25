@@ -60,7 +60,7 @@ async function nomeDaUnidade(tenantId) {
 async function panorama(tenantId, dias) {
   return withTenant(tenantId, async (c) => {
     const grupos = (await c.query(
-      `SELECT jid, nome, ativo FROM marketing.grupo_fonte
+      `SELECT jid, nome, ativo, criado_em FROM marketing.grupo_fonte
         WHERE tenant_id = $1 ORDER BY ativo DESC, nome`, [tenantId])).rows;
 
     const cota = ((await c.query(
