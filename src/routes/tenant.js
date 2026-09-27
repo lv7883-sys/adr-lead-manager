@@ -33,6 +33,7 @@ const { fetchTimeline } = require('../timeline');   // ADR-042: timeline compart
 const { naoEhReacaoSql } = require('../reacao');    // reação não é turno do cliente (fonte única do marcador)
 // DE QUEM E A BOLA: regua unica (src/bola.js) -- aqui vivia uma das quatro copias.
 const { devemosRespostaSql, bolaSql } = require('../bola');
+const { fetchDescartados } = require('../descartados');   // lista de Descartados (1 consulta agregada)
 // regua de nome de professor: a MESMA do sync-professores, importada (nunca reescrita)
 const { normNome: normNomeProfessor } = require('../cadastro/sync-professores');
 const { registrarSaida: _registrarSaida, msgCitada: _msgCitada, resolverKeyMensagem: _resolverKeyMensagem } = require('../outbound');   // ADR-042: outbound compartilhado (fonte única)
@@ -474,58 +475,13 @@ router.get(
 // "mensagens de contatos internos descartadas" foi removida (era 1 linha por MENSAGEM,
 // inflava o contato — ex.: Daniele 40×). O Gate 0 segue descartando internos; as msgs
 // históricas continuam no banco, só deixam de ser listadas aqui.
-const _IDENT = "regexp_replace(coalesce(l.phone, l.meta_psid, ''), '[^0-9]', '', 'g')";
 router.get('/:tenantId/unclassified', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {
+    // A consulta vive em src/descartados.js (uma CTE agregada, não 5 subconsultas por lead).
+    // Era o gargalo da tela de Leads: 8,0 s -> 0,15 s, com a MESMA resposta (paridade provada).
     const { items, motivos } = await withTenant(req.tenantId, async (c) => ({
       motivos: await _naoLeadMotivos(c, req.tenantId),
-      items: (
-      await c.query(
-        `SELECT 'lead' AS kind, l.id::text AS id, coalesce(l.phone, l.meta_psid) AS phone, l.name,
-                 l.classification_confidence AS confidence, 'low_confidence' AS reason,
-                 l.classification_reasoning AS reasoning,
-                 -- intent não é gravado na coluna no caminho roteado (fica em
-                 -- classification_signals); p/ o chip "Candidato a vaga", surfaça CANDIDATO
-                 -- de lá quando a coluna estiver vazia. Aditivo e restrito a CANDIDATO.
-                 COALESCE(l.intent, CASE WHEN l.classification_signals->>0 = 'CANDIDATO' THEN 'CANDIDATO' END) AS intent,
-                 l.conversation_state, l.state_reasoning,
-                 -- BOLA DERIVADA (22/09/2026): a tela de Descartados mostrava "ainda espera nossa
-                 -- resposta" lendo o conversation_state CRU. Medido no mesmo dia: o campo estava
-                 -- errado em 27 dos 28 leads ativos que ele marcava — ninguém o fecha quando a
-                 -- recepção responde pelo celular. Aqui vai a resposta JÁ descontada (src/bola.js),
-                 -- para a tela não precisar saber disso. O campo cru continua no payload porque o
-                 -- Monitor da bola existe justamente para auditar o que a IA gravou.
-                 ${bolaSql({
-    lastInTurno: `(SELECT max(m.received_at) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-                    WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT}
-                      AND m.role = 'USER' AND ${naoEhReacaoSql('m')})`,
-    lastOut: `(SELECT max(s.received_at) FROM staff_outbound_samples s
-                WHERE s.tenant_id = $1 AND regexp_replace(s.external_id, '[^0-9]', '', 'g') = ${_IDENT})`,
-  })} AS bola,
-                 CASE WHEN l.review_result = 'confirmed_not_lead' THEN 'recepcao' ELSE 'ia' END AS origem_descarte,
-                 coalesce(l.review_em, l.created_at) AS descartado_em,   -- ordenação 'mais_recente'
-                 (SELECT min(m.received_at) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-                   WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT} AND m.role = 'USER') AS received_at,
-                 (SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-                   WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT} AND m.role = 'USER'
-                   ORDER BY m.received_at ASC LIMIT 1) AS first_message,
-                 (SELECT cv.channel FROM conversations cv
-                   WHERE cv.tenant_id = $1 AND regexp_replace(cv.external_id, '[^0-9]', '', 'g') = ${_IDENT}
-                   ORDER BY cv.updated_at DESC LIMIT 1) AS channel
-            FROM leads l
-           -- Descartados = CASA DE RESGATE: tudo fora do funil como NOT_LEAD que dá pra
-           -- recuperar — descartado pela IA (review_result NULL) OU marcado "não é lead"
-           -- pela recepção (confirmed_not_lead). Exclui desfecho (decisão de resultado).
-           WHERE l.status = 'NOT_LEAD' AND l.desfecho IS NULL
-             AND (l.review_result IS NULL OR l.review_result = 'confirmed_not_lead')
-         ORDER BY coalesce(l.review_em, l.created_at) DESC NULLS LAST
-         -- Rede de resgate: NÃO truncar a ponto de esconder leads (invariante: todo
-         -- NOT_LEAD não-terminal tem que aparecer em Descartados). Teto alto, alinhado
-         -- ao /leads (1000), para nenhum lead virar "limbo" invisível em todas as telas.
-         LIMIT 1000`,
-        [req.tenantId]
-      )
-    ).rows,
+      items: await fetchDescartados(c, req.tenantId),
     }));
     res.json({ tenant_id: req.tenantId, count: items.length, items, motivos });
   } catch (err) {
