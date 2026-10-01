@@ -14,6 +14,7 @@
 const { withTenant } = require('../../db');
 const { withExtranetLock } = require('../../resources/extranet-lock');
 const client = require('../../resources/adapters/extranet-client');
+const { criarCache, assinaturaDe } = require('../extranet-cache');
 
 const kind = 'SCRAPE_EXTRANET';
 
@@ -117,13 +118,38 @@ async function produce(binding, { tenantId } = {}) {
     pr.rows.forEach((x) => { payerByAluno[x.external_id] = x.payer_relation; });
   }
 
+  // CACHE DURÁVEL (131): cada página lida é gravada na hora. Falha no meio de um run de 11h passa
+  // a custar minutos, não o dia — e a página que não mudou não é rebuscada. Ver extranet-cache.js.
+  const cache = criarCache({ tenantId, query: (sql, params) => withTenant(tenantId, (c) => c.query(sql, params)) });
+  await cache.carregar(['detalhe_contrato', 'ficha_aluno']);
+  const extraiPlano = (html) => {
+    const pm = html.match(/Plano\s*pagto[\s\S]{0,150}?value=["']([^"']*)["']/i);
+    return { planoLabel: pm ? dec(pm[1].trim()) : null };
+  };
+  const extraiFicha = (html) => ({
+    idResp: field(html, 'id_responsavel'), tp: tpsel(html),
+    nasc: toISO(field(html, 'data_nascimento')) || null,
+    telefone: field(html, 'fonea_celular') || field(html, 'fonea_celular1') || field(html, 'fone_celular2') || null,
+  });
+
   const fichaCache = new Map();
   const contratos = [];
   for (const c of parsed) {
-    // DETALHE → plano_label + periodicidade (descritivo → piso)
-    const d = await get('/mod_contratos/detalhes.php?id=' + c.idC);
-    const pm = d.match(/Plano\s*pagto[\s\S]{0,150}?value=["']([^"']*)["']/i);
-    const planoLabel = pm ? dec(pm[1].trim()) : null;
+    // DETALHE → plano_label + periodicidade (descritivo → piso).
+    // A LISTA já mostra curso, vigência, status e nome: se nada disso mudou, o detalhe guardado
+    // vale. É o sinal de mudança mais forte que a Extranet nos dá sem custo de requisição.
+    const assinatura = assinaturaDe([c.curso, c.ini, c.fim, c.statusCol, c.nome]);
+    const noCache = cache.consultar('detalhe_contrato', c.idC, assinatura);
+    let planoLabel;
+    if (noCache.usar && !noCache.verificar) {
+      planoLabel = noCache.conteudo.planoLabel ?? null;
+    } else {
+      const d = await get('/mod_contratos/detalhes.php?id=' + c.idC);
+      const novo = extraiPlano(d);
+      if (noCache.verificar) cache.conferir('detalhe_contrato', c.idC, noCache.conteudo, novo);
+      planoLabel = novo.planoLabel;
+      await cache.gravar('detalhe_contrato', c.idC, assinatura, novo);
+    }
     const periodicidade = descPer(planoLabel) || pisoPer(c.ini, c.fim);
     const status = c.statusCol || (c.fim >= new Date().toISOString().slice(0, 10) ? 'ativo' : 'encerrado');
 
@@ -135,10 +161,19 @@ async function produce(binding, { tenantId } = {}) {
     // sem ele o NPS não alcança ninguém. Dependentes ainda dão id_responsavel + nasc.
     let fic = fichaCache.get(c.idA);
     if (!fic) {
-      const fh = await get('/mod_alunos/update_alunos.php?id=' + c.idA); stats.fichas++;
-      fic = { idResp: field(fh, 'id_responsavel'), tp: tpsel(fh),
-              nasc: toISO(field(fh, 'data_nascimento')) || null,
-              telefone: field(fh, 'fonea_celular') || field(fh, 'fonea_celular1') || field(fh, 'fone_celular2') || null };
+      // A ficha NÃO tem sinal de mudança na lista (telefone e nascimento mudam sem aparecer lá),
+      // então aqui valem só o prazo com dispersão e a amostragem de verificação.
+      const fichaSalva = cache.consultar('ficha_aluno', c.idA);
+      if (fichaSalva.usar && !fichaSalva.verificar) {
+        fic = fichaSalva.conteudo;
+        stats.fichas_reaproveitadas = (stats.fichas_reaproveitadas || 0) + 1;   // `fichas` segue contando só o que foi BUSCADO
+      } else {
+        const fh = await get('/mod_alunos/update_alunos.php?id=' + c.idA); stats.fichas++;
+        const novo = extraiFicha(fh);
+        if (fichaSalva.verificar) cache.conferir('ficha_aluno', c.idA, fichaSalva.conteudo, novo);
+        fic = novo;
+        await cache.gravar('ficha_aluno', c.idA, null, novo);
+      }
       fichaCache.set(c.idA, fic);
     }
     aluno.telefone = fic.telefone;
@@ -152,6 +187,11 @@ async function produce(binding, { tenantId } = {}) {
     contratos.push({ idC: c.idC, idA: c.idA, curso: c.curso || null, status, ini: c.ini, fim: c.fim,
       planoLabel, periodicidade, aluno, responsavel });
   }
+  Object.assign(stats, {
+    cache_hits: cache.stats.hits, cache_gravados: cache.stats.gravados,
+    cache_mudaram: cache.stats.mudaram, cache_vencidos: cache.stats.expirados,
+    cache_verificados: cache.stats.verificados, cache_divergencias: cache.stats.divergencias,
+  });
   return { contratos, stats };
 }
 

@@ -12,7 +12,8 @@ colisão de 20/09/2026 (faixa 140–149 ocupada por engano por duas frentes ao m
 | 001–119 | histórico | várias (base, RBAC, ADR-016, ADR-029…) | sim |
 | 120–126 | ADR-050 | Boas-vindas / onboarding do aluno | **sim** (16/09/2026) |
 | 127–130 | funil/BI | devolve descartados, aula experimental, data do lead da Extranet | sim |
-| 131–139 | ADR-051 | Núcleo canônico (unidade, aplicacao, assinatura, grupos de dados) | não |
+| **131** | **ADR-051 / coleta** | cache de páginas já lidas da Extranet (retomada da coleta de cadastro) | não — pronta para aplicar |
+| 132–139 | ADR-051 | Núcleo canônico (unidade, aplicacao, assinatura, grupos de dados) | não |
 | 140–149 | ADR-052 | Implantação guiada | não (arquivos ainda não criados) |
 | 150–169 | ADR-051 | continuação do núcleo canônico | não |
 | **170–174** | **atribuição + plataforma** | 170 mapa_campanha, 171 origem_lead, 172 plataforma, 173 marketing, 174 privilégios da origem | **SIM — aplicadas em 21/09/2026** |
