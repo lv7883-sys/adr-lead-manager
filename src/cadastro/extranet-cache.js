@@ -57,25 +57,34 @@ function assinaturaDe(partes) {
 
 // Um cache por execução: carrega tudo de uma vez (a tabela tem ~1,5 mil linhas) e grava página a
 // página, assim que cada uma chega — é a gravação imediata que dá a retomada.
-function criarCache({ tenantId, query, ligado = LIGADO, agora = () => new Date() } = {}) {
+function criarCache({ tenantId, query, ligado = LIGADO, verificaFrac = VERIFICA_FRAC, agora = () => new Date() } = {}) {
   const memoria = new Map();             // `${tipo}\u0000${chave}` → { assinatura, conteudo, buscado_em }
   const stats = { hits: 0, buscas: 0, expirados: 0, mudaram: 0, verificados: 0, divergencias: 0, gravados: 0 };
   const k = (tipo, chave) => `${tipo}\u0000${chave}`;
+  let vivo = ligado;                     // vira false se o cache não estiver utilizável (ver carregar)
 
+  // O cache é CONVENIÊNCIA, nunca requisito: se a tabela ainda não existe (código publicado antes
+  // da migração 131) ou o SELECT falha, a coleta segue buscando tudo, como antes. Cache que
+  // derruba a coleta seria pior que não ter cache.
   async function carregar(tipos) {
-    if (!ligado) return;
-    const r = await query(
-      `SELECT tipo, chave, assinatura, conteudo, buscado_em
-         FROM lead_manager.extranet_pagina_cache
-        WHERE tenant_id = $1 AND tipo = ANY($2::text[])`, [tenantId, tipos]);
-    for (const row of r.rows) memoria.set(k(row.tipo, row.chave), row);
+    if (!vivo) return;
+    try {
+      const r = await query(
+        `SELECT tipo, chave, assinatura, conteudo, buscado_em
+           FROM lead_manager.extranet_pagina_cache
+          WHERE tenant_id = $1 AND tipo = ANY($2::text[])`, [tenantId, tipos]);
+      for (const row of r.rows) memoria.set(k(row.tipo, row.chave), row);
+    } catch (e) {
+      vivo = false;
+      logger.warn('extranet_cache.indisponivel', { tenant_id: tenantId, error: e.message, consequencia: 'coleta segue sem cache' });
+    }
   }
 
   // Decide SEM efeito colateral: devolve { usar, conteudo, motivo, verificar }.
   //   usar=true      → aproveita o guardado;
   //   verificar=true → aproveita, mas rebusca para conferir (a chamada decide o que fazer).
   function consultar(tipo, chave, assinaturaAtual = null) {
-    if (!ligado) return { usar: false, motivo: 'desligado' };
+    if (!vivo) return { usar: false, motivo: 'desligado' };
     const e = memoria.get(k(tipo, chave));
     if (!e) return { usar: false, motivo: 'inexistente' };
     if (assinaturaAtual != null && e.assinatura !== assinaturaAtual) {
@@ -87,7 +96,7 @@ function criarCache({ tenantId, query, ligado = LIGADO, agora = () => new Date()
       stats.expirados++;
       return { usar: false, motivo: 'vencido' };
     }
-    if (sorteadoParaVerificar(chave, VERIFICA_FRAC, agora())) {
+    if (sorteadoParaVerificar(chave, verificaFrac, agora())) {
       return { usar: true, conteudo: e.conteudo, motivo: 'verificacao', verificar: true };
     }
     stats.hits++;
@@ -97,7 +106,7 @@ function criarCache({ tenantId, query, ligado = LIGADO, agora = () => new Date()
   // Grava JÁ (não no fim do run): é isto que transforma 11h perdidas em minutos perdidos.
   // Nunca lança: falhar ao guardar matéria-prima não pode derrubar uma coleta que está indo bem.
   async function gravar(tipo, chave, assinatura, conteudo) {
-    if (!ligado) return;
+    if (!vivo) return;
     const quando = agora();
     memoria.set(k(tipo, chave), { tipo, chave, assinatura, conteudo, buscado_em: quando });
     stats.gravados++;
@@ -127,7 +136,7 @@ function criarCache({ tenantId, query, ligado = LIGADO, agora = () => new Date()
     return diferentes;
   }
 
-  return { carregar, consultar, gravar, conferir, stats, ligado };
+  return { carregar, consultar, gravar, conferir, stats, get ligado() { return vivo; } };
 }
 
 module.exports = { criarCache, validadeDias, sorteadoParaVerificar, assinaturaDe, LIGADO };

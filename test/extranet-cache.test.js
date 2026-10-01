@@ -49,13 +49,13 @@ test('página nunca lida precisa ser buscada', async () => {
 test('o que foi lido antes da falha continua valendo depois dela', async () => {
   // É a razão de existir do cache: a coleta morreu na décima hora; a próxima reaproveita.
   const banco = bancoFake();
-  const primeira = cacheCom(banco);
+  const primeira = cacheCom(banco, { verificaFrac: 0 });
   await primeira.carregar(['detalhe_contrato']);
   const assinatura = assinaturaDe(['Piano', '2026-07-29', '2027-08-11', 'ativo', 'Beatriz']);
   await primeira.gravar('detalhe_contrato', '1110', assinatura, { planoLabel: 'Semestral 1x semana' });
   // ... aqui a rede cai e o processo morre ...
 
-  const segunda = cacheCom(banco);          // execução seguinte, memória zerada
+  const segunda = cacheCom(banco, { verificaFrac: 0 });   // execução seguinte, memória zerada
   await segunda.carregar(['detalhe_contrato']);
   const r = segunda.consultar('detalhe_contrato', '1110', assinatura);
   assert.equal(r.usar, true);
@@ -117,15 +117,16 @@ test('amostragem de verificação: estável no dia, fração respeitada', () => 
 
 test('página sorteada para verificação é aproveitada, mas marcada para rebusca', async () => {
   const banco = bancoFake();
-  const cache = cacheCom(banco, { });
+  const cache = cacheCom(banco, { verificaFrac: 0 });
   await cache.carregar(['ficha_aluno']);
   await cache.gravar('ficha_aluno', '149', null, { telefone: '+5519999998888' });
   // força a verificação de TODAS as páginas
-  const r = criarCache({ tenantId: TENANT, query: banco.query });
+  const r = criarCache({ tenantId: TENANT, query: banco.query, verificaFrac: 1 });
   await r.carregar(['ficha_aluno']);
-  const semVerificacao = r.consultar('ficha_aluno', '149');
-  assert.equal(semVerificacao.usar, true);   // com 5% padrão, quase sempre cai aqui
-  assert.ok(['valido', 'verificacao'].includes(semVerificacao.motivo));
+  const sorteada = r.consultar('ficha_aluno', '149');
+  assert.equal(sorteada.usar, true);              // aproveita o guardado…
+  assert.equal(sorteada.verificar, true);         // …e ainda assim rebusca para conferir
+  assert.equal(sorteada.motivo, 'verificacao');
 });
 
 test('divergência entre o guardado e a Extranet vira alerta, não silêncio', async () => {
