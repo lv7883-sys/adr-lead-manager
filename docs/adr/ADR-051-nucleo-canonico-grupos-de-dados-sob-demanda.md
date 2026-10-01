@@ -145,6 +145,38 @@ em atraso, suspensa, cancelada) e que é chaveada por unidade, e é nela que a v
 Risco de não decidir: a loja venderia contra uma tabela enquanto os jobs conferem outra — cobrança e
 bloqueio saindo errados para a mesma unidade.
 
+
+### D12 — Cada fonte declara QUAL PERGUNTA responde (e quando foi capturada)
+
+Duas fontes do mesmo "fato" quase nunca estão em desacordo: elas respondem a perguntas
+diferentes, e quem lê a primeira supondo a pergunta da segunda tira conclusão errada com números
+certos.
+
+**O caso que originou a regra (01/10/2026).** A frente do Rock Hour mediu 13 alunos em banda com
+professor diferente entre `lead_manager.service_account` e `qualidade.aluno_status`, e a primeira
+leitura foi "13 alunos com professor errado". Classificados por tipo: **7** eram o cadastro
+carregando *todos* os professores que o aluno já teve (histórico), **3** eram troca genuína, **2**
+cadastro incompleto e **1** ficha vazia na Extranet. Mais da metade não era defeito: `service_account`
+responde *"quem já deu aula para este aluno"* e `aluno_status` responde *"quem dá aula agora"*.
+
+Em consequência, todo grupo de dado em `plataforma.grupo_dado` declara, além de origem e retenção:
+
+- **`pergunta`** — a frase que aquela fonte responde, em português, no nível de quem vai consumir
+  ("quem dá aula para este aluno hoje", "quem dava quando o contrato encerrou"). Sem isso, o
+  consumidor novo repete a confusão do anterior, e ninguém revisa o que parece óbvio.
+- **`capturado_em`** — quando a última captura bem-sucedida aconteceu, **por unidade e por rotina**,
+  legível por quem exibe. Dado velho com cara de dado fresco é pior que dado ausente: a tela mostra
+  com confiança e ninguém tem como desconfiar. Com o carimbo, a tela avisa ("atualizado há 3 dias")
+  em vez de mentir com cara séria.
+- **`limite do carimbo`** — `capturado_em` diz quando a linha foi tocada, **não** há quanto tempo a
+  resposta está errada: o professor pode ter mudado ontem numa linha parada desde julho. É limite
+  superior de frescor, e tem de ser citado assim.
+
+**Dois nomes não bastam para distinguir perguntas.** `curso` e `instrumento` são coisas diferentes:
+`pcj` (prática em conjunto) e `kids` não nomeiam instrumento nenhum, e qualquer régua que assuma
+"curso = instrumento" erra nesses dois. O de-para de curso nasce no canônico, como fonte única, com
+`curso.js` virando leitor — nunca duas traduções vivas.
+
 ### D10 — Desativar não apaga
 Um grupo sem aplicação ativa vai para `preservado`: para de sincronizar e fica oculto. A exclusão só acontece depois do prazo D11 da especificação (proposta: 90 dias) **e** do piso de retenção legal do grupo, em ordem de dependência, com backup verificado de menos de 24 h, relatório de simulação e aprovação humana registrada. O código de exclusão nasce **desligado**.
 
