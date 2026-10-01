@@ -156,8 +156,11 @@ certos.
 professor diferente entre `lead_manager.service_account` e `qualidade.aluno_status`, e a primeira
 leitura foi "13 alunos com professor errado". Classificados por tipo: **7** eram o cadastro
 carregando *todos* os professores que o aluno já teve (histórico), **3** eram troca genuína, **2**
-cadastro incompleto e **1** ficha vazia na Extranet. Mais da metade não era defeito: `service_account`
-responde *"quem já deu aula para este aluno"* e `aluno_status` responde *"quem dá aula agora"*.
+cadastro incompleto e **1** ficha vazia na Extranet. Mais da metade não era defeito: `aluno_status` responde *"quem dá aula agora"*, e `service_account`
+responde algo mais estreito do que parece — *"quem era o professor quando esta conta de serviço foi
+criada"*. Não é histórico mantido, é retrato: o enriquecimento que atualizaria o campo
+(`backfill-sa-enriquecimento`, o R5 deste ADR) grava **zero linhas desde a migração 074**. Dizer
+"quem já deu aula" sugeriria um histórico completo e confiável que não existe.
 
 Em consequência, todo grupo de dado em `plataforma.grupo_dado` declara, além de origem e retenção:
 
@@ -171,6 +174,18 @@ Em consequência, todo grupo de dado em `plataforma.grupo_dado` declara, além d
 - **`limite do carimbo`** — `capturado_em` diz quando a linha foi tocada, **não** há quanto tempo a
   resposta está errada: o professor pode ter mudado ontem numa linha parada desde julho. É limite
   superior de frescor, e tem de ser citado assim.
+
+**A declaração tem de alcançar quem consome, e o caminho dele não passa pelo catálogo.** Quem
+precisou de "o professor deste aluno" foi ao esquema, viu `service_account.professor_nome` e usou:
+o nome da coluna *parece* a resposta, e é isso que desarma a desconfiança. Por isso o `pergunta`
+de cada grupo é **gerado como `COMMENT ON TABLE`/`COMMENT ON COLUMN`** a partir de
+`plataforma.grupo_dado` — comentário aparece no `d+`, no `information_schema` e em qualquer
+cliente. Catálogo que só responde a quem sabe procurar protege quem já não precisava.
+
+**E um movimento que é mais barato que qualquer catálogo:** quando duas fontes discordam, **conte
+os TIPOS de discordância antes de dar nome à diferença**. Enquanto o número era "13 divergentes",
+a conclusão natural era "13 errados"; virou 7/3/2/1 por tipo e a conclusão se inverteu sozinha.
+Funciona inclusive onde o catálogo ainda não existe.
 
 **Dois nomes não bastam para distinguir perguntas.** `curso` e `instrumento` são coisas diferentes:
 `pcj` (prática em conjunto) e `kids` não nomeiam instrumento nenhum, e qualquer régua que assuma
