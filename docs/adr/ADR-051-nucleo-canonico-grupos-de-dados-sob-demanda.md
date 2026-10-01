@@ -162,6 +162,18 @@ criada"*. Não é histórico mantido, é retrato: o enriquecimento que atualizar
 (`backfill-sa-enriquecimento`, o R5 deste ADR) grava **zero linhas desde a migração 074**. Dizer
 "quem já deu aula" sugeriria um histórico completo e confiável que não existe.
 
+**São TRÊS fontes, não duas, e a ordem de confiança não é óbvia** (medido pela frente do Rock Hour,
+01/10/2026). Para "quem ensina este aluno":
+
+| Fonte | Pergunta que responde | Força e limite |
+|---|---|---|
+| `qualidade.aula_diaria` | "quem efetivamente deu aula para ele, e quando" | evidência direta, não depende de enriquecimento nenhum; só enxerga quem teve aula registrada (2.700 linhas, 223 alunos) |
+| `qualidade.aluno_status` | "quem dá aula para ele agora" | melhor cobertura; depende da raspagem diária |
+| `lead_manager.service_account` | "quem era o professor quando esta conta começou" | retrato, não acompanha troca (R5 parado desde a migr 074) |
+
+Declarar as três lado a lado é parte da regra: saber que existem três e qual é a mais forte é o que
+impede o próximo consumidor de pegar a mais fraca porque o nome da coluna parecia a resposta.
+
 Em consequência, todo grupo de dado em `plataforma.grupo_dado` declara, além de origem e retenção:
 
 - **`pergunta`** — a frase que aquela fonte responde, em português, no nível de quem vai consumir
