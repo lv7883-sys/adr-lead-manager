@@ -1,0 +1,29 @@
+# Relatório SEMANAL: quem está fora do funil como "não é lead" e TEM contrato começado depois de
+# chegar — conversão real que ninguém vai contar. SÓ LEITURA, não escreve nada.
+#
+# ⚠ HORÁRIO EM UTC: `0 11` = 08:00 em São Paulo (segunda-feira). O host roda em UTC com o cron do
+#   Ubuntu (3.0pl1), que IGNORA CRON_TZ — escrever a linha e ela ser ignorada é pior que não
+#   escrever. Ver deploy/crontab.dashboard.txt, mesma armadilha.
+#   Segunda às 08:00 de SP: a recepção começa a semana com a lista na mão, se houver.
+#
+# POR QUE EXISTE: o fechamento automático por contrato não alcança NOT_LEAD/REVIEW_QUEUE (guarda 2,
+# decisão do Leo: "quando o Regente começou eles já estavam matriculados"). A premissa vale em 131
+# de 135 — e as 4 exceções de 26/09/2026 só apareceram porque alguém foi procurar à mão. Três eram
+# conversão real (migr 182: Carla Manzoni, Ronaldo, Nínive) e uma era teste do modelo de contrato
+# (migr 183: Késsia). Sem este relatório a próxima exceção fica invisível pelo mesmo caminho.
+#
+# O QUE FAZER COM A SAÍDA: cada caso é uma decisão. Devolver ao funil segue o molde da migr 182;
+# confirmar que não é captação é marcar o card como dispensado para "convertido" na tela (a MESMA
+# marca que a guarda 4 do fechaPorContrato respeita), e aí ele para de aparecer aqui.
+#
+# CUSTO: uma consulta ao banco, nada de Extranet, nenhum lock. Segundos.
+# LOG: alert:true no evento 'naolead_com_contrato.relatorio' quando houver caso (o plantão destaca).
+#
+# Instalar no HOST (crontab do root) — idempotente:
+#   ( crontab -l 2>/dev/null | grep -v 'relatorio-naolead'; \
+#     grep -vE '^\s*#' /apps/lead-manager/deploy/crontab.relatorio-naolead.txt ) | crontab -
+#
+# Conferir:  crontab -l | grep relatorio-naolead
+# Log:       /var/log/relatorio-naolead.log
+# Rodar na mão:  docker exec adr-lead-manager node /app/src/jobs/relatorio-naolead-com-contrato.js
+0 11 * * 1 docker exec adr-lead-manager node /app/src/jobs/relatorio-naolead-com-contrato.js >> /var/log/relatorio-naolead.log 2>&1

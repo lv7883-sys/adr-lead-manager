@@ -20,7 +20,8 @@ colisão de 20/09/2026 (faixa 140–149 ocupada por engano por duas frentes ao m
 | **175** | **ingestão de mídia** | 175 grupo_fonte + raw_asset (matéria-prima vinda do grupo de WhatsApp) | **SIM — aplicada em 22/09/2026** |
 | **176–177** | **sugestão de IA / aprendizado** | 176 sugestao_ia, 177 aprendizado_le_campanha | sim |
 | **178–181** | **funil / leads** | 178 fecha matrículas, 179 view contrato × origem, 180–181 interesse do beneficiário | **SIM** (aplicadas) |
-| 182–199 | livre | — | — |
+| **182–183** | **funil / leads** | 182 devolve NOT_LEAD com contrato novo (Carla, Ronaldo, Nínive), 183 marca o contrato de teste da recepção | **SIM** (01/10/2026) |
+| 184–199 | livre | — | — |
 
 ## Nomes já reservados dentro do schema `plataforma`
 
