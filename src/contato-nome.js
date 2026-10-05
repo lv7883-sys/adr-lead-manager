@@ -78,7 +78,7 @@ function pushNomeSql(colConversationId) {
 }
 
 // CTE da agenda + a expressão de junção. A chave é calculada PELO BANCO (br_phone_key quando há
-// telefone, external_id cru quando não há — @lid), igual à migr 184: se a aplicação calculasse,
+// telefone, external_id cru quando não sobra dígito), igual à migr 184: se a aplicação calculasse,
 // seriam duas réguas outra vez.
 const AGENDA_CTE = `agenda AS (
       SELECT chave, min(nome) AS nome

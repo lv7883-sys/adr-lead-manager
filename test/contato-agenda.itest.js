@@ -99,7 +99,7 @@ async function lerPorConversa(t, externalId) {
     [t, externalId])).rows[0]?.nome || null);
 }
 
-test('(a) a CHAVE é calculada pelo BANCO: telefone vira br_phone_key, jid sem telefone fica cru', async () => {
+test('(a) a CHAVE é calculada pelo BANCO: telefone vira br_phone_key; jid sem telefone vira os dígitos dele', async () => {
   const tel = await salvar(T1, '5519999887766', 'Mãe do Pedro');
   assert.equal(tel.chave, '1999887766',
     'telefone BR → DDD + 8 dígitos (migr 085): 5519999887766 tira o DDI 55 → 19999887766, tira o 9º dígito de celular → 19 + 99887766');
@@ -124,7 +124,7 @@ test('(b) o MESMO telefone escrito de dois jeitos é UM contato — editar por q
   assert.equal(n, 1, 'dois formatos do mesmo número não podem virar duas linhas (foi assim que nasceram conversas duplicadas)');
 });
 
-test('(c) contato @lid também guarda nome — são 725 dos 2.567 contatos de Valinhos', async () => {
+test('(c) contato sem telefone (@lid) também guarda nome — são 725 dos 2.567 contatos de Valinhos', async () => {
   assert.equal(await lerPorConversa(T1, '271828182845904@lid'), 'Contato sem telefone');
 });
 
