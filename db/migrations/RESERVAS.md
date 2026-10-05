@@ -21,8 +21,22 @@ colisão de 20/09/2026 (faixa 140–149 ocupada por engano por duas frentes ao m
 | **176–177** | **sugestão de IA / aprendizado** | 176 sugestao_ia, 177 aprendizado_le_campanha | sim |
 | **178–181** | **funil / leads** | 178 fecha matrículas, 179 view contrato × origem, 180–181 interesse do beneficiário | **SIM** (aplicadas) |
 | **182–183** | **funil / leads** | 182 devolve NOT_LEAD com contrato novo (Carla, Ronaldo, Nínive), 183 marca o contrato de teste da recepção | **SIM** (01/10/2026) |
-| **184** | **agenda de contatos** | 184 contato_agenda (o nome do contato como a unidade salva — pedido do Leo 05/10/2026) | não — pronta para aplicar |
+| **184** | **agenda de contatos** | 184 contato_agenda (o nome do contato como a unidade salva — pedido do Leo 05/10/2026) | **SIM — aplicada em 05/10/2026** |
 | 185–199 | livre | — | — |
+
+## Nome do contato: a fonte é `lead_manager.contato_agenda` (184)
+
+Quem precisar do nome de um contato **lê a régua** `src/contato-nome.js` (ordem: agenda da unidade >
+pushName > cadastro > lead > número) — não reimplemente o COALESCE, que já esteve copiado em quatro
+lugares. **`qualidade.inbox_contato_nome` está APOSENTADA** (05/10/2026): tinha 0 linhas, a chave era
+telefone em dígitos crus e o nome era sobreposto em memória no dashboard, fora do alcance da busca.
+Não escreva nela. E `lead_manager.known_contacts` (migr 004) é outra coisa: é o portão de triagem
+(STAFF/STUDENT/SUPPLIER), não tem coluna de nome, segue vazia e não é lida — não fundir as duas.
+
+⚠ O nome da agenda é **campo livre com anotação interna** ("Fulana - filhos X e Y, - Teclado"). Hoje
+nenhum caminho de ENVIO o consome (autoReply usa pushName, campanha manda só número). Se for montar
+texto que alcança o cliente, use um campo com o primeiro nome limpo — nunca este. Mesma família da
+regra "nunca usar nome de recepcionista em texto que vai ao cliente".
 
 ## Nomes já reservados dentro do schema `plataforma`
 
