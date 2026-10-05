@@ -64,6 +64,21 @@ test('(f) nomeContatoSql respeita a ORDEM canônica e omite degrau ausente', () 
   assert.throws(() => n.nomeContatoSql({}), /nenhum degrau/);
 });
 
+test('(h) BUSCAR olha TODOS os nomes — salvar um nome novo não pode esconder a conversa do nome antigo', () => {
+  // O caso que gerou este teste, medido em produção em 05/10/2026: a conversa cujo pushName era
+  // "Deborah Maria Oliveira" foi salva na agenda como "Deborah" e desapareceu da busca por "maria".
+  // Exibir escolhe UM nome; buscar aceita QUALQUER um. Se alguém trocar o alvo da busca de volta
+  // para nomeContatoSql, este teste quebra.
+  const alvo = n.todosOsNomesSql({ agenda: 'ag.nome', push: 'PUSH', cadastro: 'pe.display_name', lead: 'lk.name' });
+  assert.equal(alvo, "concat_ws(' | ', ag.nome, PUSH, pe.display_name, lk.name)");
+  assert.notEqual(alvo, n.nomeContatoSql({ agenda: 'ag.nome', push: 'PUSH', cadastro: 'pe.display_name', lead: 'lk.name' }),
+    'o alvo da BUSCA não pode ser o COALESCE da exibição — é o que escondeu a conversa da Deborah');
+  // o NÚMERO fica fora: na busca ele tem alvo próprio (só dígitos), e entrar aqui faria o termo
+  // casar pedaço de telefone dentro do texto do nome.
+  assert.ok(!n.todosOsNomesSql({ agenda: 'ag.nome', numero: 'cv.external_id' }).includes('external_id'));
+  assert.throws(() => n.todosOsNomesSql({ numero: 'cv.external_id' }), /nenhum degrau/);
+});
+
 test('(g) a ORDEM é a mesma lista para JS e SQL — uma régua, não duas', () => {
   assert.deepEqual(n.ORDEM, ['agenda', 'push', 'cadastro', 'lead', 'numero']);
   // o COALESCE segue exatamente ORDEM: se alguém reordenar a lista, o SQL acompanha sozinho

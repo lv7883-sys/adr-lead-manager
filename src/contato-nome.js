@@ -69,6 +69,25 @@ function nomeContatoSql(frag) {
   return degraus.length === 1 ? degraus[0] : `COALESCE(${degraus.join(', ')})`;
 }
 
+// BUSCAR não é EXIBIR. Exibir escolhe UM nome (o COALESCE acima); buscar tem de aceitar QUALQUER um
+// dos nomes que aquele contato já teve, senão salvar um nome novo ESCONDE a conversa do nome antigo.
+//
+// Isto não é hipótese: medido em produção em 05/10/2026, logo depois da carga da agenda. A conversa
+// cujo pushName era "Deborah Maria Oliveira" foi salva na agenda como "Deborah" — e parou de aparecer
+// na busca por "maria", porque a busca casava só o nome EXIBIDO. Dez casos assim em oito termos
+// testados. Foi regressão introduzida pelo degrau novo, não defeito antigo.
+//
+// A concatenação resolve com um alvo só: o LIKE %termo% varre todos os nomes de uma vez. O separador
+// é ' | ' (e não espaço) para não colar o fim de um nome no começo do outro e criar casamento que não
+// existe em nenhum dos dois.
+function todosOsNomesSql(frag) {
+  const f = frag || {};
+  const partes = ORDEM.filter((d) => d !== 'numero')     // o número tem alvo próprio na busca (dígitos)
+    .map((d) => f[d]).filter((x) => typeof x === 'string' && x.trim() !== '');
+  if (!partes.length) throw new Error('todosOsNomesSql: nenhum degrau informado');
+  return partes.length === 1 ? partes[0] : `concat_ws(' | ', ${partes.join(', ')})`;
+}
+
 // Subselect do pushName: a última mensagem do contato que trouxe `sender`. Parametrizado pelo alias
 // da conversa porque a lista usa `m.conversation_id` e a busca usa `cv.id`.
 function pushNomeSql(colConversationId) {
@@ -104,6 +123,7 @@ module.exports = {
   nomeContato,
   alunoBadge,
   nomeContatoSql,
+  todosOsNomesSql,
   pushNomeSql,
   AGENDA_CTE,
   chaveAgendaSql,

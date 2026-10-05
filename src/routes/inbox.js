@@ -127,18 +127,18 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     if (gr.length) { params.push(gr); pGr = params.length; }
     const cond = (alvoNome, alvoIdent, alvoExt) => (pGr ? `(${base(alvoNome, alvoIdent)} OR ${alvoExt} = ANY($${pGr}::text[]))` : base(alvoNome, alvoIdent));
     if (cortaAgora) {
-      // O MESMO nome do `projected` (mesma ordem do COALESCE) — se um mudar, o outro tem de mudar.
-      // MESMA régua do `projected` — agora por import, não por cópia: buscar pelo nome que a
-      // unidade salvou (agenda, migr 184) tem de achar a conversa que a lista mostra com ele.
-      condBusca = cond(nomeCt.nomeContatoSql({
+      // Busca em TODOS os nomes do contato, não no que está sendo exibido (src/contato-nome.js):
+      // salvar "Deborah" na agenda não pode esconder a conversa de quem procura por "Maria", que era
+      // o pushName. Medido em produção em 05/10/2026 — dez conversas sumiram da busca assim.
+      condBusca = cond(nomeCt.todosOsNomesSql({
         agenda: 'ag.nome',
         push: nomeCt.pushNomeSql('cv.id'),
         cadastro: 'pe.display_name',
         lead: 'lk.name',
-        numero: 'cv.external_id',
       }), IDENT_CONV, 'cv.external_id');
     } else {
-      extra.push(cond('nome', 'ident', 'external_id'));
+      // `nomes_busca` = a mesma concatenação, projetada pelo `projected` (este ramo filtra depois).
+      extra.push(cond('nomes_busca', 'ident', 'external_id'));
     }
   }
   // Renovações (ADR-049 rev.): o que está DE FATO em jogo de renovação, não "vence algum dia".
@@ -447,6 +447,14 @@ ${renovCtesDepois}
           numero: 'm.external_id',
         })} AS nome,
         ag.nome AS nome_salvo,   -- o que a unidade digitou (null = ninguém salvou) — a tela oferece "editar"
+        -- TODOS os nomes do contato, só para a BUSCA filtrar (nunca exibido): quem procura pelo nome
+        -- antigo tem de achar a conversa que hoje mostra outro. Ver src/contato-nome.js.
+        ${nomeCt.todosOsNomesSql({
+          agenda: 'ag.nome',
+          push: nomeCt.pushNomeSql('m.conversation_id'),
+          cadastro: 'pe.display_name',
+          lead: 'm.lead_name',
+        })} AS nomes_busca,
         -- Nome do ALUNO/cadastro — vira badge discreto quando DIFERE do contato (ex.: contato = responsável).
         NULLIF(COALESCE(pe.display_name, m.lead_name), '') AS aluno,
         m.lead_phone, m.lead_psid,
