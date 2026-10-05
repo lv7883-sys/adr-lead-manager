@@ -29,6 +29,9 @@ const { isUuid } = require('../validation');
 const { terminalSql, statusVivoSql } = require('../lifecycle');
 const { fetchTimeline } = require('../timeline');
 const { naoEhReacaoSql } = require('../reacao');
+// Régua ÚNICA do nome exibido (agenda da unidade > pushName > cadastro > lead > número).
+// Estava copiada em TRÊS lugares deste arquivo; ver o cabeçalho de src/contato-nome.js.
+const nomeCt = require('../contato-nome');
 const leituraWhatsapp = require('../leituraWhatsapp');
 const { comEsquema } = require('../linkPreview');   // link vira caixinha no WhatsApp   // paridade 4: leitura/não lida vão para o WhatsApp
 const outbound = require('../outbound');
@@ -125,11 +128,15 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     const cond = (alvoNome, alvoIdent, alvoExt) => (pGr ? `(${base(alvoNome, alvoIdent)} OR ${alvoExt} = ANY($${pGr}::text[]))` : base(alvoNome, alvoIdent));
     if (cortaAgora) {
       // O MESMO nome do `projected` (mesma ordem do COALESCE) — se um mudar, o outro tem de mudar.
-      condBusca = cond(`COALESCE(
-             (SELECT sm.sender FROM messages sm
-               WHERE sm.conversation_id = cv.id AND sm.role = 'USER'
-                 AND coalesce(sm.sender, '') <> '' ORDER BY sm.received_at DESC LIMIT 1),
-             pe.display_name, lk.name, cv.external_id)`, IDENT_CONV, 'cv.external_id');
+      // MESMA régua do `projected` — agora por import, não por cópia: buscar pelo nome que a
+      // unidade salvou (agenda, migr 184) tem de achar a conversa que a lista mostra com ele.
+      condBusca = cond(nomeCt.nomeContatoSql({
+        agenda: 'ag.nome',
+        push: nomeCt.pushNomeSql('cv.id'),
+        cadastro: 'pe.display_name',
+        lead: 'lk.name',
+        numero: 'cv.external_id',
+      }), IDENT_CONV, 'cv.external_id');
     } else {
       extra.push(cond('nome', 'ident', 'external_id'));
     }
@@ -263,6 +270,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
                     WHERE cp.tenant_id = $1 AND cp.kind = 'phone'
                       AND coalesce(p.display_name, '') <> '' AND cp.br_key <> ''
                     GROUP BY 1) pe ON pe.rk = cv.br_key
+        LEFT JOIN agenda ag ON ag.chave = ${nomeCt.chaveAgendaSql('cv.br_key', 'cv.external_id')}
        WHERE cv.tenant_id = $1
          AND ${condBusca}
     ),` : '';
@@ -326,7 +334,10 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     WITH cfg AS (
       SELECT COALESCE(MAX(dormancy_days), 7) AS dormancy_days
         FROM tenant_lead_config WHERE tenant_id = $1
-    ),${leadkCte}${renovCtesAntes}${leadselCte}${renovselCte}${buscaCte}
+    ),
+    -- Agenda da unidade (migr 184). Sempre presente: é a fonte de MAIOR prioridade do nome e a
+    -- tabela é pequena (uma linha por contato nomeado), então não vale ligar/desligar por aba.
+    ${nomeCt.AGENDA_CTE},${leadkCte}${renovCtesAntes}${leadselCte}${renovselCte}${buscaCte}
     conv AS (
       SELECT cv.id AS conversation_id, cv.channel, cv.external_id, cv.last_read_at,
              cv.updated_at, cv.conversation_kind, cv.renovacao_draft, ${IDENT_CONV} AS ident,
@@ -426,14 +437,16 @@ ${renovCtesDepois}
         m.renovacao_draft,   -- rascunho de renovação (migr. 097): só na aba Renovação até enviar
         m.arquivada_em, m.fixada_em, m.silenciada_ate,   -- migr. 118
         m.lead_id, m.lead_status, m.lead_desfecho,
-        -- Nome do CONTATO = quem você realmente fala (pushName do WhatsApp) PRIMEIRO; cadastro/lead como
-        -- fallback. Recepcionistas reclamavam que aparecia o ALUNO quando o contato é o pai/responsável.
-        COALESCE(
-                 (SELECT sm.sender FROM messages sm
-                   WHERE sm.conversation_id = m.conversation_id AND sm.role = 'USER'
-                     AND coalesce(sm.sender, '') <> '' ORDER BY sm.received_at DESC LIMIT 1),
-                 pe.display_name, m.lead_name,
-                 m.external_id) AS nome,
+        -- Nome exibido: AGENDA DA UNIDADE primeiro (migr 184 — como NÓS salvamos), depois o pushName
+        -- do WhatsApp, depois cadastro/lead. A ordem e o porquê de cada degrau: src/contato-nome.js.
+        ${nomeCt.nomeContatoSql({
+          agenda: 'ag.nome',
+          push: nomeCt.pushNomeSql('m.conversation_id'),
+          cadastro: 'pe.display_name',
+          lead: 'm.lead_name',
+          numero: 'm.external_id',
+        })} AS nome,
+        ag.nome AS nome_salvo,   -- o que a unidade digitou (null = ninguém salvou) — a tela oferece "editar"
         -- Nome do ALUNO/cadastro — vira badge discreto quando DIFERE do contato (ex.: contato = responsável).
         NULLIF(COALESCE(pe.display_name, m.lead_name), '') AS aluno,
         m.lead_phone, m.lead_psid,
@@ -465,6 +478,9 @@ ${renovCtesDepois}
       LEFT JOIN renovtp rc ON rc.rk = m.rkey AND m.rkey <> ''
       LEFT JOIN interno ic ON ic.rk = m.rkey AND m.rkey <> ''
       LEFT JOIN pess pe ON pe.rk = m.rkey AND m.rkey <> ''
+      -- Agenda da unidade (migr 184): casa por br_phone_key quando há telefone e pelo external_id
+      -- cru quando não há (@lid) — ver jid-nao-e-telefone.
+      LEFT JOIN agenda ag ON ag.chave = ${nomeCt.chaveAgendaSql('m.rkey', 'm.external_id')}
       -- alias m2 = a MESMA linha de lead, so p/ os fragmentos SQL do lifecycle.js (que
       -- esperam colunas status/desfecho num alias). LATERAL de 1 linha, sem custo.
       LEFT JOIN LATERAL (SELECT m.lead_status AS status, m.lead_desfecho AS desfecho) m2 ON true
@@ -494,7 +510,13 @@ function mapConversationRow(r) {
     lead_id: r.lead_id || null,
     lead_status: r.lead_status || null,
     desfecho: r.lead_desfecho || null,
-    contato: { nome: r.nome, aluno: (r.aluno && r.aluno !== r.nome) ? r.aluno : null, phone: r.lead_phone || null, meta_psid: r.lead_psid || null },
+    contato: {
+      nome: r.nome,
+      aluno: (r.aluno && r.aluno !== r.nome) ? r.aluno : null,
+      nome_salvo: r.nome_salvo || null,   // agenda da unidade (migr 184): null = ninguém salvou
+      phone: r.lead_phone || null,
+      meta_psid: r.lead_psid || null,
+    },
     ultima_mensagem: r.last_activity_at ? {
       preview: preview(r.ultima_body, r.ultima_media_type, r.ultima_deleted_at),
       kind: r.ultima_kind || null,
@@ -601,7 +623,12 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
     [tenantId, cv.ident]
   )).rows[0] || null;
 
-  // Nome EMPILHADO (mesma lógica da lista): cadastro canônico → lead → pushName do WhatsApp → número.
+  // Nome EMPILHADO — a MESMA régua da lista, por import (src/contato-nome.js), não por cópia.
+  // Agenda da unidade (migr 184) primeiro: é o nome que NÓS salvamos.
+  const agendaNome = (await client.query(
+    `SELECT nome FROM contato_agenda
+       WHERE tenant_id = $1 AND chave = ${nomeCt.chaveAgendaDeExternalIdSql('$2')} LIMIT 1`,
+    [tenantId, cv.external_id])).rows[0]?.nome || null;
   const cadastroNome = (await client.query(
     `SELECT min(p.display_name) AS nome
        FROM contact_point cp JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
@@ -662,14 +689,24 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
       last_read_at: cv.last_read_at,
       arquivada: !!cv.arquivada_em, fixada: !!cv.fixada_em,   // migr. 118
       atribuicao,
-      contato: {
-        // Contato = quem você fala no WhatsApp (pushName) PRIMEIRO; cadastro/lead é fallback.
-        nome: pushNome || cadastroNome || (lead && lead.name) || cv.external_id,
-        // Aluno/cadastro discreto — só quando DIFERE do contato (ex.: contato = pai/responsável).
-        aluno: (() => { const a = cadastroNome || (lead && lead.name) || null; const n = pushNome || cadastroNome || (lead && lead.name) || cv.external_id; return (a && a !== n) ? a : null; })(),
-        phone: lead ? lead.phone : null,
-        meta_psid: lead ? lead.meta_psid : null,
-      },
+      contato: (() => {
+        // UMA chamada da régua para o nome e para o badge — antes eram duas expressões à mão que
+        // repetiam o mesmo COALESCE e podiam divergir.
+        const campos = {
+          agenda: agendaNome, push: pushNome, cadastro: cadastroNome,
+          lead: lead && lead.name, numero: cv.external_id,
+        };
+        return {
+          nome: nomeCt.nomeContato(campos).nome,
+          // Aluno/cadastro discreto — só quando DIFERE do contato (ex.: contato = pai/responsável).
+          aluno: nomeCt.alunoBadge(campos),
+          // O que a unidade salvou (null = ninguém salvou ainda). A tela usa para abrir o campo de
+          // edição já preenchido e para mostrar "nome salvo por nós" em vez de "nome do WhatsApp".
+          nome_salvo: agendaNome,
+          phone: lead ? lead.phone : null,
+          meta_psid: lead ? lead.meta_psid : null,
+        };
+      })(),
     },
     timeline,
   };
@@ -1149,8 +1186,9 @@ router.get('/:tenantId/inbox/conversations', authenticate, requireTenantAccess(R
 });
 
 // GET /tenant/:tenantId/inbox/contatos-whatsapp — TODOS os contatos de WhatsApp da Caixa de Entrada (conversas diretas),
-// para o seletor do Disparo. Antes o seletor usava a 1ª página da lista (50). Nome = mesma pilha da lista (quem
-// escreveu > cadastro > lead). Uma consulta só, por CTEs (sem LATERAL sob RLS): ~80 ms para ~2.000 conversas.
+// para o seletor do Disparo. Antes o seletor usava a 1ª página da lista (50). Nome = a MESMA régua da lista
+// (src/contato-nome.js: agenda da unidade > pushName > cadastro > lead). Uma consulta só, por CTEs (sem
+// LATERAL sob RLS): ~80 ms para ~2.000 conversas.
 router.get('/:tenantId/inbox/contatos-whatsapp', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {
     const contatos = await withTenant(req.tenantId, async (c) => (await c.query(
@@ -1168,14 +1206,16 @@ router.get('/:tenantId/inbox/contatos-whatsapp', authenticate, requireTenantAcce
            FROM contact_point cp JOIN person p ON p.id = cp.person_id AND p.tenant_id = $1
           WHERE cp.tenant_id = $1 AND cp.kind = 'phone' AND cp.br_key <> '' AND coalesce(p.display_name, '') <> ''
           GROUP BY 1
-       )
-       SELECT ${IDENT_CONV} AS numero, COALESCE(u.sender, pe.nome, lk.name) AS nome,
+       ), ${nomeCt.AGENDA_CTE}
+       SELECT ${IDENT_CONV} AS numero,
+              ${nomeCt.nomeContatoSql({ agenda: 'ag.nome', push: 'u.sender', cadastro: 'pe.nome', lead: 'lk.name' })} AS nome,
               (lk.ident IS NOT NULL AND lk.status IS DISTINCT FROM 'NOT_LEAD' AND lk.status IS DISTINCT FROM 'REVIEW_QUEUE') AS is_lead,
               cv.last_activity_at AS ultima_atividade
          FROM conversations cv
          LEFT JOIN ult u ON u.conversation_id = cv.id
          LEFT JOIN lk ON lk.ident = ${IDENT_CONV}
          LEFT JOIN pe ON pe.rk = cv.br_key
+         LEFT JOIN agenda ag ON ag.chave = ${nomeCt.chaveAgendaSql('cv.br_key', 'cv.external_id')}
         WHERE cv.tenant_id = $1 AND cv.channel = 'whatsapp' AND cv.conversation_kind IS DISTINCT FROM 'GROUP'
           AND length(${IDENT_CONV}) BETWEEN 10 AND 15
         ORDER BY cv.last_activity_at DESC NULLS LAST`, [req.tenantId])).rows);
@@ -1882,6 +1922,53 @@ router.post('/:tenantId/inbox/conversations/:conversationId/desmarcar-lead', aut
 // (mensagens trocadas em outro aparelho durante uma queda). Mesmo motor da reconexão automática,
 // acionável na hora pela recepção/admin. `deep=true` amplia a janela. Idempotente (dedup) e seguro
 // (só histórico: não roda funil/IA). Confirma a instância 'open' antes (senão 409).
+// ---- AGENDA DA UNIDADE (migr 184): o nome do contato como NÓS salvamos ----
+// QUALQUER recepcionista pode salvar e editar o nome de qualquer contato (decisão do Leo,
+// 05/10/2026) — mesmo WRITE_ROLES do resto da Caixa de Entrada, nenhum papel extra.
+//
+// nome vazio = APAGA a linha (volta a valer o pushName). Não grava nome em branco: uma linha com
+// nome vazio esconderia o pushName e a conversa passaria a mostrar o número — pior que antes.
+//
+// A CHAVE é calculada pelo BANCO a partir do external_id da conversa (br_phone_key quando há
+// telefone, jid cru quando não há). A rota NUNCA calcula chave: régua única, igual à migr 184.
+router.post('/:tenantId/inbox/conversations/:conversationId/nome', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const { conversationId } = req.params;
+  if (!isUuid(conversationId)) return res.status(400).json({ error: 'conversationId inválido' });
+  const nome = typeof req.body?.nome === 'string' ? req.body.nome.trim().replace(/\s+/g, ' ').slice(0, 120) : '';
+  const porQuem = typeof req.body?.usuario === 'string' ? req.body.usuario.trim().slice(0, 120) : '';
+  try {
+    const out = await withTenant(req.tenantId, async (client) => {
+      const cv = (await client.query(
+        'SELECT external_id FROM conversations WHERE id = $1 AND tenant_id = $2',
+        [conversationId, req.tenantId])).rows[0];
+      if (!cv) return null;
+      if (!nome) {
+        const del = await client.query(
+          `DELETE FROM contato_agenda
+             WHERE tenant_id = $1 AND chave = ${nomeCt.chaveAgendaDeExternalIdSql('$2')}`,
+          [req.tenantId, cv.external_id]);
+        return { nome_salvo: null, apagou: del.rowCount > 0 };
+      }
+      // ON CONFLICT pela chave: dois formatos do mesmo telefone ("+5519..." e "5519...") têm a MESMA
+      // br_phone_key, então editar por qualquer conversa do contato atualiza a mesma linha.
+      const up = (await client.query(
+        `INSERT INTO contato_agenda (tenant_id, chave, nome, origem, salvo_por)
+           VALUES ($1, ${nomeCt.chaveAgendaDeExternalIdSql('$2')}, $3, 'recepcao', NULLIF($4, ''))
+         ON CONFLICT (tenant_id, chave) DO UPDATE
+           SET nome = EXCLUDED.nome, origem = EXCLUDED.origem,
+               salvo_por = EXCLUDED.salvo_por, atualizado_em = now()
+         RETURNING nome`,
+        [req.tenantId, cv.external_id, nome, porQuem])).rows[0];
+      return { nome_salvo: up.nome, apagou: false };
+    });
+    if (!out) return res.status(404).json({ error: 'conversa não encontrada' });
+    return res.json(out);
+  } catch (err) {
+    logger.error('tenant.inbox.nome_contato.error', { tenant_id: req.tenantId, error: err.message });
+    return res.status(500).json({ error: 'falha ao salvar o nome do contato' });
+  }
+});
+
 router.post('/:tenantId/inbox/sincronizar', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   try {
     const waSync = require('../waSync');
