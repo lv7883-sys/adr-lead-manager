@@ -101,7 +101,8 @@ async function lerPorConversa(t, externalId) {
 
 test('(a) a CHAVE é calculada pelo BANCO: telefone vira br_phone_key, jid sem telefone fica cru', async () => {
   const tel = await salvar(T1, '5519999887766', 'Mãe do Pedro');
-  assert.equal(tel.chave, '1998887766', 'telefone BR → DDD + 8 dígitos (migr 085), não o número cru');
+  assert.equal(tel.chave, '1999887766',
+    'telefone BR → DDD + 8 dígitos (migr 085): 5519999887766 tira o DDI 55 → 19999887766, tira o 9º dígito de celular → 19 + 99887766');
   const lid = await salvar(T1, '271828182845904@lid', 'Contato sem telefone');
   assert.equal(lid.chave, '271828182845904@lid', '@lid não tem telefone: a chave é o jid cru');
 });
@@ -111,7 +112,7 @@ test('(b) o MESMO telefone escrito de dois jeitos é UM contato — editar por q
   // lido pelo OUTRO formato: tem de ser o nome novo, não uma segunda linha
   assert.equal(await lerPorConversa(T1, '5519999887766'), 'Juliana (mãe do Pedro)');
   const n = await comTenant(T1, async () => (await app.query(
-    "SELECT count(*)::int AS n FROM contato_agenda WHERE chave = '1998887766'")).rows[0].n);
+    "SELECT count(*)::int AS n FROM contato_agenda WHERE chave = '1999887766'")).rows[0].n);
   assert.equal(n, 1, 'dois formatos do mesmo número não podem virar duas linhas (foi assim que nasceram conversas duplicadas)');
 });
 
