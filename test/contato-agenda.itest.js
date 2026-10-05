@@ -39,10 +39,19 @@ before(async () => {
   await admin.connect();
 
   // O papel da aplicação tem de existir ANTES da 085 (que faz ALTER FUNCTION ... OWNER TO).
+  //
+  // CREATE-se-não-existe em vez de DROP+CREATE: a 085 deixa a função br_phone_key com este dono, e
+  // um DROP ROLE na segunda execução falha com "some objects depend on it". Um teste que só passa em
+  // banco virgem esconde o estado — e foi exatamente assim que ele quebrou na segunda rodada.
   await admin.query(`
     CREATE SCHEMA IF NOT EXISTS lead_manager;
-    DROP ROLE IF EXISTS lead_manager_user;
-    CREATE ROLE lead_manager_user LOGIN PASSWORD '${SENHA}';
+    DO $do$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lead_manager_user') THEN
+        CREATE ROLE lead_manager_user LOGIN PASSWORD '${SENHA}';
+      ELSE
+        ALTER ROLE lead_manager_user LOGIN PASSWORD '${SENHA}';
+      END IF;
+    END $do$;
     ALTER ROLE lead_manager_user SET search_path = lead_manager, public;
     GRANT USAGE ON SCHEMA lead_manager TO lead_manager_user;
     CREATE TABLE IF NOT EXISTS lead_manager.tenants (
@@ -65,9 +74,10 @@ before(async () => {
 after(async () => {
   if (app) await app.end();
   if (admin) {
+    // As tabelas saem; o PAPEL fica. Ele é dono da função da 085, então dropá-lo exigiria desfazer a
+    // migração — e o banco deste itest é descartável de qualquer modo.
     await admin.query('DROP TABLE IF EXISTS lead_manager.contato_agenda');
     await admin.query('DROP TABLE IF EXISTS lead_manager.tenants');
-    await admin.query('DROP ROLE IF EXISTS lead_manager_user');
     await admin.end();
   }
 });
