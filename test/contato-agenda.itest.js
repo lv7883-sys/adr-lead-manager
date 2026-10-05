@@ -103,8 +103,16 @@ test('(a) a CHAVE é calculada pelo BANCO: telefone vira br_phone_key, jid sem t
   const tel = await salvar(T1, '5519999887766', 'Mãe do Pedro');
   assert.equal(tel.chave, '1999887766',
     'telefone BR → DDD + 8 dígitos (migr 085): 5519999887766 tira o DDI 55 → 19999887766, tira o 9º dígito de celular → 19 + 99887766');
+  // ⚠ MEDIDO, não suposto: br_phone_key NÃO devolve vazio para um @lid — ela tira os não-dígitos e
+  // devolve os dígitos do jid. Então o fallback para o external_id cru quase nunca entra em ação, e a
+  // chave de um @lid são os dígitos dele. Funciona (é estável por contato), mas não é o que o nome
+  // "br_phone_key" sugere. Ver [[jid-nao-e-telefone]].
   const lid = await salvar(T1, '271828182845904@lid', 'Contato sem telefone');
-  assert.equal(lid.chave, '271828182845904@lid', '@lid não tem telefone: a chave é o jid cru');
+  assert.equal(lid.chave, '271828182845904',
+    'br_phone_key tira o sufixo @lid e devolve os dígitos: 15 dígitos não são 12/13 nem 11, então passam inteiros');
+  // O fallback para o external_id cru existe para o caso de SOBRAR string sem dígito nenhum.
+  const semDigito = await salvar(T1, 'status@broadcast', 'Sem dígito algum');
+  assert.equal(semDigito.chave, 'status@broadcast', 'sem dígito, br_phone_key devolve vazio e a chave é o id cru');
 });
 
 test('(b) o MESMO telefone escrito de dois jeitos é UM contato — editar por qualquer conversa atualiza a mesma linha', async () => {

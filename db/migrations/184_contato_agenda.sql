@@ -18,9 +18,15 @@
 -- "como a unidade chama este contato". Não fundir as duas.
 --
 -- CHAVE = `coalesce(nullif(br_phone_key(external_id),''), external_id)`, calculada SEMPRE pelo
--- banco (nunca pela aplicação) para ser uma régua só. Cobre os dois mundos de [[jid-nao-e-telefone]]:
--- telefone casa por br_phone_key (migr 085) e vale para qualquer formato do mesmo número; @lid e
--- outros jids sem telefone casam pelo external_id cru. Em Valinhos: 1.811 jids de telefone, 725 @lid.
+-- banco (nunca pela aplicação) para ser uma régua só. Telefone casa por br_phone_key (migr 085), e
+-- vale para qualquer formato do mesmo número — foi assim que nasceram conversas duplicadas.
+--
+-- ⚠ MEDIDO em 05/10/2026, contra o que eu supunha: br_phone_key NÃO devolve vazio para um jid sem
+-- telefone. Ela apaga os não-dígitos, então '...@lid' vira os DÍGITOS do lid, e o fallback para o
+-- external_id cru só entra quando não sobra dígito nenhum (ex.: 'status@broadcast'). A chave segue
+-- estável por contato — é o que esta tabela precisa — mas não é o que o nome da função sugere.
+-- Dívida relacionada, de outra frente: o webhook grava jid.split('@')[0], então as conversas do LM
+-- não guardam o sufixo @lid (contar external_id LIKE '%@lid' dá 0). Ver [[jid-nao-e-telefone]].
 --
 -- Executar como superuser "postgres":
 --   psql "$DATABASE_URL" -f db/migrations/184_contato_agenda.sql

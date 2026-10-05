@@ -93,6 +93,8 @@ function chaveAgendaSql(colRkey, colExternalId) {
 }
 
 // A MESMA expressão para o INSERT/DELETE, a partir do external_id puro (a rota não tem rkey).
+// ⚠ br_phone_key só devolve vazio quando o external_id não tem NENHUM dígito; um jid tipo '…@lid'
+// vira os dígitos dele, não o jid cru (medido 05/10/2026). A chave continua estável por contato.
 function chaveAgendaDeExternalIdSql(param) {
   return `coalesce(nullif(br_phone_key(${param}), ''), ${param})`;
 }
