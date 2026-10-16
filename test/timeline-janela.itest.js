@@ -41,14 +41,19 @@ before(async () => {
     CREATE TABLE IF NOT EXISTS messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, conversation_id uuid,
       role text, sender text, body text, received_at timestamptz, raw jsonb,
-      reply_to_message_id uuid, external_message_id text, media_url text, media_type text,
-      media_filename text, media_transcription text, edited_at timestamptz, deleted_at timestamptz);
+      reply_to_message_id uuid, reply_to_external_id text, external_message_id text,
+      media_url text, media_type text, media_filename text, media_transcription text,
+      media_pendente boolean DEFAULT false, conteudo jsonb,
+      edited_at timestamptz, deleted_at timestamptz);
     CREATE TABLE IF NOT EXISTS staff_outbound_samples (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, external_id text,
       sender text, body text, received_at timestamptz, source text, raw jsonb,
-      reply_to_message_id uuid, external_message_id text, ack_status text, entregue_em timestamptz,
-      lida_em timestamptz, edited_at timestamptz, deleted_at timestamptz, media_url text,
-      media_type text, media_filename text, media_transcription text);
+      reply_to_message_id uuid, reply_to_external_id text, external_message_id text,
+      ack_status text, entregue_em timestamptz, lida_em timestamptz, edited_at timestamptz,
+      deleted_at timestamptz, media_url text, media_type text, media_filename text,
+      media_transcription text, conteudo jsonb,
+      -- separa grupo de conversa direta (migr. 103) — a consulta filtra por ela
+      is_group boolean DEFAULT false);
     CREATE TABLE IF NOT EXISTS pending_approvals (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, lead_id uuid, status text,
       suggested_response text, created_at timestamptz, reply_to_message_id uuid);
