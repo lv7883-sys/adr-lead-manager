@@ -52,13 +52,34 @@ que existem em qualquer negócio com contrato e atendimento.
 
 | Âncora | Significado genérico | Na Academia do Rock | Exige |
 |---|---|---|---|
-| `inicio_contrato` | contratação fechada | matrícula | cadastro mestre (todo tenant tem) |
+| `inicio_contrato` | contratação fechada | **matrícula** (`service_account.data_matricula`) | cadastro mestre (todo tenant tem) |
 | `atendimento_agendado` | próximo atendimento marcado | próxima aula | **fonte de agenda** |
 | `primeiro_atendimento` | primeiro atendimento realizado | 1ª aula dada | **fonte de presença** |
 
 Uma etapa só pode usar uma âncora cuja fonte o tenant tenha conectada. Empresa sem agenda integrada
 usa apenas `inicio_contrato` — a régua funciona, só não tem lembrete de atendimento. A tela mostra
 o motivo quando uma âncora está indisponível.
+
+⚠ **Matrícula ≠ início das aulas.** A contratação é fechada num dia e as aulas começam depois: de
+julho a outubro de 2026, **220 dos 364 contratos de Valinhos (60%) começaram depois da matrícula**, em
+média 4 dias depois. A âncora `inicio_contrato` é a MATRÍCULA — é quando a família acabou de decidir
+e está disposta a ouvir.
+
+A implementação de 16/09 usou `ini_vigencia` (o primeiro dia de aula) porque era a única data que o
+cadastro guardava. Resultado: o aluno recém-matriculado não aparecia para a recepção, e a mensagem de
+boas-vindas só nascia no dia da primeira aula. Foi o caso do Marcos Antônio Prudêncio Jr (matrícula
+13/10, primeira aula 17/10), relatado pela recepção em 16/10/2026.
+
+Corrigido: `service_account.data_matricula` (migração 185), preenchida a partir de
+`bi_raw.contracts."dataAtivacao"` pelo enriquecimento diário do dashboard. Quem lê usa
+`boasVindasRegua.ancoraContrato()`: a matrícula quando existe, o início da vigência quando não
+existe — contrato antigo segue exatamente como antes. A janela de 60 dias da rotina e o teto R2
+também contam da matrícula; a metade da vigência (R2) continua medindo o contrato, que é o que ela
+protege. As etapas presas à agenda (`atendimento_agendado`, `primeiro_atendimento`) não mudam.
+
+Enquanto a agenda ainda não mostra a primeira aula, a mensagem 1 nasce **bloqueada** pela R8 (falta
+`{dia}`/`{horario}`) e aparece assim na aba — visível para a recepção desde a matrícula, em vez de
+invisível até o primeiro dia de aula.
 
 **Fontes de agenda/presença são adaptadores** (mesmo padrão dos adapters de cadastro e de recursos):
 

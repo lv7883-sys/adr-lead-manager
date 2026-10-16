@@ -11,13 +11,21 @@ const MODELO_PADRAO = 'escola-de-musica-academia-do-rock';
 // O teto R2 do boas-vindas termina na véspera dele. Teste de paridade em boas-vindas-sweep.test.js.
 const RENOVACAO_PRIMEIRO_MARCO_DIAS = 45;
 
-// Contratos que ainda podem gerar boas-vindas: começaram nos últimos `janela` dias (até hoje), não
-// cancelados. Traz titular e pagador com telefone, ids externos (ponte com a agenda), se o titular já
-// tinha contrato antes (renovação não recebe boas-vindas) e se algum telefone é de contato interno.
+// Contratos que ainda podem gerar boas-vindas: a MATRÍCULA (contratação fechada) caiu nos últimos
+// `janela` dias, e não estão cancelados. Traz titular e pagador com telefone, ids externos (ponte com
+// a agenda), se o titular já tinha contrato antes (renovação não recebe boas-vindas) e se algum
+// telefone é de contato interno.
+//
+// MATRÍCULA ≠ INÍCIO DAS AULAS (16/10/2026): a família fecha a contratação num dia e as aulas começam
+// dias depois — 60% dos contratos de Valinhos, em média 4 dias. A janela olhava `ini_vigencia`, então
+// o aluno recém-matriculado só aparecia para a recepção no primeiro dia de aula, com a mensagem de
+// boas-vindas já atrasada. Agora a janela e a âncora usam `data_matricula` (migr 185, preenchida pelo
+// enriquecimento), com reserva em `ini_vigencia` para o contrato antigo que ainda não tem a data.
 const SQL_CONTRATOS = `
 WITH alvo AS (
   SELECT sa.id AS account_id,
          to_char(sa.ini_vigencia, 'YYYY-MM-DD') AS ini_vigencia,
+         to_char(sa.data_matricula, 'YYYY-MM-DD') AS data_matricula,
          to_char(sa.fim_vigencia, 'YYYY-MM-DD') AS fim_vigencia,
          sa.servico_label, sa.periodicidade, sa.professor_nome,
          (SELECT er.external_id FROM lead_manager.external_ref er
@@ -28,7 +36,7 @@ WITH alvo AS (
      AND sa.fonte_ausente_em IS NULL
      AND (sa.status IS NULL OR sa.status NOT IN ('Cancelado', 'Inativo', 'Não Renovado'))
      AND sa.ini_vigencia IS NOT NULL
-     AND sa.ini_vigencia BETWEEN ($2::date - $3::int) AND $2::date
+     AND coalesce(sa.data_matricula, sa.ini_vigencia) BETWEEN ($2::date - $3::int) AND $2::date
 ),
 membros AS (
   SELECT am.account_id, am.bond, am.person_id, p.display_name AS nome,
@@ -144,6 +152,7 @@ function contratoDaLinha(row) {
   return {
     accountId: row.account_id,
     iniVigencia: row.ini_vigencia,
+    dataMatricula: row.data_matricula || null,   // null = contrato sem a data; quem lê cai em iniVigencia
     fimVigencia: row.fim_vigencia,
     servico: row.servico_label || null,
     periodicidade: row.periodicidade || null,

@@ -201,6 +201,34 @@ test('unidade sem agenda integrada: a simulação aponta a régua inválida e o 
   assert.ok(r.errosRegua.some((e) => e.includes('agenda')));
 });
 
+// ── Matrícula assinada antes do começo das aulas (16/10/2026) ───────────────────────────────────
+// Caso real: Marcos Antônio Prudêncio Jr — matrícula 13/10, primeira aula 17/10. Enquanto a janela e a
+// âncora olhavam o início da vigência, ele só aparecia para a recepção no dia da primeira aula.
+// (Telefones novos de propósito: os da massa acima já são de contato interno e de outra família.)
+test('matrícula antes do início das aulas: entra no dia da MATRÍCULA, com a matrícula como âncora', async () => {
+  const joana = await pessoa(A, 'JOANA PRADO', '5519966660000', '777');
+  const acc = await contrato(A, { ini: '2026-09-25', fim: '2027-01-30', ext: '2200', aluno: joana, periodicidade: 'trimestral' });
+  await admin('UPDATE lead_manager.service_account SET data_matricula = $2::date WHERE id = $1', [acc, '2026-09-21']);
+  await agenda('2026-09-21', [{ data: '2026-09-25', id: '90', aluno: 777, contrato: 2200 }]);
+
+  const r = await sweep.processarTenant(A, { agora: AGORA });   // segunda 21/09, o próprio dia da matrícula
+  assert.equal(r.pulado, undefined);
+  const bv1 = (await toques(A, acc)).find((t) => t.ordem === 1);
+  assert.ok(bv1, 'a mensagem de boas-vindas existe já no dia da matrícula');
+  assert.equal(bv1.status, 'pendente');
+  assert.equal(new Date(bv1.ancora_data).toISOString().slice(0, 10), '2026-09-21', 'a âncora é a matrícula, não o início das aulas');
+  assert.ok(bv1.texto_final.includes('Dia: sexta-feira, 25/09'), 'o texto já fala da primeira aula');
+});
+
+test('contrato sem data de matrícula: segue no início da vigência (nada muda para o que já existia)', async () => {
+  const tiago = await pessoa(A, 'TIAGO REIS', '5519977770000', '778');
+  const acc = await contrato(A, { ini: '2026-09-28', fim: '2027-01-30', ext: '2201', aluno: tiago, periodicidade: 'trimestral' });
+  const r = await sweep.processarTenant(A, { agora: AGORA });   // 21/09: a vigência começa só em 28/09
+  assert.equal(r.pulado, undefined);
+  assert.equal((await toques(A, acc)).length, 0, 'fora da janela enquanto a vigência não começa');
+});
+
+
 test('runBoasVindasSweep: percorre as unidades ativas e isola erro de uma unidade', async () => {
   const r = await sweep.runBoasVindasSweep({ agora: AGORA, portao: async () => [A, B, '00000000-0000-4000-8000-000000000000'] });
   assert.equal(r.length, 3);

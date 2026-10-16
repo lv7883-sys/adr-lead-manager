@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-boas-vindas-itest.sh — itests do BOAS-VINDAS (ADR-050): migrations 120–125 +
+# run-boas-vindas-itest.sh — itests do BOAS-VINDAS (ADR-050): migrations 120–126, 185 +
 # db/grants/boas_vindas_agenda_read.sql (E17-01) e a rotina diária jobs/boas-vindas-sweep (E17-02).
 # PG DESCARTÁVEL: schema lead_manager + cadastro (060/072/105…) + automacao_config/tenant_lead_config/
 # internal_contacts mínimos + um schema `app` mínimo (só as 3 tabelas lidas). Migrations aplicadas DUAS
@@ -54,7 +54,7 @@ SQL
 echo "[itest] migrations do cadastro (person/service_account/professor…)…"
 for m in 051_contact_roles 060_cadastro_mestre 061_person_data_nascimento 067_contact_point_tipo \
          068_person_payer_relation 069_canonical_roles_seed 070_field_provenance 072_cadastro_sync \
-         105_service_account_professor_person; do
+         105_service_account_professor_person 185_data_matricula_do_contrato; do
   psql_db < "$ROOT/db/migrations/${m}.sql" >/dev/null
 done
 

@@ -300,3 +300,56 @@ test('planejar: lembrete da aula previsto para hoje à tarde segura a mensagem c
   assert.equal(R.dataSP(orient.dueAt), '2026-09-24');
   assert.equal(toqueDe(r.planos[0], 3, 1).status, 'pendente');
 });
+
+// ── A âncora é a MATRÍCULA, não o início das aulas (16/10/2026) ──────────────────────────────────
+// Caso real: Marcos Antônio Prudêncio Jr, matrícula 13/10 e primeira aula 17/10. Ele não aparecia
+// para a recepção enquanto a régua se ancorava no início da vigência.
+const MATRICULADO_ANTES = { accountId: 'acc-marcos', iniVigencia: '2026-10-17', dataMatricula: '2026-10-13', fimVigencia: '2027-01-30' };
+
+const PRIMEIRA_AULA = aula({ data: '2026-10-17', _id_contrato: 1154, hora_inicio: '15:00', hora_fim: '16:00' });
+
+test('âncora: a boas-vindas fica pronta no dia da MATRÍCULA, com as aulas começando depois', () => {
+  const r = planoDe({ contratos: [contrato(MATRICULADO_ANTES)], aulas: [PRIMEIRA_AULA], agora: sp('2026-10-13', '10:00') });
+  const bv1 = toqueDe(r.planos[0], 1);
+  assert.equal(bv1.status, 'pendente', 'a recepção já tem a mensagem na mão no dia da matrícula');
+  assert.equal(bv1.momento, 'devida');
+  assert.equal(R.dataSP(bv1.dueAt), '2026-10-13');
+  assert.equal(r.planos[0].dataMatricula, '2026-10-13');
+  assert.ok(bv1.textoFinal.includes('* Dia: sábado, 17/10\n* Horário: 15h'), 'o texto já fala da primeira aula');
+});
+
+test('âncora: enquanto a agenda não mostra a aula, a mensagem espera o dado (R8), mas já existe', () => {
+  const r = planoDe({ contratos: [contrato(MATRICULADO_ANTES)], aulas: [], agora: sp('2026-10-13', '10:00') });
+  const bv1 = toqueDe(r.planos[0], 1);
+  assert.equal(bv1.status, 'bloqueado');
+  assert.equal(bv1.bloqueio, 'sem_horario');
+  assert.equal(R.dataSP(bv1.dueAt), '2026-10-13', 'aparece na aba desde a matrícula, esperando a agenda');
+});
+
+test('âncora: sem a data da matrícula, nada muda — continua valendo o início da vigência', () => {
+  const ct = contrato({ ...MATRICULADO_ANTES, dataMatricula: null });
+  const antes = toqueDe(planoDe({ contratos: [ct], aulas: [PRIMEIRA_AULA], agora: sp('2026-10-13', '10:00') }).planos[0], 1);
+  assert.equal(antes.momento, 'futura', 'contrato antigo (sem a data) só fica devido quando a vigência começa');
+  assert.equal(R.dataSP(antes.dueAt), '2026-10-17');
+  const depois = planoDe({ contratos: [ct], aulas: [PRIMEIRA_AULA], agora: sp('2026-10-17', '10:00') });
+  assert.equal(toqueDe(depois.planos[0], 1).momento, 'devida');
+});
+
+test('âncora: data da matrícula depois do início da vigência é ignorada (dado torto não atrasa ninguém)', () => {
+  const ct = contrato({ accountId: 'acc-x', iniVigencia: '2026-10-13', dataMatricula: '2026-10-20', fimVigencia: '2027-01-30' });
+  const r = planoDe({ contratos: [ct], agora: sp('2026-10-13', '10:00') });
+  assert.equal(R.dataSP(toqueDe(r.planos[0], 1).dueAt), '2026-10-13');
+});
+
+test('âncora: o teto de 60 dias conta da matrícula; a metade da vigência continua medindo o contrato', () => {
+  assert.equal(R.tetoDaRegua({ iniVigencia: '2026-10-17', dataMatricula: '2026-10-13', fimVigencia: '2027-10-17' }), '2026-12-12');
+  assert.equal(R.tetoDaRegua({ iniVigencia: '2026-10-17', fimVigencia: '2027-10-17' }), '2026-12-16');
+  // contrato curto: a metade da vigência (do contrato, não da matrícula) continua mandando
+  assert.equal(R.tetoDaRegua({ iniVigencia: '2026-10-17', dataMatricula: '2026-10-13', fimVigencia: '2026-11-16' }), '2026-11-01');
+});
+
+test('âncora: o alerta de quem não começou conta da matrícula', () => {
+  const comum = { iniVigencia: '2026-10-17', primeiroAtendimento: null, alertaDias: 21 };
+  assert.equal(R.precisaAlertaSemInicio({ ...comum, dataMatricula: '2026-10-13', hoje: '2026-11-03' }), true);
+  assert.equal(R.precisaAlertaSemInicio({ ...comum, hoje: '2026-11-03' }), false, 'sem a data, conta da vigência como antes');
+});

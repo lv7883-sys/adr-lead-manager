@@ -343,14 +343,26 @@ function ehContratoCurto({ iniVigencia, fimVigencia } = {}) {
   return diasEntre(iniVigencia, fimVigencia) <= LIMITES.CONTRATO_CURTO_DIAS;
 }
 
+// DATA DA MATRÍCULA (contratação fechada) × INÍCIO DA VIGÊNCIA (primeiro dia de aula). A âncora
+// `inicio_contrato` da régua é a MATRÍCULA (ADR-050 §3.1): é quando a família fecha e está disposta a
+// ouvir. As duas datas só coincidem quando as aulas começam no mesmo dia — em Valinhos isso acontece
+// em 40% dos contratos; nos outros a matrícula vem, em média, 4 dias antes. Contrato sem a data
+// (antigo, ou espelho do BI ainda sem a linha) cai em `iniVigencia` e nada muda para ele.
+const ancoraContrato = (conta) => {
+  const m = conta && conta.dataMatricula;
+  return ISO_DATA.test(String(m)) && m <= conta.iniVigencia ? m : (conta && conta.iniVigencia);
+};
+
 // R2 — último dia (SP) em que uma mensagem da régua pode sair:
-// min(início + 60, início + 50% da vigência, véspera do início da régua de renovação).
+// min(matrícula + 60, início da vigência + 50% da vigência, véspera do início da régua de renovação).
+// Os 60 dias contam da MATRÍCULA (é dali que a régua anda); a metade da vigência continua medindo o
+// contrato em si, que é o que ela protege.
 // CONTRATO CURTO ignora o início da renovação: num contrato de 30 dias a renovação já começa no
 // dia da matrícula (marco D-30), e a proteção contra a colisão é a régua reduzida (só as etapas
 // marcadas para contrato curto) somada ao teto de 50%. Sem essa exceção o mensal nunca teria
 // boas-vindas.
-function tetoDaRegua({ iniVigencia, fimVigencia, inicioRenovacao } = {}) {
-  let teto = somarDias(iniVigencia, LIMITES.TETO_DIAS);
+function tetoDaRegua({ iniVigencia, fimVigencia, inicioRenovacao, dataMatricula } = {}) {
+  let teto = somarDias(ancoraContrato({ iniVigencia, dataMatricula }), LIMITES.TETO_DIAS);
   if (ISO_DATA.test(String(fimVigencia))) {
     const metade = somarDias(iniVigencia, Math.floor(diasEntre(iniVigencia, fimVigencia) * LIMITES.FRACAO_VIGENCIA));
     if (metade < teto) teto = metade;
@@ -374,6 +386,7 @@ const _presaAoAtendimento = (e) => e.quando && (e.quando.tipo === 'vespera' || e
 //   situacao: 'agendada' | 'aguardando_ancora' | 'fora_da_janela' | 'sem_horario_atendimento' | 'externa'
 function calcularMensagens({ conta, etapas, fatos = {}, horario: horarioCfg, feriados } = {}) {
   if (!conta || !ISO_DATA.test(String(conta.iniVigencia))) throw new Error('conta.iniVigencia obrigatória (YYYY-MM-DD)');
+  const matricula = ancoraContrato(conta);   // = conta.dataMatricula, ou iniVigencia quando não temos a data
   const fer = _feriados(feriados);
   const curto = ehContratoCurto(conta);
   const teto = tetoDaRegua(conta);
@@ -382,7 +395,7 @@ function calcularMensagens({ conta, etapas, fatos = {}, horario: horarioCfg, fer
     .map((a) => ({ ...a, inicio: toMs(a.inicio), fim: toMs(a.fim) }))
     // Aulas DEPOIS do dia da matrícula: a do próprio dia não tem véspera possível (verificado em
     // Valinhos: 16 de 54 lembretes caíam assim). "Duas primeiras aulas" = as duas primeiras a lembrar.
-    .filter((a) => a.inicio != null && dataSP(a.inicio) > conta.iniVigencia)
+    .filter((a) => a.inicio != null && dataSP(a.inicio) > matricula)
     .sort((a, b) => a.inicio - b.inicio);
   const primeiro = fatos.primeiroAtendimento && toMs(fatos.primeiroAtendimento.inicio) != null
     ? { ...fatos.primeiroAtendimento, inicio: toMs(fatos.primeiroAtendimento.inicio), fim: toMs(fatos.primeiroAtendimento.fim) }
@@ -400,7 +413,7 @@ function calcularMensagens({ conta, etapas, fatos = {}, horario: horarioCfg, fer
       const item = { etapa: e, repeticao: r, ancoraData: null, dueAt: null, atendimento: null, situacao: 'agendada' };
       let ancoraMs = null, atendimento = null;
       if (e.ancora === 'inicio_contrato') {
-        item.ancoraData = conta.iniVigencia;
+        item.ancoraData = matricula;
       } else if (e.ancora === 'atendimento_agendado') {
         atendimento = agendados[r - 1] || null;
       } else {
@@ -594,14 +607,15 @@ function umaPorFamilia(mensagens, { horario: horarioCfg, feriados, agora, envios
 }
 
 // Alerta de cliente que não começou: sem 1º atendimento depois de N dias do início do contrato.
-function precisaAlertaSemInicio({ iniVigencia, primeiroAtendimento, hoje, alertaDias = LIMITES.ALERTA_PADRAO } = {}) {
+function precisaAlertaSemInicio({ iniVigencia, dataMatricula, primeiroAtendimento, hoje, alertaDias = LIMITES.ALERTA_PADRAO } = {}) {
   if (primeiroAtendimento) return false;
   if (!ISO_DATA.test(String(iniVigencia)) || !ISO_DATA.test(String(hoje))) return false;
-  return diasEntre(iniVigencia, hoje) >= alertaDias;
+  return diasEntre(ancoraContrato({ iniVigencia, dataMatricula }), hoje) >= alertaDias;
 }
 
 module.exports = {
   ANCORAS, TIPOS_QUANDO, LIMITES, VARIAVEIS_SISTEMA, VARIAVEIS_FATO, ANEXO, LIMITE_LEGENDA,
+  ancoraContrato,
   // datas
   inicioDoDiaSP, dataSP, somarDias, diasEntre, formatarDia, formatarHorario,
   // horário de atendimento

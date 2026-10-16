@@ -22,7 +22,8 @@ colisão de 20/09/2026 (faixa 140–149 ocupada por engano por duas frentes ao m
 | **178–181** | **funil / leads** | 178 fecha matrículas, 179 view contrato × origem, 180–181 interesse do beneficiário | **SIM** (aplicadas) |
 | **182–183** | **funil / leads** | 182 devolve NOT_LEAD com contrato novo (Carla, Ronaldo, Nínive), 183 marca o contrato de teste da recepção | **SIM** (01/10/2026) |
 | **184** | **agenda de contatos** | 184 contato_agenda (o nome do contato como a unidade salva — pedido do Leo 05/10/2026) | **SIM — aplicada em 05/10/2026** |
-| 185–199 | livre | — | — |
+| **185** | **boas-vindas** | 185 data_matricula no contrato (âncora da régua = matrícula, não início das aulas) | não — pronta para aplicar |
+| 186–199 | livre | — | — |
 
 ## Nome do contato: a fonte é `lead_manager.contato_agenda` (184)
 

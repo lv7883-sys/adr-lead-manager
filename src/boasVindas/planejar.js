@@ -34,7 +34,8 @@ function planejarContrato({ contrato, etapas, fatos = {}, fonteAgenda = false, c
   const ct = contrato;
   const agora = typeof agoraIn === 'number' ? agoraIn : Date.parse(agoraIn);
   const base = {
-    accountId: ct.accountId, iniVigencia: ct.iniVigencia, fimVigencia: ct.fimVigencia, servico: ct.servico,
+    accountId: ct.accountId, iniVigencia: ct.iniVigencia, dataMatricula: ct.dataMatricula || null,
+    fimVigencia: ct.fimVigencia, servico: ct.servico,
     periodicidade: ct.periodicidade, clienteNome: ct.beneficiario ? ct.beneficiario.nome : null,
     contratoExt: ct.contratoExt, aulasEncontradas: (fatos.atendimentos || []).length,
     primeiroAtendimento: fatos.primeiroAtendimento || null, toques: [], linhaDoTempo: [],
@@ -46,6 +47,7 @@ function planejarContrato({ contrato, etapas, fatos = {}, fonteAgenda = false, c
   const dest = R.escolherDestinatario({ beneficiario: ct.beneficiario, pagador: ct.pagador });
   const conta = {
     iniVigencia: ct.iniVigencia,
+    dataMatricula: ct.dataMatricula || null,   // âncora de inicio_contrato (ADR-050 §3.1)
     fimVigencia: ct.fimVigencia,
     inicioRenovacao: ct.fimVigencia ? R.somarDias(ct.fimVigencia, -RENOVACAO_PRIMEIRO_MARCO_DIAS) : null,
   };
@@ -113,7 +115,8 @@ function planejarContrato({ contrato, etapas, fatos = {}, fonteAgenda = false, c
   }
 
   const alertaSemInicio = fonteAgenda && R.precisaAlertaSemInicio({
-    iniVigencia: ct.iniVigencia, primeiroAtendimento: fatos.primeiroAtendimento, hoje: R.dataSP(agora), alertaDias: config.alertaDias,
+    iniVigencia: ct.iniVigencia, dataMatricula: ct.dataMatricula || null,
+    primeiroAtendimento: fatos.primeiroAtendimento, hoje: R.dataSP(agora), alertaDias: config.alertaDias,
   });
   return { ...base, elegivel: true, destinatario: dest, alertaSemInicio, toques, linhaDoTempo };
 }
