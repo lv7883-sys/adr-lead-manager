@@ -104,7 +104,7 @@ const porInstante = (itens) => {
 };
 async function percorrer(limite) {
   const todos = []; let cur = null; let primeira = true; let voltas = 0;
-  while ((primeira || cur) && voltas < 100) {
+  while ((primeira || cur) && voltas < 400) {   // 400: janela de 1 em 180 itens precisa de 180 voltas
     const p = await tl.fetchJanela(c, { ...args, limite, antesDe: cur });
     todos.unshift(...p.itens); cur = p.cursor; primeira = false; voltas++;
     if (!p.itens.length) break;
