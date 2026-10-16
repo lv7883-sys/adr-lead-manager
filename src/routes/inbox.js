@@ -27,7 +27,7 @@ const { authenticate } = require('../auth');
 const { requireTenantAccess } = require('../rbac');
 const { isUuid } = require('../validation');
 const { terminalSql, statusVivoSql } = require('../lifecycle');
-const { fetchTimeline } = require('../timeline');
+const { fetchTimeline, fetchJanela, JANELA_PADRAO } = require('../timeline');
 const { naoEhReacaoSql } = require('../reacao');
 // Régua ÚNICA do nome exibido (agenda da unidade > pushName > cadastro > lead > número).
 // Estava copiada em TRÊS lugares deste arquivo; ver o cabeçalho de src/contato-nome.js.
@@ -605,7 +605,9 @@ async function markUnread(client, tenantId, conversationId) {
 // Abre a thread de UMA conversa (E12-05), ancorada em conversation_id — funciona para
 // conversa de NÃO-LEAD (leadId null => timeline sem o ramo IA). Retorna null se a conversa
 // não existe no tenant.
-async function getConversationThread(client, tenantId, conversationId, usuario) {
+// `janela` = { limite, antesDe } — ver o cabeçalho de src/timeline.js. Sem ela, a thread vem
+// INTEIRA (comportamento antigo), que é o que /leads/:id ainda espera.
+async function getConversationThread(client, tenantId, conversationId, usuario, janela = null) {
   const cv = (await client.query(
     `SELECT id, channel, external_id, last_read_at, conversation_kind, arquivada_em, fixada_em, silenciada_ate,
             regexp_replace(external_id, '[^0-9]', '', 'g') AS ident
@@ -640,8 +642,14 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
         AND coalesce(sender, '') <> '' ORDER BY received_at DESC LIMIT 1`,
     [conversationId])).rows[0]?.sender || null;
 
-  const timeline = await fetchTimeline(client, { tenantId, ident: cv.ident, leadId: lead ? lead.id : null,
-    ehGrupo: cv.conversation_kind === 'GROUP' });
+  const argsTl = { tenantId, ident: cv.ident, leadId: lead ? lead.id : null,
+    ehGrupo: cv.conversation_kind === 'GROUP' };
+  // Janela (16/10/2026): a conversa abre com as ÚLTIMAS mensagens e o resto vem ao rolar para cima.
+  // Antes vinha tudo: 4.378 itens e 19,7 MB de HTML na maior conversa de Valinhos.
+  const pag = janela
+    ? await fetchJanela(client, { ...argsTl, limite: janela.limite, antesDe: janela.antesDe })
+    : { itens: await fetchTimeline(client, argsTl), temMais: false, cursor: null };
+  const timeline = pag.itens;
 
   // ADR-042 — marca as bolhas FAVORITADAS (estrela) DO USUÁRIO (favorited_by). Cada recepcionista
   // vê só as suas. Sem usuario => nenhuma (favorited_by nunca é null nas linhas gravadas).
@@ -709,6 +717,10 @@ async function getConversationThread(client, tenantId, conversationId, usuario) 
       })(),
     },
     timeline,
+    // Para o "carregar mais" do scroll: `cursor` é o ponto da janela ANTERIOR; null = chegou ao
+    // começo da conversa. `tem_mais` existe para a tela não precisar interpretar o null.
+    tem_mais: pag.temMais === true,
+    cursor: pag.cursor || null,
   };
 }
 
@@ -1152,8 +1164,17 @@ router.get('/:tenantId/inbox/conversations/:conversationId', authenticate, requi
   const { conversationId } = req.params;
   if (!isUuid(conversationId)) return res.status(400).json({ error: 'invalid_conversation_id' });
   const usuario = typeof req.query.usuario === 'string' ? req.query.usuario : '';
+  // ?limite=N abre a janela; sem ele a thread vem inteira (compatível com quem já chamava).
+  // ?antes_de=<iso>&antes_id=<uuid> pede a janela anterior — os DOIS, porque o cursor é o par
+  // (received_at, id): só a data deixaria de fora quem compartilha o mesmo instante.
+  const lim = parseInt(req.query.limite, 10);
+  const antesTs = typeof req.query.antes_de === 'string' ? req.query.antes_de : '';
+  const antesId = typeof req.query.antes_id === 'string' ? req.query.antes_id : '';
+  const janela = Number.isFinite(lim) && lim > 0
+    ? { limite: lim, antesDe: (antesTs && isUuid(antesId)) ? { received_at: antesTs, id: antesId } : null }
+    : null;
   try {
-    const out = await withTenant(req.tenantId, (c) => getConversationThread(c, req.tenantId, conversationId, usuario));
+    const out = await withTenant(req.tenantId, (c) => getConversationThread(c, req.tenantId, conversationId, usuario, janela));
     if (!out) return res.status(404).json({ error: 'conversation_not_found' });
     res.json({ tenant_id: req.tenantId, ...out });
   } catch (err) {

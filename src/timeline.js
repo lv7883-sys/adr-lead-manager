@@ -199,6 +199,56 @@ const TIMELINE_SQL = `WITH reac AS (
                  LEFT JOIN cit ON t.reply_to_id IS NULL AND t.reply_ext IS NOT NULL AND cit.k = t.reply_ext
                  ORDER BY t.received_at ASC`;
 
+// ---------------------------------------------------------------------------
+// JANELA DA CONVERSA (16/10/2026) — abrir uma conversa trazia a thread INTEIRA.
+//
+// Medido em produção antes de escrever isto: a maior conversa de Valinhos tem 2.097 mensagens e
+// devolvia **4.378 itens** de timeline (as 3 fontes somadas), 816 ms só de banco, 2,1 MB de JSON e
+// **19,7 MB de HTML** — a 4,6 KB por mensagem. A recepção reclamou de lentidão ao trocar de
+// conversa, e era isto: carregar a conversa inteira desde a primeira mensagem, toda vez.
+//
+// Agora funciona como o WhatsApp Web (decisão do Leo): vêm as ÚLTIMAS `limite`, e cada rolagem para
+// cima pede a janela anterior.
+//
+// A PAGINAÇÃO ENVOLVE a consulta acima em vez de reescrevê-la: a timeline é um UNION de três fontes
+// com dedup, reações e citações, e duplicar essa lógica criaria a quinta régua copiada do projeto.
+// O custo é que o banco monta o conjunto antes de cortar — aceitável porque o corte acontece antes
+// de serializar JSON, montar HTML e enfiar tudo no DOM, que é onde estavam os segundos.
+//
+// CURSOR = (received_at, id). Só received_at não serve: mensagens no mesmo instante ficariam de
+// fora ou repetiriam a cada janela. Os ids das três fontes são todos uuid (verificado no banco), e
+// a comparação de tupla do Postgres resolve o empate de forma estável.
+const JANELA_PADRAO = 50;
+
+// Devolve { itens, temMais, cursor } — `cursor` é o ponto para pedir a janela ANTERIOR (ou null
+// quando a conversa acabou). Os itens saem sempre em ordem cronológica, como a tela espera.
+async function fetchJanela(c, { tenantId, ident, leadId = null, ehGrupo = false,
+  limite = JANELA_PADRAO, antesDe = null } = {}) {
+  if (!ident) return { itens: [], temMais: false, cursor: null };
+  const lim = Math.min(Math.max(parseInt(limite, 10) || JANELA_PADRAO, 1), 200);
+  const p = [tenantId, ident, leadId, ehGrupo === true];
+  // Pede UM a mais que a janela: se vier, existe história acima — sem um segundo COUNT.
+  let corte = '';
+  if (antesDe && antesDe.received_at && antesDe.id) {
+    p.push(antesDe.received_at, antesDe.id);
+    corte = `WHERE (j.received_at, j.id) < ($${p.length - 1}::timestamptz, $${p.length}::uuid)`;
+  }
+  const sql = `SELECT * FROM ( SELECT j.* FROM (${TIMELINE_SQL}) j ${corte}
+                 ORDER BY j.received_at DESC, j.id DESC LIMIT ${lim + 1} ) ult
+                ORDER BY ult.received_at ASC, ult.id ASC`;
+  const rows = (await c.query(sql, p)).rows;
+  const temMais = rows.length > lim;
+  const janela = temMais ? rows.slice(1) : rows;       // o excedente é o mais ANTIGO: descarta
+  const itens = janela.map(mapTimelineRow);
+  await _nomearMencoes(c, tenantId, itens);
+  const primeiro = janela[0];
+  return {
+    itens,
+    temMais,
+    cursor: (temMais && primeiro) ? { received_at: primeiro.received_at, id: primeiro.id } : null,
+  };
+}
+
 // Monta reply_to {id, author:"lead"|"staff", preview}. author vem do papel da citada
 // (USER=lead; ASSISTANT=escola/IA=staff). preview: ~80 chars ou "[midia]".
 function mapTimelineRow(r) {
@@ -276,4 +326,4 @@ async function fetchTimeline(c, { tenantId, ident, leadId = null, ehGrupo = fals
   return itens;
 }
 
-module.exports = { TIMELINE_SQL, mapTimelineRow, fetchTimeline };
+module.exports = { TIMELINE_SQL, mapTimelineRow, fetchTimeline, fetchJanela, JANELA_PADRAO };
