@@ -60,13 +60,22 @@ before(async () => {
   `);
   await c.query('DELETE FROM messages WHERE tenant_id = $1', [T]);
   await c.query('DELETE FROM staff_outbound_samples WHERE tenant_id = $1', [T]);
+  await c.query('DELETE FROM conversations WHERE tenant_id = $1', [T]);
+
+  // O ramo do cliente casa por `JOIN conversations cv ON cv.id = m.conversation_id` e filtra pelo
+  // external_id DA CONVERSA — então as mensagens precisam pendurar numa conversa de verdade.
+  // (Na primeira versão deste fixture elas tinham conversation_id solto e o ramo vinha vazio: o
+  // teste passava nos totais e media só as saídas.)
+  const conv = (await c.query(
+    `INSERT INTO conversations (tenant_id, external_id, conversation_kind, renovacao_draft)
+     VALUES ($1, $2, 'DIRECT', false) RETURNING id`, [T, ident])).rows[0].id;
 
   // 120 entradas do cliente + 60 saídas da recepção, intercaladas no tempo.
-  // DE PROPÓSITO: 6 pares no MESMO instante — é onde a paginação ingênua perde ou repete item.
+  // DE PROPÓSITO: 3 instantes com DUAS entradas cada — é onde a paginação ingênua perde ou repete.
   for (let i = 0; i < 120; i++) {
     const t = new Date(BASE + (i < 6 ? Math.floor(i / 2) : i) * 60000).toISOString();
     await c.query(`INSERT INTO messages (tenant_id, conversation_id, role, sender, body, received_at, raw)
-      VALUES ($1, gen_random_uuid(), 'USER', 'Cliente', $2, $3, '{}'::jsonb)`, [T, 'entrada ' + i, t]);
+      VALUES ($1, $2, 'USER', 'Cliente', $3, $4, '{}'::jsonb)`, [T, conv, 'entrada ' + i, t]);
   }
   for (let i = 0; i < 60; i++) {
     const t = new Date(BASE + (i * 2) * 60000).toISOString();
@@ -79,6 +88,7 @@ after(async () => {
   if (c) {
     await c.query('DELETE FROM messages WHERE tenant_id = $1', [T]).catch(() => {});
     await c.query('DELETE FROM staff_outbound_samples WHERE tenant_id = $1', [T]).catch(() => {});
+    await c.query('DELETE FROM conversations WHERE tenant_id = $1', [T]).catch(() => {});
     await c.end();
   }
 });
