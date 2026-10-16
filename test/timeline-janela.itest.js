@@ -204,6 +204,26 @@ test('(h) a ponta NÃO anda sozinha: pedir duas vezes com o mesmo cursor não du
   await c.query(`DELETE FROM messages WHERE tenant_id = $1 AND body = 'dupla?'`, [T]);
 });
 
+test('(i) o cursor preserva MICROSSEGUNDOS — o Date do JS truncaria e repetiria a bolha', async () => {
+  // O bug que este teste existe para impedir foi encontrado pelo teste (h) e não pelos outros:
+  // o fixture usa horários redondos, onde truncar não muda nada. Com now() (microssegundos), o
+  // cursor voltava truncado, a comparação `>` reincluía a própria linha da ponta, e a conversa
+  // aberta repetiria a última mensagem a cada ciclo de 10 s.
+  const conv = (await c.query('SELECT id FROM conversations WHERE tenant_id = $1 LIMIT 1', [T])).rows[0].id;
+  await c.query(`INSERT INTO messages (tenant_id, conversation_id, role, sender, body, received_at, raw)
+    VALUES ($1, $2, 'USER', 'Cliente', 'com microssegundos', now(), '{}'::jsonb)`, [T, conv]);
+  const p = await tl.fetchJanela(c, { ...args, limite: 5 });
+
+  assert.equal(typeof p.fim.received_at, 'string',
+    'o cursor tem de viajar como TEXTO: Date perde os microssegundos do Postgres');
+  assert.match(p.fim.received_at, /\.\d{4,6}/,
+    'o texto precisa carregar a fração de segundo — sem ela o truncamento volta');
+
+  const depois = await tl.fetchJanela(c, { ...args, limite: 50, depoisDe: p.fim });
+  assert.equal(depois.itens.length, 0, 'a ponta não pode trazer a si mesma de volta');
+  await c.query(`DELETE FROM messages WHERE tenant_id = $1 AND body = 'com microssegundos'`, [T]);
+});
+
 test('(f) sem limite, nada muda: a thread vem inteira (o que /leads/:id ainda usa)', async () => {
   const inteira = await tl.fetchTimeline(c, args);
   const semLimite = await tl.fetchJanela(c, { ...args, limite: 500 });

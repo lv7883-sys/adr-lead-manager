@@ -240,7 +240,15 @@ async function fetchJanela(c, { tenantId, ident, leadId = null, ehGrupo = false,
     corte = `WHERE (j.received_at, j.id) < ($${p.length - 1}::timestamptz, $${p.length}::uuid)`;
   }
   // Pede UM a mais que a janela: se vier, existe história acima — sem um segundo COUNT.
-  const sql = `SELECT * FROM ( SELECT j.* FROM (${TIMELINE_SQL}) j ${corte}
+  // ⚠ `cursor_ts` é o received_at COMO TEXTO, e o cursor usa ELE, não o Date do driver.
+  // O Postgres guarda timestamp com microssegundos; o Date do JavaScript só tem milissegundos. Se o
+  // cursor viajasse como Date, o valor voltaria TRUNCADO e a comparação `>` traria de novo a própria
+  // linha que serviu de ponta — a conversa aberta duplicaria a última mensagem a cada ciclo, e o
+  // scroll repetiria a bolha da borda. O fixture do teste não expunha isso porque usava horários
+  // redondos; apareceu no primeiro caso com now(). O texto preserva a precisão e o $n::timestamptz
+  // a devolve inteira ao banco.
+  const sql = `SELECT ult.*, ult.received_at::text AS cursor_ts
+                 FROM ( SELECT j.* FROM (${TIMELINE_SQL}) j ${corte}
                  ORDER BY j.received_at ${ordem}, j.id ${ordem} LIMIT ${limReal} ) ult
                 ORDER BY ult.received_at ASC, ult.id ASC`;
   const rows = (await c.query(sql, p)).rows;
@@ -253,9 +261,9 @@ async function fetchJanela(c, { tenantId, ident, leadId = null, ehGrupo = false,
   return {
     itens,
     temMais,
-    cursor: (temMais && primeiro) ? { received_at: primeiro.received_at, id: primeiro.id } : null,
+    cursor: (temMais && primeiro) ? { received_at: primeiro.cursor_ts, id: primeiro.id } : null,
     // ponta mais NOVA desta janela — é daqui que a tela pergunta "chegou algo depois disto?"
-    fim: ultimo ? { received_at: ultimo.received_at, id: ultimo.id } : null,
+    fim: ultimo ? { received_at: ultimo.cursor_ts, id: ultimo.id } : null,
   };
 }
 
