@@ -165,6 +165,45 @@ test('(e) o cursor acaba: no começo da conversa temMais é false e cursor é nu
   assert.equal(ultima.cursor, null, 'cursor null é o sinal de "chegou ao começo" — sem isso o scroll pede para sempre');
 });
 
+// --- o outro lado da janela: o que chegou DEPOIS (a conversa aberta se atualizando sozinha) ---
+//
+// Por que isto existe: medido em 16/10/2026, a mensagem do cliente chega ao banco em 8 s (mediana),
+// mas a CONVERSA ABERTA não tinha atualização nenhuma — havia um único timer no inbox e ele cuidava
+// só da lista. A recepcionista ficava olhando a conversa com a resposta já gravada no banco.
+
+test('(g) depoisDe traz só o que chegou depois — e nada quando não chegou nada', async () => {
+  const p = await tl.fetchJanela(c, { ...args, limite: 10 });
+  const fim = p.fim;
+  assert.ok(fim && fim.id, 'a janela precisa devolver a ponta nova, senão a tela não sabe o que perguntar');
+
+  const nada = await tl.fetchJanela(c, { ...args, limite: 50, depoisDe: fim });
+  assert.deepEqual(nada.itens, [], 'sem mensagem nova, o ciclo tem de custar uma consulta vazia');
+
+  // chega uma mensagem agora
+  const conv = (await c.query('SELECT id FROM conversations WHERE tenant_id = $1 LIMIT 1', [T])).rows[0].id;
+  await c.query(`INSERT INTO messages (tenant_id, conversation_id, role, sender, body, received_at, raw)
+    VALUES ($1, $2, 'USER', 'Cliente', 'acabou de chegar', now(), '{}'::jsonb)`, [T, conv]);
+
+  const novas = await tl.fetchJanela(c, { ...args, limite: 50, depoisDe: fim });
+  assert.equal(novas.itens.length, 1, 'tem de trazer exatamente a que chegou');
+  assert.equal(novas.itens[0].body, 'acabou de chegar');
+  assert.ok(novas.fim && String(novas.fim.id) === String(novas.itens[0].id),
+    'a ponta avança, senão o próximo ciclo traria a mesma mensagem de novo');
+  await c.query(`DELETE FROM messages WHERE tenant_id = $1 AND body = 'acabou de chegar'`, [T]);
+});
+
+test('(h) a ponta NÃO anda sozinha: pedir duas vezes com o mesmo cursor não duplica', async () => {
+  const p = await tl.fetchJanela(c, { ...args, limite: 10 });
+  const conv = (await c.query('SELECT id FROM conversations WHERE tenant_id = $1 LIMIT 1', [T])).rows[0].id;
+  await c.query(`INSERT INTO messages (tenant_id, conversation_id, role, sender, body, received_at, raw)
+    VALUES ($1, $2, 'USER', 'Cliente', 'dupla?', now(), '{}'::jsonb)`, [T, conv]);
+  const a1 = await tl.fetchJanela(c, { ...args, limite: 50, depoisDe: p.fim });
+  const a2 = await tl.fetchJanela(c, { ...args, limite: 50, depoisDe: a1.fim });
+  assert.equal(a1.itens.length, 1);
+  assert.equal(a2.itens.length, 0, 'avançando a ponta, o ciclo seguinte não repete a mensagem');
+  await c.query(`DELETE FROM messages WHERE tenant_id = $1 AND body = 'dupla?'`, [T]);
+});
+
 test('(f) sem limite, nada muda: a thread vem inteira (o que /leads/:id ainda usa)', async () => {
   const inteira = await tl.fetchTimeline(c, args);
   const semLimite = await tl.fetchJanela(c, { ...args, limite: 500 });

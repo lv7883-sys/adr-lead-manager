@@ -647,8 +647,8 @@ async function getConversationThread(client, tenantId, conversationId, usuario, 
   // Janela (16/10/2026): a conversa abre com as ÚLTIMAS mensagens e o resto vem ao rolar para cima.
   // Antes vinha tudo: 4.378 itens e 19,7 MB de HTML na maior conversa de Valinhos.
   const pag = janela
-    ? await fetchJanela(client, { ...argsTl, limite: janela.limite, antesDe: janela.antesDe })
-    : { itens: await fetchTimeline(client, argsTl), temMais: false, cursor: null };
+    ? await fetchJanela(client, { ...argsTl, limite: janela.limite, antesDe: janela.antesDe, depoisDe: janela.depoisDe })
+    : { itens: await fetchTimeline(client, argsTl), temMais: false, cursor: null, fim: null };
   const timeline = pag.itens;
 
   // ADR-042 — marca as bolhas FAVORITADAS (estrela) DO USUÁRIO (favorited_by). Cada recepcionista
@@ -721,6 +721,8 @@ async function getConversationThread(client, tenantId, conversationId, usuario, 
     // começo da conversa. `tem_mais` existe para a tela não precisar interpretar o null.
     tem_mais: pag.temMais === true,
     cursor: pag.cursor || null,
+    // ponta NOVA da janela: a tela guarda e pergunta "chegou algo depois disto?" a cada ciclo
+    fim: pag.fim || null,
   };
 }
 
@@ -1170,8 +1172,16 @@ router.get('/:tenantId/inbox/conversations/:conversationId', authenticate, requi
   const lim = parseInt(req.query.limite, 10);
   const antesTs = typeof req.query.antes_de === 'string' ? req.query.antes_de : '';
   const antesId = typeof req.query.antes_id === 'string' ? req.query.antes_id : '';
+  // ?depois_de=&depois_id= pede só o que chegou DEPOIS — é a conversa aberta se atualizando
+  // sozinha, sem redesenhar a janela nem descartar o histórico que a pessoa já rolou.
+  const depoisTs = typeof req.query.depois_de === 'string' ? req.query.depois_de : '';
+  const depoisId = typeof req.query.depois_id === 'string' ? req.query.depois_id : '';
   const janela = Number.isFinite(lim) && lim > 0
-    ? { limite: lim, antesDe: (antesTs && isUuid(antesId)) ? { received_at: antesTs, id: antesId } : null }
+    ? {
+      limite: lim,
+      antesDe: (antesTs && isUuid(antesId)) ? { received_at: antesTs, id: antesId } : null,
+      depoisDe: (depoisTs && isUuid(depoisId)) ? { received_at: depoisTs, id: depoisId } : null,
+    }
     : null;
   try {
     const out = await withTenant(req.tenantId, (c) => getConversationThread(c, req.tenantId, conversationId, usuario, janela));

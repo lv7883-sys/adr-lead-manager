@@ -223,29 +223,39 @@ const JANELA_PADRAO = 50;
 // Devolve { itens, temMais, cursor } — `cursor` é o ponto para pedir a janela ANTERIOR (ou null
 // quando a conversa acabou). Os itens saem sempre em ordem cronológica, como a tela espera.
 async function fetchJanela(c, { tenantId, ident, leadId = null, ehGrupo = false,
-  limite = JANELA_PADRAO, antesDe = null } = {}) {
-  if (!ident) return { itens: [], temMais: false, cursor: null };
+  limite = JANELA_PADRAO, antesDe = null, depoisDe = null } = {}) {
+  if (!ident) return { itens: [], temMais: false, cursor: null, fim: null };
   const lim = Math.min(Math.max(parseInt(limite, 10) || JANELA_PADRAO, 1), 200);
   const p = [tenantId, ident, leadId, ehGrupo === true];
-  // Pede UM a mais que a janela: se vier, existe história acima — sem um segundo COUNT.
-  let corte = '';
-  if (antesDe && antesDe.received_at && antesDe.id) {
+  // `depoisDe` = o que chegou DEPOIS do que já está na tela (a conversa aberta se atualizando
+  // sozinha). É o espelho de `antesDe` e evita redesenhar a janela toda a cada 10 s: na quase
+  // totalidade dos ciclos não veio nada, e o custo é uma consulta que devolve zero linhas.
+  let corte = '', ordem = 'DESC', limReal = lim + 1;
+  if (depoisDe && depoisDe.received_at && depoisDe.id) {
+    p.push(depoisDe.received_at, depoisDe.id);
+    corte = `WHERE (j.received_at, j.id) > ($${p.length - 1}::timestamptz, $${p.length}::uuid)`;
+    ordem = 'ASC'; limReal = lim;          // aqui não há "tem mais": são as novas, todas elas
+  } else if (antesDe && antesDe.received_at && antesDe.id) {
     p.push(antesDe.received_at, antesDe.id);
     corte = `WHERE (j.received_at, j.id) < ($${p.length - 1}::timestamptz, $${p.length}::uuid)`;
   }
+  // Pede UM a mais que a janela: se vier, existe história acima — sem um segundo COUNT.
   const sql = `SELECT * FROM ( SELECT j.* FROM (${TIMELINE_SQL}) j ${corte}
-                 ORDER BY j.received_at DESC, j.id DESC LIMIT ${lim + 1} ) ult
+                 ORDER BY j.received_at ${ordem}, j.id ${ordem} LIMIT ${limReal} ) ult
                 ORDER BY ult.received_at ASC, ult.id ASC`;
   const rows = (await c.query(sql, p)).rows;
-  const temMais = rows.length > lim;
+  const temMais = !depoisDe && rows.length > lim;
   const janela = temMais ? rows.slice(1) : rows;       // o excedente é o mais ANTIGO: descarta
   const itens = janela.map(mapTimelineRow);
   await _nomearMencoes(c, tenantId, itens);
   const primeiro = janela[0];
+  const ultimo = janela[janela.length - 1];
   return {
     itens,
     temMais,
     cursor: (temMais && primeiro) ? { received_at: primeiro.received_at, id: primeiro.id } : null,
+    // ponta mais NOVA desta janela — é daqui que a tela pergunta "chegou algo depois disto?"
+    fim: ultimo ? { received_at: ultimo.received_at, id: ultimo.id } : null,
   };
 }
 
