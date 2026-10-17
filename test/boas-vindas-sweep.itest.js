@@ -271,7 +271,7 @@ test('contrato anterior ainda vigente: está somando outra aula, não recebe de 
 
 // ── Inclusão manual: quem atende pode discordar da régua (ADR-050 §21) ──────────────────────────
 test('a lista de FORA diz quem não entrou e por quê, e a recepção consegue incluir', async () => {
-  const fora = await recepcao.listarFora(A, { hoje: '2026-09-21' });
+  const { itens: fora, total } = await recepcao.listarFora(A, { hoje: '2026-09-21' });
   const renovacao = fora.find((x) => x.accountId === renov);
   assert.ok(renovacao, 'a renovação aparece na lista de fora');
   assert.equal(renovacao.motivo, 'renovacao');
@@ -286,12 +286,12 @@ test('a lista de FORA diz quem não entrou e por quê, e a recepção consegue i
   const r = await sweep.processarTenant(A, { agora: AGORA });
   assert.equal(r.pulado, undefined);
   assert.ok((await toques(A, renov)).length > 0, 'depois de incluída, a renovação ganha as mensagens');
-  assert.equal((await recepcao.listarFora(A, { hoje: '2026-09-21' })).find((x) => x.accountId === renov).jaIncluido, true);
+  assert.equal((await recepcao.listarFora(A, { hoje: '2026-09-21' })).itens.find((x) => x.accountId === renov).jaIncluido, true);
 });
 
 test('tirar do plano desfaz a inclusão (mas não apaga o que já foi preparado)', async () => {
   assert.deepEqual(await recepcao.tirarDoPlano(A, renov), { ok: true });
-  const fora = await recepcao.listarFora(A, { hoje: '2026-09-21' });
+  const { itens: fora, total } = await recepcao.listarFora(A, { hoje: '2026-09-21' });
   assert.equal(fora.find((x) => x.accountId === renov).jaIncluido, false);
 });
 
@@ -428,4 +428,25 @@ test('modo automático: WhatsApp fora para a rodada; a mensagem que falhou fica 
   assert.ok(!volta.chamadas.some((c) => c[0] === 'ensure' && c[1] === '5519966661111'), 'não repete sozinho');
   assert.equal(r2.auto.falhas, 0);
   await admin(`UPDATE lead_manager.automacao_config SET boas_vindas_modo = 'avisa' WHERE tenant_id = $1`, [A]);
+});
+
+test('a lista de fora é um RECORTE: só os recentes, mas o total continua visível', async () => {
+  // contrato antigo (matriculado 70 dias antes do "hoje" do teste) que a régua deixou de fora
+  const velho = await pessoa(A, 'VERA ANTIGA', '5519988889999', '790');
+  await contrato(A, { ini: '2026-05-01', fim: '2027-05-01', ext: '2400', aluno: velho });   // ainda vigente: o de baixo é renovação
+  // dentro da janela de 60 dias (hoje do teste = 21/09), mas fora do recorte de 30
+  const acc = await contrato(A, { ini: '2026-08-01', fim: '2026-11-01', ext: '2401', aluno: velho, periodicidade: 'trimestral' });
+
+  const r = await recepcao.listarFora(A, { hoje: '2026-09-21', desdeDias: 30 });
+  assert.equal(r.desdeDias, 30);
+  assert.ok(r.total > r.itens.length, 'o total conta a janela inteira, a lista mostra o recorte');
+  assert.ok(!r.itens.some((x) => x.accountId === acc), 'matrícula de 2 meses atrás fica fora do recorte');
+  assert.ok((await recepcao.listarFora(A, { hoje: '2026-09-21', desdeDias: 90 })).itens.some((x) => x.accountId === acc),
+    'com o recorte maior ela aparece');
+
+  // quem a recepção incluiu à mão continua visível, mesmo fora do recorte — ela precisa poder desfazer
+  await recepcao.incluirNoPlano(A, acc, { por: 'Recepção' });
+  assert.ok((await recepcao.listarFora(A, { hoje: '2026-09-21', desdeDias: 30 })).itens.some((x) => x.accountId === acc && x.jaIncluido),
+    'incluído à mão não some da lista');
+  await recepcao.tirarDoPlano(A, acc);
 });

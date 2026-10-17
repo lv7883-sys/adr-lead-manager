@@ -267,10 +267,20 @@ const MOTIVO_FORA = {
   sem_titular: 'O contrato não tem aluno titular no cadastro',
 };
 
-async function listarFora(tenantId, { hoje, janelaDias } = {}) {
+// CORTE DA LISTA (17/10/2026, pedido do dono): a janela da régua é de 60 dias porque a régua VAI até
+// D+60 — mas a lista de quem ficou de fora serve para a recepção procurar o aluno que acabou de se
+// matricular e não apareceu. Sessenta dias davam 77 nomes para rolar. Mostra os recentes e diz
+// quantos sobraram.
+//
+// Por que DIAS CORRIDOS e não o mês do calendário: no dia 1º, o mês civil esconderia quem se
+// matriculou no dia 30 — exatamente o caso que a lista existe para resolver.
+const FORA_DIAS_PADRAO = 30;
+
+async function listarFora(tenantId, { hoje, janelaDias, desdeDias = FORA_DIAS_PADRAO } = {}) {
   const dados = require('./dados');
   const R = require('../boasVindasRegua');
   const dia = hoje || R.dataSP(Date.now());
+  const corte = R.somarDias(dia, -Math.abs(Number(desdeDias) || FORA_DIAS_PADRAO));
   return withTenant(tenantId, async (c) => {
     const contratos = await dados.carregarContratos(c, tenantId, { hoje: dia, janelaDias: janelaDias || R.LIMITES.TETO_DIAS });
     const incluidos = await dados.carregarInclusoes(c, tenantId, contratos.map((x) => x.accountId));
@@ -286,6 +296,13 @@ async function listarFora(tenantId, { hoje, janelaDias } = {}) {
         jaIncluido: incluidos.has(ct.accountId),
       };
     }).filter(Boolean).sort((a, b) => String(b.dataMatricula || b.iniVigencia).localeCompare(String(a.dataMatricula || a.iniVigencia)));
+  }).then((todos) => {
+    const recentes = todos.filter((x) => String(x.dataMatricula || x.iniVigencia) >= corte);
+    // sempre mostra quem a recepção já incluiu à mão, mesmo que seja mais antigo: é decisão dela e
+    // ela precisa poder desfazer.
+    const antigosIncluidos = todos.filter((x) => x.jaIncluido && String(x.dataMatricula || x.iniVigencia) < corte);
+    const itens = recentes.concat(antigosIncluidos);
+    return { itens, total: todos.length, desdeDias: Math.abs(Number(desdeDias) || FORA_DIAS_PADRAO) };
   });
 }
 

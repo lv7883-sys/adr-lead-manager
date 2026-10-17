@@ -70,7 +70,7 @@ router.get('/:tenantId/boas-vindas/fila', authenticate, requireTenantAccess(READ
 // Quem a régua deixou de fora da janela atual, com o motivo (a aba mostra e oferece incluir).
 router.get('/:tenantId/boas-vindas/fora', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {
-    res.json({ itens: await recepcao.listarFora(req.tenantId) });
+    res.json(await recepcao.listarFora(req.tenantId));
   } catch (err) { _falha(res, err, 'boas_vindas.fora.error', req.tenantId); }
 });
 
