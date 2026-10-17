@@ -67,6 +67,29 @@ router.get('/:tenantId/boas-vindas/fila', authenticate, requireTenantAccess(READ
   } catch (err) { _falha(res, err, 'boas_vindas.fila.error', req.tenantId); }
 });
 
+// Quem a régua deixou de fora da janela atual, com o motivo (a aba mostra e oferece incluir).
+router.get('/:tenantId/boas-vindas/fora', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    res.json({ itens: await recepcao.listarFora(req.tenantId) });
+  } catch (err) { _falha(res, err, 'boas_vindas.fora.error', req.tenantId); }
+});
+
+// Incluir à mão quem a régua deixou de fora, e desfazer.
+router.post('/:tenantId/boas-vindas/contratos/:accountId/incluir', authenticate, requireTenantAccess(WRITE_ROLES), _uuid('accountId'), async (req, res) => {
+  try {
+    const out = await recepcao.incluirNoPlano(req.tenantId, req.params.accountId, {
+      por: _por(req), motivoOriginal: (req.body && req.body.motivo) || null,
+    });
+    res.json(out);
+  } catch (err) { _falha(res, err, 'boas_vindas.incluir.error', req.tenantId); }
+});
+
+router.post('/:tenantId/boas-vindas/contratos/:accountId/tirar', authenticate, requireTenantAccess(WRITE_ROLES), _uuid('accountId'), async (req, res) => {
+  try {
+    res.json(await recepcao.tirarDoPlano(req.tenantId, req.params.accountId));
+  } catch (err) { _falha(res, err, 'boas_vindas.tirar.error', req.tenantId); }
+});
+
 router.get('/:tenantId/boas-vindas/toques/:toqueId', authenticate, requireTenantAccess(READ_ROLES), _uuid('toqueId'), async (req, res) => {
   try {
     const item = await recepcao.detalhe(req.tenantId, req.params.toqueId);

@@ -331,11 +331,20 @@ function validarRegua(etapas, { ancorasDisponiveis = ANCORAS, variaveisLivres = 
 // Elegibilidade (R9, contrato curto) e teto (R2)
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-// R9 — só contratação nova: o beneficiário não tem contrato que começou ANTES deste. Contratos que
-// começam no mesmo dia (dois cursos na mesma matrícula) contam como novos.
-function ehContratacaoNova({ iniVigencia, outrosContratos = [] } = {}) {
+// R9 — só contratação nova. NÃO é contratação nova quem está renovando: o beneficiário tinha
+// contrato que começou antes deste E que ainda valia, ou que acabou há no máximo GAP_RENOVACAO dias
+// (regra do dono: 2 meses). Quem ficou mais tempo parado volta a ser cliente novo. Contrato
+// cancelado não conta — contratação que não aconteceu não faz ninguém ex-aluno.
+const GAP_RENOVACAO_DIAS = 60;
+function ehContratacaoNova({ iniVigencia, outrosContratos = [], gapDias = GAP_RENOVACAO_DIAS } = {}) {
   if (!ISO_DATA.test(String(iniVigencia))) return false;
-  return !outrosContratos.some((c) => c && ISO_DATA.test(String(c.iniVigencia)) && c.iniVigencia < iniVigencia);
+  const corte = somarDias(iniVigencia, -gapDias);
+  return !outrosContratos.some((c) => {
+    if (!c || !ISO_DATA.test(String(c.iniVigencia)) || c.iniVigencia >= iniVigencia) return false;
+    if (c.cancelado) return false;
+    const fim = ISO_DATA.test(String(c.fimVigencia)) ? c.fimVigencia : c.iniVigencia;
+    return fim >= corte;
+  });
 }
 
 function ehContratoCurto({ iniVigencia, fimVigencia } = {}) {
@@ -614,7 +623,7 @@ function precisaAlertaSemInicio({ iniVigencia, dataMatricula, primeiroAtendiment
 }
 
 module.exports = {
-  ANCORAS, TIPOS_QUANDO, LIMITES, VARIAVEIS_SISTEMA, VARIAVEIS_FATO, ANEXO, LIMITE_LEGENDA,
+  ANCORAS, TIPOS_QUANDO, LIMITES, VARIAVEIS_SISTEMA, VARIAVEIS_FATO, ANEXO, LIMITE_LEGENDA, GAP_RENOVACAO_DIAS,
   ancoraContrato,
   // datas
   inicioDoDiaSP, dataSP, somarDias, diasEntre, formatarDia, formatarHorario,

@@ -109,6 +109,9 @@ async function processarTenant(tenantId, opts = {}) {
     }
 
     const contratos = await dados.carregarContratos(c, tenantId, { hoje, janelaDias: JANELA_DIAS });
+    // Quem a recepção mandou entrar apesar da régua (ADR-050 §21) — vale no planejamento.
+    const incluidos = await dados.carregarInclusoes(c, tenantId, contratos.map((x) => x.accountId));
+    for (const ct of contratos) ct.incluidoManual = incluidos.has(ct.accountId);
     const aulas = disp.ok
       ? await fonte.carregarAulas(c, disp.franquiaId, { desde: R.somarDias(hoje, -JANELA_DIAS), ate: R.somarDias(hoje, 7) })
       : [];

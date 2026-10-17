@@ -719,3 +719,48 @@ automático com horário/pausa/teto/uma por família/falha, fila no modo auto, m
 
 - Rodar `test/run-boas-vindas-itest.sh` (Docker, PG 16) no host — hoje validado no Postgres local.
 - Decisões L1–L3 (§14.4).
+
+## 21. Quem entra no plano: a régua, e quem atende por cima dela (16–17/10/2026)
+
+Relato do dono: "tivemos um novo aluno que não apareceu no Boas Vindas". O aluno era o Marcos
+Antônio Prudêncio Jr, e a investigação achou TRÊS coisas, não uma.
+
+### 21.1 A âncora estava na data errada
+Ver §20 e a migração 185: a régua se ancorava no início da vigência (primeiro dia de aula) onde a
+especificação diz matrícula. Corrigido e publicado em 16/10/2026.
+
+### 21.2 "Já teve contrato" não é o mesmo que "está renovando"
+A R9 original recusava quem tivesse QUALQUER contrato anterior, de qualquer época, inclusive
+cancelado. Em 30 dias de Valinhos isso excluía 31 dos 36 contratos novos — e 10 deles eram gente que
+tinha ficado de um a três meses fora.
+
+**Regra do dono:** "a regra que temos para considerar uma renovação é de 2 meses". Então:
+
+| Situação do contrato anterior | Entra no plano? |
+|---|---|
+| Ainda vigente (aluno somando outra aula) | não — ele já recebeu quando entrou |
+| Terminou há até 60 dias | não — é renovação, tem régua própria |
+| Terminou há mais de 60 dias | **sim** — para a escola é cliente novo outra vez |
+| Cancelado, ou sumido da fonte | **sim** — contratação que não aconteceu não faz ninguém ex-aluno |
+
+Medido na produção antes de publicar: dos 101 contratos na janela, os elegíveis passam de 17 para 25.
+Os 8 que entram se matricularam de 24/08 a 05/10, e o que eles recebem de fato é **4 mensagens** (as
+de boas-vindas já venceram pelo prazo de 7 dias) mais **2 alertas de "não começou as aulas"** — que
+é justamente o caso que a recepção precisa ver. Ninguém recebe "seja bem-vindo" atrasado: a própria
+régua já cuida disso, sem precisar de corte por data de publicação.
+
+### 21.3 A régua vai errar de novo, e quem atende precisa de porta
+Pedido das recepcionistas: incluir um aluno manualmente. A aba Boas-vindas ganhou a seção **"Não
+entraram no plano"**, fechada por padrão, com quem a régua deixou de fora nos últimos 60 dias, o
+motivo em português e o botão **"Incluir mesmo assim"** (e "desfazer").
+
+- Migração **186**: `boas_vindas_inclusao` (tenant, contrato, motivo original, quem incluiu).
+- LM: `GET /tenant/:id/boas-vindas/fora`, `POST .../contratos/:conta/incluir` e `.../tirar`.
+- O contrato incluído entra como elegível; **o resto das regras continua valendo** (prazo, teto,
+  dados que faltam). Contrato sem titular não é incluível — não há para quem mandar.
+- O motivo original fica guardado: é o que permite medir depois se a régua erra sempre no mesmo
+  ponto, em vez de discutir de memória.
+
+Por que a seção e não só o botão: o pedido era "incluir manualmente", mas a reclamação era "não
+apareceu". Mostrar quem ficou de fora **com o motivo** responde à reclamação; o botão responde ao
+pedido. Sem a lista, a recepção continuaria sem saber o que perguntar.

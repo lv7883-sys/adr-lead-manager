@@ -35,13 +35,16 @@ function planejarContrato({ contrato, etapas, fatos = {}, fonteAgenda = false, c
   const agora = typeof agoraIn === 'number' ? agoraIn : Date.parse(agoraIn);
   const base = {
     accountId: ct.accountId, iniVigencia: ct.iniVigencia, dataMatricula: ct.dataMatricula || null,
+    incluidoManual: !!ct.incluidoManual, motivoDaRegua: null,
     fimVigencia: ct.fimVigencia, servico: ct.servico,
     periodicidade: ct.periodicidade, clienteNome: ct.beneficiario ? ct.beneficiario.nome : null,
     contratoExt: ct.contratoExt, aulasEncontradas: (fatos.atendimentos || []).length,
     primeiroAtendimento: fatos.primeiroAtendimento || null, toques: [], linhaDoTempo: [],
   };
-  if (ct.contatoInterno) return { ...base, elegivel: false, motivo: 'contato_interno' };
-  if (ct.temContratoAnterior) return { ...base, elegivel: false, motivo: 'renovacao' };
+  // A régua decide sozinha, MAS quem atende pode discordar: contrato incluído à mão entra do mesmo
+  // jeito (ADR-050 §21). O que não dá para contornar é não ter titular — não há para quem mandar.
+  const motivoDaRegua = ct.contatoInterno ? 'contato_interno' : (ct.ehRenovacao ? 'renovacao' : null);
+  if (motivoDaRegua && !ct.incluidoManual) return { ...base, elegivel: false, motivo: motivoDaRegua };
   if (!ct.beneficiario) return { ...base, elegivel: false, motivo: 'sem_titular' };
 
   const dest = R.escolherDestinatario({ beneficiario: ct.beneficiario, pagador: ct.pagador });
@@ -118,7 +121,7 @@ function planejarContrato({ contrato, etapas, fatos = {}, fonteAgenda = false, c
     iniVigencia: ct.iniVigencia, dataMatricula: ct.dataMatricula || null,
     primeiroAtendimento: fatos.primeiroAtendimento, hoje: R.dataSP(agora), alertaDias: config.alertaDias,
   });
-  return { ...base, elegivel: true, destinatario: dest, alertaSemInicio, toques, linhaDoTempo };
+  return { ...base, motivoDaRegua, elegivel: true, destinatario: dest, alertaSemInicio, toques, linhaDoTempo };
 }
 
 // R7 + R3 sobre a unidade inteira: por família, uma mensagem por vez, 48 h entre elas.

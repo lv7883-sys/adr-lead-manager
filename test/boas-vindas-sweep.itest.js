@@ -229,6 +229,72 @@ test('contrato sem data de matrícula: segue no início da vigência (nada muda 
 });
 
 
+// ── Quem é renovação: voltou em até 2 meses (regra do dono, 16/10/2026) ─────────────────────────
+// Antes bastava existir qualquer contrato anterior, de qualquer época — e contrato CANCELADO contava.
+test('voltou depois de 2 meses parado: é cliente novo de novo e recebe boas-vindas', async () => {
+  const volta = await pessoa(A, 'VERA VOLTOU', '5519988884444', '779');
+  // contrato velho encerrado em 20/06; o novo começa em 21/09 (93 dias parada)
+  await contrato(A, { ini: '2026-01-20', fim: '2026-06-20', ext: '2300', aluno: volta });
+  const novo = await contrato(A, { ini: '2026-09-21', fim: '2026-12-21', ext: '2301', aluno: volta, periodicidade: 'trimestral' });
+  const r = await sweep.processarTenant(A, { agora: AGORA });
+  assert.equal(r.pulado, undefined);
+  assert.ok((await toques(A, novo)).length > 0, 'quem ficou mais de 2 meses fora recebe o plano inteiro de novo');
+});
+
+test('voltou em menos de 2 meses: é renovação e não recebe', async () => {
+  const emenda = await pessoa(A, 'RENATA EMENDOU', '5519988885555', '780');
+  await contrato(A, { ini: '2026-03-21', fim: '2026-08-31', ext: '2302', aluno: emenda });   // 21 dias parada
+  const novo = await contrato(A, { ini: '2026-09-21', fim: '2026-12-21', ext: '2303', aluno: emenda, periodicidade: 'trimestral' });
+  const r = await sweep.processarTenant(A, { agora: AGORA });
+  assert.equal(r.pulado, undefined);
+  assert.equal((await toques(A, novo)).length, 0);
+});
+
+test('contrato anterior CANCELADO não faz de ninguém ex-aluno', async () => {
+  const cancel = await pessoa(A, 'CARLOS CANCELOU', '5519988886666', '781');
+  const velho = await contrato(A, { ini: '2026-09-01', fim: '2026-12-01', ext: '2304', aluno: cancel });
+  await admin("UPDATE lead_manager.service_account SET status = 'Cancelado' WHERE id = $1", [velho]);
+  const novo = await contrato(A, { ini: '2026-09-21', fim: '2026-12-21', ext: '2305', aluno: cancel, periodicidade: 'trimestral' });
+  const r = await sweep.processarTenant(A, { agora: AGORA });
+  assert.equal(r.pulado, undefined);
+  assert.ok((await toques(A, novo)).length > 0, 'a contratação que não aconteceu não tira o direito às boas-vindas');
+});
+
+test('contrato anterior ainda vigente: está somando outra aula, não recebe de novo', async () => {
+  const soma = await pessoa(A, 'SILVIO SOMOU', '5519988887777', '782');
+  await contrato(A, { ini: '2026-05-01', fim: '2027-05-01', ext: '2306', aluno: soma });   // fora da janela, ainda vigente
+  const novo = await contrato(A, { ini: '2026-09-21', fim: '2026-12-21', ext: '2307', aluno: soma, periodicidade: 'trimestral' });
+  const r = await sweep.processarTenant(A, { agora: AGORA });
+  assert.equal(r.pulado, undefined);
+  assert.equal((await toques(A, novo)).length, 0);
+});
+
+// ── Inclusão manual: quem atende pode discordar da régua (ADR-050 §21) ──────────────────────────
+test('a lista de FORA diz quem não entrou e por quê, e a recepção consegue incluir', async () => {
+  const fora = await recepcao.listarFora(A, { hoje: '2026-09-21' });
+  const renovacao = fora.find((x) => x.accountId === renov);
+  assert.ok(renovacao, 'a renovação aparece na lista de fora');
+  assert.equal(renovacao.motivo, 'renovacao');
+  assert.match(renovacao.motivoTexto, /renovação/i);
+  assert.equal(renovacao.podeIncluir, true);
+  assert.equal(renovacao.jaIncluido, false);
+  assert.ok(fora.some((x) => x.accountId === interno && x.motivo === 'contato_interno'), 'o contato interno também aparece');
+
+  assert.deepEqual(await recepcao.incluirNoPlano(A, renov, { por: 'Recepção' }), { ok: true, jaEstava: false });
+  assert.deepEqual(await recepcao.incluirNoPlano(A, renov, { por: 'Recepção' }), { ok: true, jaEstava: true }, 'incluir duas vezes não duplica');
+
+  const r = await sweep.processarTenant(A, { agora: AGORA });
+  assert.equal(r.pulado, undefined);
+  assert.ok((await toques(A, renov)).length > 0, 'depois de incluída, a renovação ganha as mensagens');
+  assert.equal((await recepcao.listarFora(A, { hoje: '2026-09-21' })).find((x) => x.accountId === renov).jaIncluido, true);
+});
+
+test('tirar do plano desfaz a inclusão (mas não apaga o que já foi preparado)', async () => {
+  assert.deepEqual(await recepcao.tirarDoPlano(A, renov), { ok: true });
+  const fora = await recepcao.listarFora(A, { hoje: '2026-09-21' });
+  assert.equal(fora.find((x) => x.accountId === renov).jaIncluido, false);
+});
+
 test('runBoasVindasSweep: percorre as unidades ativas e isola erro de uma unidade', async () => {
   const r = await sweep.runBoasVindasSweep({ agora: AGORA, portao: async () => [A, B, '00000000-0000-4000-8000-000000000000'] });
   assert.equal(r.length, 3);

@@ -258,4 +258,49 @@ async function dispensarAlerta(tenantId, alertaId, { observacao, por } = {}) {
   return ok ? { ok: true } : { erro: 'alerta_nao_encontrado', status: 404 };
 }
 
-module.exports = { listarFila, detalhe, enviar, descartar, MOTIVO_BLOQUEIO, SQL_FILA, listarAlertas, dispensarAlerta, modoDaUnidade };
+// ── Quem ficou de FORA do plano, e por quê (ADR-050 §21) ────────────────────────────────────────
+// A régua decide sozinha; esta lista é a prestação de contas dela para quem atende. Cada linha diz o
+// nome, quando se matriculou e o motivo — e a aba oferece "incluir mesmo assim".
+const MOTIVO_FORA = {
+  renovacao: 'Já era aluno: voltou em menos de 2 meses, então entra na régua de renovação',
+  contato_interno: 'O telefone é de alguém da equipe',
+  sem_titular: 'O contrato não tem aluno titular no cadastro',
+};
+
+async function listarFora(tenantId, { hoje, janelaDias } = {}) {
+  const dados = require('./dados');
+  const R = require('../boasVindasRegua');
+  const dia = hoje || R.dataSP(Date.now());
+  return withTenant(tenantId, async (c) => {
+    const contratos = await dados.carregarContratos(c, tenantId, { hoje: dia, janelaDias: janelaDias || R.LIMITES.TETO_DIAS });
+    const incluidos = await dados.carregarInclusoes(c, tenantId, contratos.map((x) => x.accountId));
+    return contratos.map((ct) => {
+      const motivo = ct.contatoInterno ? 'contato_interno' : (ct.ehRenovacao ? 'renovacao' : (!ct.beneficiario ? 'sem_titular' : null));
+      if (!motivo) return null;
+      return {
+        accountId: ct.accountId,
+        clienteNome: (ct.beneficiario && ct.beneficiario.nome) || (ct.pagador && ct.pagador.nome) || 'Sem nome no cadastro',
+        servico: ct.servico, dataMatricula: ct.dataMatricula, iniVigencia: ct.iniVigencia,
+        motivo, motivoTexto: MOTIVO_FORA[motivo] || motivo,
+        podeIncluir: motivo !== 'sem_titular',   // sem titular não há para quem mandar
+        jaIncluido: incluidos.has(ct.accountId),
+      };
+    }).filter(Boolean).sort((a, b) => String(b.dataMatricula || b.iniVigencia).localeCompare(String(a.dataMatricula || a.iniVigencia)));
+  });
+}
+
+// Inclui (ou desfaz) à mão. Devolve { ok, jaEstava } — a rotina da hora seguinte monta as mensagens.
+async function incluirNoPlano(tenantId, accountId, { por, motivoOriginal } = {}) {
+  const dados = require('./dados');
+  return withTenant(tenantId, async (c) => {
+    const criou = await dados.incluirManual(c, tenantId, accountId, { por, motivoOriginal });
+    return { ok: true, jaEstava: !criou };
+  });
+}
+async function tirarDoPlano(tenantId, accountId) {
+  const dados = require('./dados');
+  return withTenant(tenantId, (c) => dados.desfazerInclusao(c, tenantId, accountId).then((ok) => ({ ok })));
+}
+
+module.exports = { listarFila, detalhe, enviar, descartar, MOTIVO_BLOQUEIO, SQL_FILA, listarAlertas, dispensarAlerta, modoDaUnidade,
+  listarFora, incluirNoPlano, tirarDoPlano, MOTIVO_FORA };

@@ -11,6 +11,17 @@ const MODELO_PADRAO = 'escola-de-musica-academia-do-rock';
 // O teto R2 do boas-vindas termina na véspera dele. Teste de paridade em boas-vindas-sweep.test.js.
 const RENOVACAO_PRIMEIRO_MARCO_DIAS = 45;
 
+// QUEM É RENOVAÇÃO (regra do dono, 16/10/2026): "a regra que temos para considerar uma renovação é
+// de 2 meses". Ou seja: parou e voltou em até 60 dias = renovação (segue na régua de renovação, não
+// recebe boas-vindas); ficou mais tempo parado = para a escola é cliente novo e recebe boas-vindas
+// de novo, porque precisa do processo inteiro outra vez.
+//
+// Antes disso bastava EXISTIR qualquer contrato anterior, de qualquer época: em 30 dias de Valinhos,
+// 31 dos 36 contratos novos caíam nessa rede, e 10 deles eram gente que tinha ficado de 1 a 3 meses
+// fora. Contrato CANCELADO (ou sumido da fonte) também contava — uma contratação que não aconteceu
+// fazia a pessoa deixar de ser aluno novo.
+const RENOVACAO_GAP_DIAS = 60;
+
 // Contratos que ainda podem gerar boas-vindas: a MATRÍCULA (contratação fechada) caiu nos últimos
 // `janela` dias, e não estão cancelados. Traz titular e pagador com telefone, ids externos (ponte com
 // a agenda), se o titular já tinha contrato antes (renovação não recebe boas-vindas) e se algum
@@ -63,8 +74,14 @@ SELECT a.*,
            JOIN lead_manager.service_account s2 ON s2.id = b.account_id
           WHERE b.tenant_id = $1 AND s2.tenant_id = $1 AND b.bond = 'beneficiario'
             AND b.person_id IN (SELECT m.person_id FROM membros m WHERE m.account_id = a.account_id AND m.bond = 'beneficiario')
+            AND s2.id <> a.account_id
             AND s2.ini_vigencia < a.ini_vigencia::date
-       ) AS tem_contrato_anterior,
+            -- contratação que não aconteceu não faz de ninguém ex-aluno
+            AND s2.fonte_ausente_em IS NULL
+            AND (s2.status IS NULL OR s2.status <> 'Cancelado')
+            -- ainda vigente quando este começou (aluno somando outra aula), ou parou há no máximo $4 dias
+            AND coalesce(s2.fim_vigencia, s2.ini_vigencia) >= (a.ini_vigencia::date - $4::int)
+       ) AS eh_renovacao,
        EXISTS (
          SELECT 1 FROM lead_manager.internal_contacts ic
            JOIN membros m ON m.account_id = a.account_id AND m.telefone IS NOT NULL
@@ -160,7 +177,7 @@ function contratoDaLinha(row) {
     contratoExt: row.contrato_ext != null ? String(row.contrato_ext) : null,
     beneficiario: _jsonb(row.beneficiario, null),
     pagador: _jsonb(row.pagador, null),
-    temContratoAnterior: row.tem_contrato_anterior === true,
+    ehRenovacao: row.eh_renovacao === true,
     contatoInterno: row.contato_interno === true,
   };
 }
@@ -174,9 +191,32 @@ async function carregarEtapas(c, tenantId) {
 async function carregarModelo(c, slug = MODELO_PADRAO) {
   return (await c.query(SQL_MODELO, [slug])).rows.map(etapaDaLinha);
 }
-async function carregarContratos(c, tenantId, { hoje, janelaDias = 60 }) {
-  return (await c.query(SQL_CONTRATOS, [tenantId, hoje, janelaDias])).rows.map(contratoDaLinha);
+async function carregarContratos(c, tenantId, { hoje, janelaDias = 60, gapRenovacaoDias = RENOVACAO_GAP_DIAS }) {
+  return (await c.query(SQL_CONTRATOS, [tenantId, hoje, janelaDias, gapRenovacaoDias])).rows.map(contratoDaLinha);
 }
+// INCLUSÃO MANUAL (ADR-050 §21): contratos que a recepção mandou entrar apesar da régua os ter
+// deixado de fora. Devolve um Set de account_id.
+async function carregarInclusoes(c, tenantId, accountIds) {
+  if (!accountIds.length) return new Set();
+  const { rows } = await c.query(
+    'SELECT account_id FROM lead_manager.boas_vindas_inclusao WHERE tenant_id = $1 AND account_id = ANY($2::uuid[])',
+    [tenantId, accountIds]);
+  return new Set(rows.map((r) => r.account_id));
+}
+async function incluirManual(c, tenantId, accountId, { por, motivoOriginal = null }) {
+  const { rows } = await c.query(
+    `INSERT INTO lead_manager.boas_vindas_inclusao (tenant_id, account_id, motivo_original, incluido_por)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (tenant_id, account_id) DO NOTHING
+     RETURNING account_id`, [tenantId, accountId, motivoOriginal, String(por || '').slice(0, 80)]);
+  return rows.length > 0;   // false = já estava incluído
+}
+async function desfazerInclusao(c, tenantId, accountId) {
+  const { rowCount } = await c.query(
+    'DELETE FROM lead_manager.boas_vindas_inclusao WHERE tenant_id = $1 AND account_id = $2', [tenantId, accountId]);
+  return rowCount > 0;
+}
+
 async function carregarToques(c, tenantId, accountIds) {
   if (!accountIds.length) return [];
   return (await c.query(SQL_TOQUES, [tenantId, accountIds])).rows;
@@ -243,5 +283,6 @@ module.exports = {
   SQL_UPSERT_ALERTA, SQL_FECHAR_ALERTA, SQL_ALERTAS_ABERTOS,
   configDaLinha, etapaDaLinha, contratoDaLinha,
   carregarConfig, carregarEtapas, carregarModelo, carregarContratos, carregarToques, gravarToque,
+  carregarInclusoes, incluirManual, desfazerInclusao,
   gravarAlerta, fecharAlerta, carregarAlertasAbertos,
 };

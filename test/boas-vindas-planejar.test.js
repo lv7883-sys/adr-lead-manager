@@ -44,7 +44,7 @@ const contrato = (over = {}) => ({
   professorNome: 'MARCOS TEIXEIRA', contratoExt: '1154',   // de propósito ≠ do professor da aula
   beneficiario: { personId: 'p-aluno', nome: 'PEDRO SOUZA', telefone: '5519911110000', alunoExt: '540' },
   pagador: { personId: 'p-mae', nome: 'Carla Souza', telefone: '5519922220000' },
-  temContratoAnterior: false, contatoInterno: false, ...over,
+  ehRenovacao: false, contatoInterno: false, ...over,
 });
 const toqueDe = (plano, ordem, rep = 1) => plano.toques.find((t) => t.ordem === ordem && t.repeticao === rep);
 
@@ -155,7 +155,7 @@ test('planejar: sem a aula na agenda, a boas-vindas fica BLOQUEADA (nunca sai "�
 
 test('planejar: renovação e contato interno não recebem boas-vindas', () => {
   const r = planoDe({
-    contratos: [contrato({ accountId: 'ren', temContratoAnterior: true }), contrato({ accountId: 'int', contatoInterno: true })],
+    contratos: [contrato({ accountId: 'ren', ehRenovacao: true }), contrato({ accountId: 'int', contatoInterno: true })],
     agora: sp('2026-09-18', '10:00'),
   });
   assert.deepEqual(r.planos.map((p) => [p.elegivel, p.motivo]), [[false, 'renovacao'], [false, 'contato_interno']]);

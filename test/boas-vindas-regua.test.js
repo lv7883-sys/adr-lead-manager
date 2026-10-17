@@ -379,9 +379,27 @@ test('R6: "como foi a primeira aula" só vale por 2 dias', () => {
 });
 
 test('R9 e alerta: só contratação nova; alerta de quem não começou no prazo da unidade', () => {
-  assert.equal(R.ehContratacaoNova({ iniVigencia: '2026-09-18', outrosContratos: [] }), true);
-  assert.equal(R.ehContratacaoNova({ iniVigencia: '2026-09-18', outrosContratos: [{ iniVigencia: '2025-09-18' }] }), false, 'renovação');
-  assert.equal(R.ehContratacaoNova({ iniVigencia: '2026-09-18', outrosContratos: [{ iniVigencia: '2026-09-18' }] }), true, 'dois cursos na mesma matrícula');
+  const nova = (outros) => R.ehContratacaoNova({ iniVigencia: '2026-09-18', outrosContratos: outros });
+  assert.equal(nova([]), true, 'nunca teve contrato');
+  assert.equal(nova([{ iniVigencia: '2026-09-18', fimVigencia: '2027-09-17' }]), true, 'dois cursos na mesma matrícula');
+
+  // Regra do dono (16/10/2026): renovação é voltar em até 2 MESES. Mais que isso, é cliente novo
+  // outra vez — ele precisa do processo de boas-vindas inteiro de novo.
+  assert.equal(nova([{ iniVigencia: '2025-09-18', fimVigencia: '2026-09-17' }]), false, 'emendou no dia seguinte');
+  assert.equal(nova([{ iniVigencia: '2025-09-18', fimVigencia: '2026-08-20' }]), false, '29 dias parado');
+  assert.equal(nova([{ iniVigencia: '2025-09-18', fimVigencia: '2026-07-20' }]), false, '60 dias parado (limite, ainda renovação)');
+  assert.equal(nova([{ iniVigencia: '2025-09-18', fimVigencia: '2026-07-19' }]), true, '61 dias parado: volta a ser cliente novo');
+  assert.equal(nova([{ iniVigencia: '2026-01-10', fimVigencia: '2027-01-09' }]), false, 'contrato ainda vigente: está somando outra aula');
+
+  // Contratação que não aconteceu não faz ninguém ex-aluno.
+  assert.equal(nova([{ iniVigencia: '2026-09-01', fimVigencia: '2026-12-01', cancelado: true }]), true, 'anterior cancelado');
+  assert.equal(nova([{ iniVigencia: '2026-09-01', fimVigencia: '2026-12-01', cancelado: true }, { iniVigencia: '2026-08-01', fimVigencia: '2026-09-10' }]),
+    false, 'tem cancelado E tem um de verdade dentro do prazo');
+
+  // A unidade pode afrouxar ou apertar o prazo sem mexer no código.
+  assert.equal(R.ehContratacaoNova({ iniVigencia: '2026-09-18', gapDias: 30, outrosContratos: [{ iniVigencia: '2025-09-18', fimVigencia: '2026-08-10' }] }),
+    true, 'com 30 dias de régua, 39 parado já é cliente novo');
+  assert.equal(R.GAP_RENOVACAO_DIAS, 60, 'dois meses, a régua que a escola já usa');
 
   assert.equal(R.precisaAlertaSemInicio({ iniVigencia: '2026-09-18', hoje: '2026-10-08' }), false, '20 dias');
   assert.equal(R.precisaAlertaSemInicio({ iniVigencia: '2026-09-18', hoje: '2026-10-09' }), true, '21 dias (padrão)');
