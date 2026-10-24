@@ -67,6 +67,33 @@ router.get('/:tenantId/boas-vindas/fila', authenticate, requireTenantAccess(READ
   } catch (err) { _falha(res, err, 'boas_vindas.fila.error', req.tenantId); }
 });
 
+// A BIBLIOTECA DO PLANO (24/10/2026): as mensagens que a unidade escreveu, prontas para a recepção
+// mandar a quem ela quiser, quando quiser. Não cria plano nem agenda nada — o plano segue por
+// contrato. GET monta os textos para um telefone; POST envia a etapa escolhida.
+router.get('/:tenantId/boas-vindas/mensagens', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    res.json(await recepcao.listarMensagensDoPlano(req.tenantId, {
+      phone: String(req.query.phone || ''),
+      versao: req.query.versao === 'responsavel' ? 'responsavel' : 'titular',
+    }));
+  } catch (err) { _falha(res, err, 'boas_vindas.mensagens.error', req.tenantId); }
+});
+
+router.post('/:tenantId/boas-vindas/mensagens/:etapaId/enviar', authenticate, requireTenantAccess(WRITE_ROLES), _uuid('etapaId'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const out = await recepcao.enviarMensagemDoPlano(req.tenantId, {
+      etapaId: req.params.etapaId,
+      phone: String(b.phone || ''),
+      texto: typeof b.texto === 'string' ? b.texto : '',
+      comAnexo: b.com_anexo !== false && b.com_anexo !== 'false',
+      por: _por(req),
+    });
+    if (out.erro) return res.status(out.status || 400).json({ error: out.erro });
+    res.json(out);
+  } catch (err) { _falha(res, err, 'boas_vindas.mensagens.enviar.error', req.tenantId); }
+});
+
 // Quem a régua deixou de fora da janela atual, com o motivo (a aba mostra e oferece incluir).
 router.get('/:tenantId/boas-vindas/fora', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
   try {

@@ -319,5 +319,134 @@ async function tirarDoPlano(tenantId, accountId) {
   return withTenant(tenantId, (c) => dados.desfazerInclusao(c, tenantId, accountId).then((ok) => ({ ok })));
 }
 
+// ── A BIBLIOTECA DO PLANO: qualquer mensagem, para qualquer pessoa, quando a recepção quiser ────
+//
+// Pedido das recepcionistas (24/10/2026, via Leo): poder mandar a mensagem de qualquer etapa para
+// qualquer pessoa — inclusive quem não tem contrato — no momento que ELAS julgarem, e não só quando
+// a régua programa.
+//
+// O PLANO CONTINUA SENDO POR CONTRATO (decisão do dono): isto aqui não cria plano para ninguém, não
+// agenda nada e não muda a régua. É a mesma biblioteca de textos e anexos que a unidade já escreveu,
+// disponível na conversa — com uma amarração importante: se a pessoa TEM contrato e a régua já tinha
+// preparado aquela etapa, o envio manual marca aquele toque como enviado, para a rotina não mandar
+// de novo depois.
+//
+// Por que isso importa mais do que parece: medido em 23/10, a recepção descartava 9 de cada 10
+// mensagens que a régua preparava — a de boas-vindas, 6 de 6. Os textos estavam certos; o momento é
+// que era decidido pelo sistema, e quem conhece a família é quem atende.
+
+// Variáveis que dependem da agenda do contrato: sem contrato, ficam para a recepção preencher.
+const _VARS_DE_AGENDA = ['dia', 'horario', 'profissional'];
+
+// Monta o texto de cada etapa ativa para um telefone, com o que der para saber.
+// Devolve { itens: [{ etapaId, ordem, nome, texto, faltando: [], anexo }], cliente, temContrato }.
+async function listarMensagensDoPlano(tenantId, { phone, versao = 'titular' } = {}) {
+  const dados = require('./dados');
+  const R = require('../boasVindasRegua');
+  if (!phone) return { itens: [], cliente: null, temContrato: false };
+
+  return withTenant(tenantId, async (c) => {
+    const [config, etapas] = await Promise.all([dados.carregarConfig(c, tenantId), dados.carregarEtapas(c, tenantId)]);
+
+    // Quem é esta pessoa para nós: contrato vivo (se houver) e nome do contato pela régua única.
+    const { rows: [conta] } = await c.query(
+      `SELECT sa.id, sa.servico_label, sa.professor_nome,
+              (SELECT p.display_name FROM lead_manager.account_member am JOIN lead_manager.person p ON p.id = am.person_id
+                WHERE am.account_id = sa.id AND am.bond = 'beneficiario' LIMIT 1) AS cliente_nome
+         FROM lead_manager.service_account sa
+         JOIN lead_manager.account_member am ON am.account_id = sa.id
+         JOIN lead_manager.contact_point cp ON cp.person_id = am.person_id AND cp.kind = 'phone'
+        WHERE sa.tenant_id = $1 AND lead_manager.br_phone_key(cp.value_raw) = lead_manager.br_phone_key($2)
+          AND sa.fonte_ausente_em IS NULL
+        ORDER BY sa.ini_vigencia DESC LIMIT 1`, [tenantId, phone]);
+
+    // O NOME SÓ VEM DO CADASTRO (o beneficiário do contrato). Não usamos o nome da agenda da unidade
+    // nem o pushName aqui: o da agenda é campo livre com anotação interna ("Fulana - filhos X e Y,
+    // Teclado") e o pushName é como a pessoa se autodeclara no WhatsApp — nenhum dos dois serve para
+    // texto que ALCANÇA o cliente. Sem contrato, {cliente} fica para a recepção preencher, que é o
+    // comportamento honesto: melhor um campo vazio e visível do que um nome errado enviado.
+    const { nomeCurto } = require('./planejar');
+    const cliente = (conta && conta.cliente_nome) || null;
+    const valores = {
+      ...(config.variaveis || {}),
+      cliente: nomeCurto(cliente),
+      responsavel: null,
+      empresa: config.empresa,
+      servico: conta ? conta.servico_label : null,
+      profissional: nomeCurto(conta && conta.professor_nome),
+      dia: null, horario: null,
+    };
+
+    const itens = etapas
+      .filter((e) => e.ativo !== false && e.entregue_por !== 'externo')
+      .sort((a, b) => a.ordem - b.ordem)
+      .map((e) => {
+        const bruto = R.textoDaVersao(e, versao) || e.texto_titular || '';
+        // O que a unidade usou no texto e nós NÃO sabemos preencher. Tem de sair do texto CRU:
+        // interpolar() troca variável sem valor por vazio, então calcular depois dá sempre zero —
+        // e a recepção enviaria "Oi , tudo bem?" sem perceber.
+        const faltando = [...R.variaveisUsadas(bruto)].filter((v) => valores[v] == null || valores[v] === '');
+        // Os que faltam ficam VISÍVEIS como {campo} na prévia, para ela completar antes de enviar.
+        const texto = R.interpolar(bruto, { ...valores, ...Object.fromEntries(faltando.map((v) => [v, `{${v}}`])) });
+        return {
+          etapaId: e.id, ordem: e.ordem, nome: e.nome, texto, faltando,
+          precisaDaAgenda: faltando.some((v) => _VARS_DE_AGENDA.includes(v)),
+          anexo: e.anexo_id ? { id: e.anexo_id, nome: e.anexo_nome || null, tipo: e.anexo_tipo || null } : null,
+        };
+      });
+    return { itens, cliente, temContrato: !!conta };
+  });
+}
+
+// Envia UMA etapa para um telefone, agora. `texto` vem da tela (a recepção pode ter editado).
+async function enviarMensagemDoPlano(tenantId, { etapaId, phone, texto, comAnexo = true, por = 'RECEPCAO' } = {}, deps = {}) {
+  const inbox = deps.inbox || require('../routes/inbox');
+  const R = require('../boasVindasRegua');
+  if (!phone) return { erro: 'sem_telefone', status: 422 };
+  const textoFinal = typeof texto === 'string' ? texto.trim() : '';
+
+  const etapa = await withTenant(tenantId, async (c) => (await c.query(
+    `SELECT e.id, e.nome, e.ordem, a.id AS anexo_id, a.nome_arquivo AS anexo_nome, a.tipo AS anexo_tipo,
+            a.mime AS anexo_mime, a.caminho AS anexo_url
+       FROM lead_manager.boas_vindas_etapa e
+       LEFT JOIN lead_manager.boas_vindas_anexo a ON a.tenant_id = e.tenant_id AND a.id = e.anexo_id
+      WHERE e.tenant_id = $1 AND e.id = $2`, [tenantId, etapaId])).rows[0]);
+  if (!etapa) return { erro: 'mensagem_nao_encontrada', status: 404 };
+
+  const anexo = comAnexo && etapa.anexo_id
+    ? { id: etapa.anexo_id, nome: etapa.anexo_nome, tipo: etapa.anexo_tipo, mime: etapa.anexo_mime, url: etapa.anexo_url }
+    : null;
+  if (!textoFinal && !anexo) return { erro: 'mensagem_vazia', status: 422 };
+  // A mesma trava do envio da fila: campo não preenchido não vai para a família.
+  if ([...R.variaveisUsadas(textoFinal)].length) return { erro: 'texto_com_variavel_sem_valor', status: 422 };   // é um Set, não array
+  const arquivo = anexo ? _arquivoDoAnexo(tenantId, anexo) : null;
+  if (anexo && !arquivo) return { erro: 'anexo_nao_encontrado', status: 422 };
+
+  const conv = await withTenant(tenantId, (c) => inbox.ensureConversation(c, tenantId, phone));
+  if (!conv) return { erro: 'telefone_invalido', status: 422 };
+
+  for (const passo of R.planoDeEnvio({ texto: textoFinal, anexo: anexo ? { id: anexo.id, tipo: anexo.tipo } : null })) {
+    let out;
+    if (passo.kind === 'arquivo' && passo.tipo === 'audio') out = await inbox.sendInboxAudio(tenantId, conv.conversation_id, arquivo, por);
+    else if (passo.kind === 'arquivo') out = await inbox.sendInboxMedia(tenantId, conv.conversation_id, arquivo, passo.legenda || '', por);
+    else out = await inbox.sendMessage(tenantId, conv.conversation_id, { text: passo.texto, sender: por });
+    const erro = _erroEnvio(out);
+    if (erro) return { erro, status: 502 };
+  }
+
+  // Se a régua já tinha preparado esta etapa para o contrato desta pessoa, marca como enviada —
+  // senão a rotina a prepararia de novo e a família receberia duas vezes.
+  const casado = await withTenant(tenantId, async (c) => (await c.query(
+    `UPDATE lead_manager.boas_vindas_toque SET status = 'enviado', bloqueio = NULL, enviado_em = now(), auto = false,
+            texto_final = $4, motivo = 'enviada pela recepção fora do momento programado', updated_at = now()
+      WHERE tenant_id = $1 AND etapa_id = $2 AND status IN ('pendente', 'bloqueado')
+        AND lead_manager.br_phone_key(phone) = lead_manager.br_phone_key($3)
+      RETURNING id`, [tenantId, etapaId, phone, textoFinal])).rows.length);
+
+  require('../logger').info('boas_vindas.envio_avulso', { tenant_id: tenantId, etapa: etapa.nome, com_anexo: !!anexo, casou_com_a_fila: casado });
+  return { ok: true, conversationId: conv.conversation_id, casouComAFila: casado > 0 };
+}
+
 module.exports = { listarFila, detalhe, enviar, descartar, MOTIVO_BLOQUEIO, SQL_FILA, listarAlertas, dispensarAlerta, modoDaUnidade,
+  listarMensagensDoPlano, enviarMensagemDoPlano,
   listarFora, incluirNoPlano, tirarDoPlano, MOTIVO_FORA };

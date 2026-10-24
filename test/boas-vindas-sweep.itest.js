@@ -295,6 +295,83 @@ test('tirar do plano desfaz a inclusão (mas não apaga o que já foi preparado)
   assert.equal(fora.find((x) => x.accountId === renov).jaIncluido, false);
 });
 
+// ── A biblioteca do plano: qualquer mensagem, para qualquer pessoa, quando a recepção quiser ────
+// Pedido das recepcionistas (24/10/2026). O plano segue por CONTRATO; isto não cria plano nenhum.
+test('biblioteca: monta as mensagens da unidade para um telefone, dizendo o que falta preencher', async () => {
+  const r = await recepcao.listarMensagensDoPlano(A, { phone: '5519922220000' });   // a mãe do Pedro
+  assert.ok(r.itens.length >= 2, 'traz as etapas ativas da unidade');
+  assert.equal(r.temContrato, true);
+  assert.equal(r.cliente, 'PEDRO SOUZA');
+  const bv = r.itens.find((x) => x.ordem === 1);
+  assert.match(bv.texto, /Pedro/, 'o primeiro nome já vem preenchido');
+  assert.ok(bv.faltando.includes('dia') || bv.faltando.includes('horario'), 'diz que a aula ainda falta');
+  assert.equal(bv.precisaDaAgenda, true);
+  assert.ok(r.itens.every((x) => x.etapaId && x.nome), 'cada item sabe quem é');
+});
+
+test('biblioteca: telefone sem contrato nenhum também recebe a lista (é esse o pedido)', async () => {
+  const r = await recepcao.listarMensagensDoPlano(A, { phone: '5519900009999' });
+  assert.equal(r.temContrato, false);
+  assert.ok(r.itens.length >= 2);
+  assert.ok(r.itens[0].faltando.includes('cliente'), 'sem cadastro, o nome fica para a recepção');
+});
+
+test('biblioteca: envia a etapa escolhida e casa com a fila, para a régua não repetir', async () => {
+  const enviados = [];
+  const inboxFalso = {
+    ensureConversation: async () => ({ conversation_id: '11111111-1111-4111-8111-111111111111' }),
+    sendMessage: async (t, c, m) => { enviados.push(['texto', m.text]); return { ok: true, messageId: 'm1' }; },
+    sendInboxMedia: async (t, c, a, legenda) => { enviados.push(['arquivo', legenda]); return { ok: true, messageId: 'm2' }; },
+    sendInboxAudio: async () => ({ ok: true, messageId: 'm3' }),
+  };
+  // contrato próprio, para não depender do que os testes anteriores deixaram na fila do 'novo'
+  const bia = await pessoa(A, 'BIA MENDES', '5519933338888', '795');
+  const acc = await contrato(A, { ini: '2026-09-21', fim: '2026-12-21', ext: '2500', aluno: bia, periodicidade: 'trimestral' });
+  await sweep.processarTenant(A, { agora: AGORA });
+  const antes = (await toques(A, acc)).find((t) => t.ordem === 1);
+  assert.ok(antes && ['pendente', 'bloqueado'].includes(antes.status), 'a régua preparou a etapa 1 para ela');
+  const etapa1 = (await recepcao.listarMensagensDoPlano(A, { phone: '5519933338888' })).itens.find((x) => x.ordem === 1);
+
+  const out = await recepcao.enviarMensagemDoPlano(A, {
+    etapaId: etapa1.etapaId, phone: '5519933338888', texto: 'Oi Bia, seja bem-vinda!', comAnexo: false, por: 'Recepção',
+  }, { inbox: inboxFalso });
+  assert.equal(out.ok, true);
+  assert.equal(out.casouComAFila, true, 'a mensagem que estava na fila foi marcada como enviada');
+  assert.deepEqual(enviados, [['texto', 'Oi Bia, seja bem-vinda!']]);
+
+  const depois = (await toques(A, acc)).find((t) => t.ordem === 1);
+  assert.equal(depois.status, 'enviado');
+  assert.equal(depois.auto, false);
+  assert.match(depois.motivo, /fora do momento programado/);
+});
+
+test('biblioteca: campo não preenchido NÃO sai para a família', async () => {
+  const etapa1 = (await recepcao.listarMensagensDoPlano(A, { phone: '5519900009999' })).itens[0];
+  const out = await recepcao.enviarMensagemDoPlano(A, {
+    etapaId: etapa1.etapaId, phone: '5519900009999', texto: 'Oi {cliente}, tudo bem?', comAnexo: false,
+  }, { inbox: { ensureConversation: async () => { throw new Error('não deveria chegar aqui'); } } });
+  assert.equal(out.erro, 'texto_com_variavel_sem_valor');
+  assert.equal(out.status, 422);
+});
+
+test('biblioteca: envio para quem não tem contrato não cria plano nem toque', async () => {
+  const inboxFalso = {
+    ensureConversation: async () => ({ conversation_id: '22222222-2222-4222-8222-222222222222' }),
+    sendMessage: async () => ({ ok: true, messageId: 'm9' }),
+    sendInboxMedia: async () => ({ ok: true, messageId: 'm9' }),
+    sendInboxAudio: async () => ({ ok: true, messageId: 'm9' }),
+  };
+  const antes = await admin('SELECT count(*)::int AS n FROM lead_manager.boas_vindas_toque WHERE tenant_id = $1', [A]);
+  const etapa = (await recepcao.listarMensagensDoPlano(A, { phone: '5519900009999' })).itens[0];
+  const out = await recepcao.enviarMensagemDoPlano(A, {
+    etapaId: etapa.etapaId, phone: '5519900009999', texto: 'Oi, tudo bem? Aqui é da escola.', comAnexo: false,
+  }, { inbox: inboxFalso });
+  assert.equal(out.ok, true);
+  assert.equal(out.casouComAFila, false);
+  const depois = await admin('SELECT count(*)::int AS n FROM lead_manager.boas_vindas_toque WHERE tenant_id = $1', [A]);
+  assert.equal(depois.rows[0].n, antes.rows[0].n, 'nenhuma mensagem nova foi agendada para quem não tem contrato');
+});
+
 test('runBoasVindasSweep: percorre as unidades ativas e isola erro de uma unidade', async () => {
   const r = await sweep.runBoasVindasSweep({ agora: AGORA, portao: async () => [A, B, '00000000-0000-4000-8000-000000000000'] });
   assert.equal(r.length, 3);
