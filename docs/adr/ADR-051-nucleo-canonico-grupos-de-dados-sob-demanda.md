@@ -612,3 +612,36 @@ Exclusões operacionais de baixo risco que ficam como estão: documentos órfão
 - **−** Mais uma camada (`plataforma.*`) a manter; a transição convive com os mecanismos antigos (E1–E6) até a Fase 6.
 - **−** Todo job precisa ser tocado (portão + loop por unidade); trabalho mecânico, mas extenso.
 - **−** Telas precisam aprender cobertura ("não coletado ≠ zero").
+
+## Formas de erro que se repetem (catálogo compartilhado)
+
+Registro aqui as formas que aparecem em mais de uma frente, para não serem reaprendidas caso a
+caso. O texto abaixo é da frente de auditoria do legado, citado com pequenas edições.
+
+### Sequência que funcionou é a condição em que a gente para de conferir
+
+A confiança vem da repetição, não da verificação — e, quando as duas divergem, é a verificação que
+para primeiro, porque ela é a parte que custa e não a parte que convence.
+
+**Duas instâncias no mesmo dia (26/10/2026), em sistemas diferentes e por sessões que não se
+combinaram:**
+- publicar em checkout compartilhado sem conferir em que ramo ele estava, depois de uma sequência
+  de commits que tinham funcionado — com a regra já escrita na memória do projeto ("escrever em
+  worktree; compartilhado só para ler");
+- rodar dois scripts de sabotagem em paralelo no mesmo banco, depois de doze rodarem em série sem
+  problema.
+
+**O que torna a forma difícil de pegar:** nos dois casos a regra violada estava **escrita** e era
+**conhecida por quem a violou**. Não foi ignorância nem pressa — foi a repetição produzindo a
+sensação de que o passo de conferência era cerimônia. É parente de "a trava estava lá e olhava numa
+direção só", com uma diferença: lá a verificação existia e olhava para o lado errado; aqui ela
+existia e **deixou de ser executada**.
+
+**As duas foram pegas pela mesma coisa:** uma verificação que não depende de quem a executa — o
+worktree a partir de `origin/main`, que impediu o estrago de chegar ao main, e a conferência de
+estado que abortou com "o estado não voltou ao original". **A trava contra esta forma não é
+disciplina, é verificação que roda sozinha e fala alto.** O sinal de alerta a vigiar é a frase
+"isso vem funcionando": ela aparece exatamente quando o próximo passo deixa de ser conferido.
+
+Neste ADR, as travas desse tipo são a salvaguarda de queda da coleta (§D-coleta), a contagem diária
+de linhas (Fase 0) e o teste de restauração semanal — nenhuma delas depende de alguém lembrar.
