@@ -15,6 +15,7 @@ const { withTenant } = require('../../db');
 const { withExtranetLock } = require('../../resources/extranet-lock');
 const client = require('../../resources/adapters/extranet-client');
 const { criarCache, assinaturaDe } = require('../extranet-cache');
+const logger = require('../../logger');
 
 const kind = 'SCRAPE_EXTRANET';
 
@@ -87,14 +88,34 @@ async function produce(binding, { tenantId } = {}) {
     throw lastErr;   // esgotou as tentativas (todas transientes)
   };
 
-  // ----- LISTA paginada (300/pág; dedup por idC; para quando não traz idC novo) -----
+  // ----- LISTA paginada (dedup por idC; para quando não traz idC novo) -----
+  // ⚠ TAMANHO DE PÁGINA: pedíamos 300/pág. Em algum momento até 19/10/2026 a Extranet passou a
+  // VALIDAR esse parâmetro contra os valores do próprio select (10, 50, 100) e a cair para 10
+  // quando recebe outro. Medido em 26/10: 10→10 linhas, 50→50, 100→100, 300→**10**. Com 10 por
+  // página e o teto antigo de 25 páginas, a lista parava em 250 de 1.111 contratos — e a
+  // salvaguarda de queda abortou a gravação todo dia desde 19/10 (cadastro congelado em 18/10).
+  // Lição: parâmetro recusado em silêncio não dá erro, dá MENOS DADO. Por isso o laço agora
+  // compara o que pediu com o que veio e grita na primeira página.
+  const POR_PAGINA = Number(process.env.CADASTRO_LISTA_POR_PAGINA ?? 100);   // valor aceito pela Extranet
+  const MAX_PAGINAS = Number(process.env.CADASTRO_LISTA_MAX_PAGINAS ?? 60);  // 60 × 100 = 6.000 contratos
   let rows = []; const seenC = new Set();
-  for (let pg = 1; pg <= 25; pg++) {
-    const h = await get(`/mod_contratos/monta_lista.php?pg=${pg}&num_por_pagina=300&nome=&status=&situacao=&plano=&ordemDt=`);
+  for (let pg = 1; pg <= MAX_PAGINAS; pg++) {
+    const h = await get(`/mod_contratos/monta_lista.php?pg=${pg}&num_por_pagina=${POR_PAGINA}&nome=&status=&situacao=&plano=&ordemDt=`);
     const pr = (h.match(/<tr[\s\S]*?<\/tr>/gi) || []).filter((r) => /dash-alunos\.php\?id=/i.test(r));
+    if (pg === 1 && pr.length > 0 && pr.length < POR_PAGINA) {
+      // Pode ser base pequena (legítimo) ou parâmetro recusado (defeito). Quem decide é a
+      // salvaguarda, mas o aviso é o que liga a causa ao sintoma quando alguém for investigar.
+      logger.warn('cadastro_sync.pagina_menor_que_pedida', {
+        tenant_id: tenantId, pedido: POR_PAGINA, recebido: pr.length,
+        consequencia: 'se a lista truncar, a salvaguarda aborta e o cadastro congela',
+      });
+    }
     let novos = 0;
     for (const r of pr) { const idc = (r.match(/(?:Visualizar|Renovar|Imprimir)\(?['"]?(\d+)/i) || [])[1]; if (idc && !seenC.has(idc)) { seenC.add(idc); rows.push(r); novos++; } }
     if (pr.length === 0 || novos === 0) break;
+    if (pg === MAX_PAGINAS) {
+      logger.warn('cadastro_sync.teto_de_paginas', { tenant_id: tenantId, paginas: MAX_PAGINAS, contratos: seenC.size, consequencia: 'lista pode estar truncada' });
+    }
   }
   const parsed = rows.map((r) => {
     const tds = (r.match(/<td[\s\S]*?<\/td>/gi) || []);
@@ -128,7 +149,12 @@ async function produce(binding, { tenantId } = {}) {
   };
   const extraiFicha = (html) => ({
     idResp: field(html, 'id_responsavel'), tp: tpsel(html),
-    nasc: toISO(field(html, 'data_nascimento')) || null,
+    // ⚠ O campo na ficha chama `dt_nascimento`, não `data_nascimento` — medido em 26/10/2026 nas
+    // 20 fichas da amostra, e nas 452 fichas do cache `nasc` estava NULL em 100%. O nome errado
+    // está aqui desde antes do cache (commit ff84686), então o nascimento nunca foi capturado por
+    // este caminho: os 400 nascimentos que existem em `person` vieram de outra importação.
+    // Mantém o nome antigo como alternativa, caso alguma unidade use a outra grafia.
+    nasc: toISO(field(html, 'dt_nascimento') || field(html, 'data_nascimento')) || null,
     telefone: field(html, 'fonea_celular') || field(html, 'fonea_celular1') || field(html, 'fone_celular2') || null,
   });
 
