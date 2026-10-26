@@ -222,6 +222,32 @@ Funciona inclusive onde o catálogo ainda não existe.
 
 **Compromisso que muda.** O material preparado para a franqueadora (hoje interno) afirma, na parte de LGPD, "só o dado necessário, **sem CPF de aluno**". A frase passa a ser: **CPF apenas do responsável pelo contrato, para emissão de nota fiscal**. Quem redigir política de privacidade ou termo de tratamento usa esta redação, não a antiga.
 
+**Onde o documento mora (desenho fechado com a frente fiscal, 26/10):** em **tabela própria**
+ligada à pessoa, nunca como coluna em `person`. A razão é a própria D13 levada a sério — se a
+retenção do documento é fiscal e a da pessoa é a do cancelamento, os dois têm relógios diferentes,
+e coluna junto obriga os dois a envelhecerem juntos. Além disso: permissão de leitura separada (só
+quem emite nota), auditoria de acesso que não se perde no meio das leituras de cadastro, e exclusão
+que apaga o documento sem tocar na pessoa.
+
+Campos: `tipo` (CPF | CNPJ), `valor_cifrado`, **`ultimos_digitos` em claro**, `origem`,
+`coletado_em`. Os últimos dígitos existem porque quase toda conferência humana é "é este mesmo?",
+e isso se resolve com quatro dígitos — sem eles, conferir vira decifrar, e decifrar por hábito é
+como cifra morre.
+
+**Na nota, o bloco do tomador é CÓPIA, não referência.** Nota fiscal é imutável: se o tomador mudar
+de endereço em 2028, a nota de 2026 continua mostrando o endereço de 2026. O cadastro é a fonte **no
+momento de emitir**; a nota guarda o que foi emitido. Mesma regra das outras frentes: derivar para
+preencher, gravar para apurar. Do lado do cadastro, a obrigação é só manter o dado correto.
+
+**Os 109 contratos sem pagador viram número consultável**, não achado. Enquanto não for zero, é o
+teto da emissão automática: para esses não existe nota — não sai feia, não pode sair. A emissão
+recusa com motivo nomeado e a pendência vai para a recepção, em vez de nota com dado inventado.
+
+**Vocabulário:** "aluno" e "responsável" são palavras de escola. No fiscal o par é **tomador** e
+**prestador**. Campo que o fiscal vai ler não carrega "aluno" no nome — uma clínica herdaria a
+palavra. "Responsável legal pelo contrato" é contratual e serve para a decisão; o campo no núcleo
+usa o termo neutro.
+
 **Três frentes dependem deste campo** — emissão de NFS-e, crédito de tarifa de adquirente previsto para 2027 e conferência de identidade entre o financeiro do Regente e a lista de inadimplentes da franqueadora (que não traz documento). Três usos independentes é o sinal de que o campo pertence ao núcleo canônico e não a um épico.
 
 ### D10 — Desativar não apaga
