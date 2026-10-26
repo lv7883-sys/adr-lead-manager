@@ -204,6 +204,26 @@ Funciona inclusive onde o catálogo ainda não existe.
 "curso = instrumento" erra nesses dois. O de-para de curso nasce no canônico, como fonte única, com
 `curso.js` virando leitor — nunca duas traduções vivas.
 
+
+### D13 — CPF do responsável pelo contrato, só para emitir nota fiscal
+
+**Decisão do Leo (26/10/2026):** *"vamos precisar do CPF sim dos responsáveis legais pelos contratos para emitir as notas"*. O Regente passa a emitir as NFS-e da Academia no lugar da digitação manual no site da prefeitura, e sem documento do tomador não existe nota.
+
+**Quem entra, medido em 26/10:** o alvo é o **pagador**, não o aluno. Nas 1.111 contas presentes, `account_member` tem 1.111 vínculos de beneficiário (433 pessoas) e **1.002 de pagador (330 pessoas distintas)**. São 330 documentos, não 453 — e 109 contratos sem pagador registrado, que precisam ser resolvidos antes de a emissão cobrir a base toda.
+
+**De onde vem, sem custo novo:** a ficha do aluno na Extranet (`/mod_alunos/update_alunos.php?id=`) tem `cpf_aluno`, `cep`, `endereco`, `numero`, `bairro`, `cidade`, `uf`, e as variantes `*1`/`*2` do responsável (verificado em produção, 26/10, em 3 fichas; cobertura medida em amostra à parte). A coleta diária **já abre essas 445 fichas** e as guarda no cache da migração 131 — passar a extrair documento e endereço é mudança de extração, **zero requisição adicional**.
+
+**Como entra, e isto não é negociável:**
+- **Finalidade declarada e única:** emissão de nota fiscal. CPF coletado na matrícula usado para emitir nota é finalidade nova com base legal sólida (obrigação legal), mas precisa estar escrita no grupo de dado e informada na política de privacidade.
+- **Cifrado pela aplicação** (AES-256-GCM, a mesma cifra das credenciais), nunca em claro, nunca em log, nunca em mensagem de erro.
+- **Só do pagador.** Não coletar CPF de aluno menor de idade que não é o tomador da nota: documento que não é necessário não entra.
+- **Retenção pelo prazo fiscal**, que é mais longo que os 90 dias da D11 de cancelamento — nota emitida tem guarda própria. O CPF de quem cancelou e não tem nota aberta sai no prazo normal.
+- **Irreversibilidade a declarar:** CPF que entra no banco entra nos backups. Apagar depois não apaga de backup anterior; a única defesa real é não coletar o que não é necessário.
+
+**Compromisso que muda.** O material preparado para a franqueadora (hoje interno) afirma, na parte de LGPD, "só o dado necessário, **sem CPF de aluno**". A frase passa a ser: **CPF apenas do responsável pelo contrato, para emissão de nota fiscal**. Quem redigir política de privacidade ou termo de tratamento usa esta redação, não a antiga.
+
+**Três frentes dependem deste campo** — emissão de NFS-e, crédito de tarifa de adquirente previsto para 2027 e conferência de identidade entre o financeiro do Regente e a lista de inadimplentes da franqueadora (que não traz documento). Três usos independentes é o sinal de que o campo pertence ao núcleo canônico e não a um épico.
+
 ### D10 — Desativar não apaga
 Um grupo sem aplicação ativa vai para `preservado`: para de sincronizar e fica oculto. A exclusão só acontece depois do prazo D11 da especificação (proposta: 90 dias) **e** do piso de retenção legal do grupo, em ordem de dependência, com backup verificado de menos de 24 h, relatório de simulação e aprovação humana registrada. O código de exclusão nasce **desligado**.
 
