@@ -343,13 +343,15 @@ const _VARS_DE_AGENDA = ['dia', 'horario', 'profissional'];
 async function listarMensagensDoPlano(tenantId, { phone, versao = 'titular' } = {}) {
   const dados = require('./dados');
   const R = require('../boasVindasRegua');
-  if (!phone) return { itens: [], cliente: null, temContrato: false };
+  // SEM TELEFONE a lista vem igual, só sem nada preenchido (28/10): o bloco precisa aparecer na aba
+  // antes de a recepção abrir a conversa, senão ela não descobre que ele existe — foi o que
+  // aconteceu com o Leo, que procurou duas vezes e não achou.
 
   return withTenant(tenantId, async (c) => {
     const [config, etapas] = await Promise.all([dados.carregarConfig(c, tenantId), dados.carregarEtapas(c, tenantId)]);
 
     // Quem é esta pessoa para nós: contrato vivo (se houver) e nome do contato pela régua única.
-    const { rows: [conta] } = await c.query(
+    const { rows: [conta] } = !phone ? { rows: [] } : await c.query(
       `SELECT sa.id, sa.servico_label, sa.professor_nome,
               (SELECT p.display_name FROM lead_manager.account_member am JOIN lead_manager.person p ON p.id = am.person_id
                 WHERE am.account_id = sa.id AND am.bond = 'beneficiario' LIMIT 1) AS cliente_nome
