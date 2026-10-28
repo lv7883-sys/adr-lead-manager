@@ -148,6 +148,11 @@ test('fila: só o que já está pronto, com o anexo ATUAL da mensagem e a conver
   assert.equal(it.anexo.nome, 'Guia v2.png', 'o arquivo mais recente da mensagem');
   assert.deepEqual(it.envio, ['arquivo'], 'imagem com o texto de legenda');
   assert.equal(it.etapa.nome, 'Guia do Aluno');
+  // O PRAZO vai junto na fila: é o que a tela cobra ("vence hoje"). Sem ele, a recepção só via a
+  // hora em que a mensagem ficou pronta — e foi assim que 13 mensagens venceram sem ninguém enviar.
+  const et5 = await etapa(E, 5);
+  assert.equal(et5.quando.tipo, 'dias', 'o modelo ainda marca esta mensagem por dias corridos');
+  assert.equal(it.expiraEm, Number(new Date(it.dueAt)) + 7 * 86400000, 'sete dias de tolerância — a mesma régua do sweep');
   assert.equal((await recepcao.listarFila(F)).length, 0, 'outra unidade não vê');
 });
 

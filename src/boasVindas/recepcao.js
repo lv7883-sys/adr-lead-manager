@@ -25,7 +25,7 @@ const ESTADOS_ABERTOS = ['pendente', 'bloqueado'];
 const SQL_FILA = `
 SELECT bt.id, bt.account_id, bt.etapa_id, bt.repeticao, bt.status, bt.bloqueio, bt.motivo, bt.due_at, bt.versao,
        bt.phone, bt.destinatario_nome, bt.cliente_nome, bt.texto_final, bt.erro, ac.boas_vindas_modo AS modo,
-       e.nome AS etapa_nome, e.ordem, e.repeticoes, e.anexo_sugerido,
+       e.nome AS etapa_nome, e.ordem, e.repeticoes, e.anexo_sugerido, e.quando, bt.ancora_data::text AS ancora_data,
        a.id AS anexo_id, a.nome_arquivo AS anexo_nome, a.tipo AS anexo_tipo, a.mime AS anexo_mime,
        a.caminho AS anexo_url, a.enviado_em AS anexo_atualizado_em,
        (SELECT count(*)::int FROM lead_manager.boas_vindas_etapa e2
@@ -82,6 +82,14 @@ function itemDaLinha(r) {
     erro: r.erro ? (MOTIVO_ERRO[r.erro] || 'O envio automático não conseguiu mandar esta mensagem. Confira e envie.') : null,
     automatico: r.modo === 'auto',
     dueAt: r.due_at,
+    // ATÉ QUANDO AINDA VALE (ms). O prazo é a perda real desta fila — 13 mensagens venceram sem
+    // ninguém enviar — e, sem ele na tela, "amanhã eu mando" não tem consequência visível. A regra é
+    // a do módulo (limiteDaMensagem), nunca uma segunda cópia aqui.
+    expiraEm: R.limiteDaMensagem({
+      dueAt: r.due_at == null ? null : Number(new Date(r.due_at)),
+      etapa: { quando: r.quando },
+      ancoraData: r.ancora_data,
+    }),
     versao: r.versao,
     phone: r.phone,
     destinatarioNome: r.destinatario_nome,
