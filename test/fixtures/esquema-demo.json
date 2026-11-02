@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "gerado_em": "2026-11-02T13:19:42.363Z",
+    "gerado_em": "2026-11-02T22:30:09.435Z",
     "banco": "adr_scheduler",
     "porta": 5432,
     "postgres": "PostgreSQL 16.13",
@@ -949,6 +949,15 @@
         "aborda_renovacao": {
           "tipo": "boolean",
           "udt": "bool",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "etapa_custom": {
+          "tipo": "text",
+          "udt": "text",
           "nulo": true,
           "temDefault": false,
           "default": null,
@@ -2139,6 +2148,15 @@
           "nulo": false,
           "temDefault": true,
           "default": "'off'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "stage_ui": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'{}'::jsonb",
           "gerada": false,
           "tamanhoMax": null
         }

@@ -586,6 +586,66 @@ test('⭐ os leads caem dentro do filtro PADRÃO do Kanban (30 dias) — senão 
   }
 });
 
+test('⭐ a clínica tem UMA coluna criada por ela, e ela é VÁLIDA pela régua do produto', () => {
+  // Decisão do Leo em 02/11: a tela de configurar não fica pronta para 04/11, então a demo mostra
+  // o RESULTADO. A configuração vem do SEED e não de um ajuste à mão — ajuste fora do plano some
+  // na próxima regravação e ninguém descobre por quê.
+  const stagesUi = require('../src/stagesUi');
+  const cfg = demo.colunasDoKanban();
+  const v = stagesUi.validarConfig(cfg, stages.KANBAN_KEYS);
+  assert.equal(v.ok, true, `a config do seed não passa no validador do produto: ${v.erro} — ${v.detalhe}`);
+  assert.equal(v.config.extras.length, 1);
+
+  const extra = v.config.extras[0];
+  assert.equal(extra.key, 'x_convenio');
+  assert.equal(extra.label, 'Aguardando convênio');
+  assert.equal(extra.depois, 'novo');
+  // ⭐ COM `definicao`: sem ela a coluna existiria no quadro e seria INVISÍVEL para a IA — metade
+  // do recurso. Com ela, a classificação sabe sugerir a coluna que a unidade criou.
+  assert.ok(extra.definicao && extra.definicao.includes('convênio'));
+  assert.ok(Object.keys(stagesUi.definicoesParaIA({ novo: 'x' }, v.config)).includes('x_convenio'));
+
+  // o quadro da clínica fica com SETE colunas, na ordem, com a nova depois de "Novo"
+  const labels = stages.stageCatalog(demo.perfilDaAssistente(), v.config).stages.map((s) => s.label);
+  assert.deepEqual(labels, ['Novo', 'Aguardando convênio', 'Qualificando', 'Qualificado',
+    'Avaliação', 'Em tratamento', 'Perdido']);
+});
+
+test('⭐ a coluna criada tem CARD, e o card continua NEW para o funil', () => {
+  const stagesUi = require('../src/stagesUi');
+  const v = stagesUi.validarConfig(demo.colunasDoKanban(), stages.KANBAN_KEYS);
+  const leads = comoObjetos(blocoDe(plano(), 'leads'));
+
+  const naColuna = leads.filter((l) => l.etapa_custom === 'x_convenio');
+  assert.equal(naColuna.length, 1, 'a coluna criada ficaria vazia — o mesmo buraco da "Avaliação"');
+  assert.equal(naColuna[0].name, 'Clarice Rendell');
+
+  // ⭐ O INVARIANTE DA MIGR 188: coluna extra é VISTA, não estado. Para o funil e o BI a Clarice
+  // segue sendo um lead NOVO — é isso que mantém as taxas comparáveis entre unidades.
+  assert.equal(naColuna[0].status, 'NEW');
+  assert.equal(stages.stageOfLead(naColuna[0]), 'novo');
+  // e a régua de exibição a põe na coluna criada
+  assert.equal(stagesUi.etapaDoLead(naColuna[0], v.config, stages.stageKey), 'x_convenio');
+
+  // A CONVERSA justifica a coluna: ela pergunta de convênio antes de a coluna existir.
+  const conv = cenario.CONVERSAS.find((c) => c.chave === 'clarice');
+  assert.ok(conv.mensagens.some(([, , , t]) => /convênio/i.test(String(t || ''))),
+    'o card está numa coluna que a conversa dele não justifica');
+
+  // E as SETE colunas ficam povoadas no quadro de 30 dias — coluna vazia no meio parece buraco.
+  const corte = cenario.maisDias(HOJE, -30);
+  const porColuna = {};
+  leads.filter((l) => !['NOT_LEAD', 'REVIEW_QUEUE'].includes(l.status)
+      && String(l.created_at).slice(0, 10) >= corte)
+    .forEach((l) => {
+      const k = stagesUi.etapaDoLead(l, v.config, stages.stageKey);
+      porColuna[k] = (porColuna[k] || 0) + 1;
+    });
+  for (const s of stages.stageCatalog(demo.perfilDaAssistente(), v.config).stages) {
+    assert.ok((porColuna[s.key] || 0) >= 1, `a coluna ${JSON.stringify(s.label)} ficaria vazia`);
+  }
+});
+
 test('a ÂNCORA é declarada, e mudá-la move as dez vigências — que outro repositório espelha', () => {
   // A frente do dashboard fixou estas dez datas como LITERAIS no BI (decisão de 02/11/2026,
   // porque o público soma e a tela de Renovações não pode discordar do painel de contratos).

@@ -264,6 +264,16 @@ const CONVERSAS = Object.freeze([
   {
     chave: 'clarice', nome: 'Clarice Rendell', telefone: '5519990000010',
     naoLida: true,
+    // ⭐ O card da COLUNA QUE A UNIDADE CRIOU (migr 188 + tenant-demo.colunasDoKanban).
+    //
+    // A conversa dela JÁ era sobre convênio antes de a coluna existir — ela pergunta "meu
+    // convênio cobre a avaliação?" e a Janis responde que quem confirma cobertura é a recepção.
+    // A coluna não foi inventada para o card, nem o card para a coluna: os dois contam a mesma
+    // história, que é o que faz uma demonstração parecer um sistema em uso e não um cenário.
+    //
+    // ⚠ `status` continua 'NEW'. A coluna extra é VISTA, não estado — para o funil e o BI ela
+    // segue sendo um lead novo. É exatamente o invariante que a migr 188 existe para preservar.
+    etapaCustom: 'x_convenio',
     lead: { status: 'NEW', intent: 'GENERAL_INFO', origem: 'whatsapp' },
     mensagens: [
       [0, '10:48', 'cliente', 'Oi! Meu convênio cobre a avaliação com vocês?'],
@@ -459,6 +469,7 @@ function plano({ tenantId, hoje }) {
         l.abordaRenovacao === true ? true : null,
         primeira,                      // created_at — o lead nasce na 1ª mensagem (filtro do Kanban)
         ultima,                        // updated_at
+        c.etapaCustom || null,         // coluna criada pela unidade (migr 188); null = a canônica
       ]);
     }
   }
@@ -560,7 +571,8 @@ function plano({ tenantId, hoje }) {
     {
       tabela: 'lead_manager.leads',
       colunas: ['id', 'tenant_id', 'name', 'phone', 'status', 'intent', 'origem',
-        'desfecho', 'desfecho_notas', 'desfecho_em', 'aborda_renovacao', 'created_at', 'updated_at'],
+        'desfecho', 'desfecho_notas', 'desfecho_em', 'aborda_renovacao', 'created_at', 'updated_at',
+        'etapa_custom'],
       chaveConflito: ['id'],
       linhas: leads,
     },
