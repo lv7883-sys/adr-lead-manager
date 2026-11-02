@@ -554,6 +554,19 @@ backfill "não era necessário", exatamente quando ele é.
 e o `npm install` segue sem ele. Trocar para `npm ci` mudaria as versões instaladas na imagem —
 é outra decisão, com outro risco, e não se enfia numa correção de "fazer o backfill rodar".
 
+**PROVADO POR BUILD, antes de publicar e sem tocar no container no ar** (02/11/2026, 13:05):
+imagem construída com tag própria a partir desta branch, código de saída 0; `/app/deploy` presente
+com os 16 arquivos; e `node deploy/wa-sync-once.js` **sem argumento** respondeu com a própria
+mensagem de uso ("Informe TENANT_ID=… ou use --all") em vez de "Cannot find module" — ou seja, a
+cadeia de `require` (`src/db`, `src/waSync`) resolveu. Imagem de teste removida em seguida; só a
+`adr-lead-manager:latest` em uso permaneceu.
+
+**E um efeito colateral bom, que fecha o ciclo do meu próprio incidente:** com `deploy/` na
+imagem, `seed-demo-mf8.js` e `dump-esquema-demo.js` passam a rodar **de dentro do container**,
+onde `DATABASE_URL` resolve sozinho. Isso elimina as duas coisas que me fizeram errar hoje — a
+substituição do host pelo IP da rede docker, e o clone raso em `/tmp/demo-mf8` cujo refspec
+limitado fez um `git fetch` falhar em silêncio e eu rodar o seed com o código antigo.
+
 ### Como exigir isto (o que exigiu publicar)
 
 Medido em 02/11/2026: o LM no ar serve `🎯 Experimental` e `🎓 Matriculado`, e o campo
