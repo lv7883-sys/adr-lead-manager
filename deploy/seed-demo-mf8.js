@@ -287,6 +287,31 @@ async function gravarCenario() {
   const hoje = arg('hoje', hojeEmSaoPaulo());
   const ensaio = tem('ensaio') || tem('dry-run');
 
+  // ⭐ A ÂNCORA É TRAVADA, e a trava é por causa de OUTRO repositório.
+  //
+  // Em 02/11/2026 a frente do dashboard passou a espelhar estes dez contratos no BI — nomes,
+  // serviços e vigências, como valores LITERAIS lá. Um `--hoje` diferente aqui moveria as dez
+  // datas (medido: âncora 04/11 dá o primeiro vencimento em 25/09; 02/11 dá 23/09) e os dois
+  // lados voltariam a discordar EM SILÊNCIO, cada tela certa sozinha. Numa apresentação para
+  // uma consultoria tributária, quem soma percebe.
+  //
+  // Então mover a âncora deixa de ser um argumento digitado por hábito e passa a ser uma decisão
+  // escrita: `--reancorar`. E quem a usar é avisado de que precisa falar com a outra frente.
+  if (hoje !== cenario.ANCORA_DA_APRESENTACAO && !tem('reancorar')) {
+    throw new Error(
+      `RECUSADO: a âncora da apresentação é ${cenario.ANCORA_DA_APRESENTACAO} e você pediu ${hoje}.\n\n`
+      + 'As dez vigências de contrato saem de deslocamentos sobre a âncora, e o BI do outro\n'
+      + 'repositório (adr-whatsapp-scheduler) espelha essas datas como valores LITERAIS. Mudar\n'
+      + 'aqui faz a tela de Renovações e o painel de contratos do BI discordarem em silêncio.\n\n'
+      + 'Se é isso que você quer mesmo, passe --reancorar E avise a frente do dashboard, porque\n'
+      + 'as datas dela precisam mudar junto.');
+  }
+  if (tem('reancorar') && hoje !== cenario.ANCORA_DA_APRESENTACAO) {
+    console.log(`⚠ REANCORANDO de ${cenario.ANCORA_DA_APRESENTACAO} para ${hoje}.`);
+    console.log('  As dez vigências MUDARAM. O BI do outro repositório espelha estas datas como');
+    console.log('  literais — avise a frente do dashboard, ou as duas telas vão discordar.');
+  }
+
   const p = cenario.plano({ tenantId, hoje });
   const r = cenario.resumo({ tenantId, hoje });
   console.log(`Cenário: ${r.linhas} linhas em ${r.tabelas} tabelas (âncora de datas: ${hoje}).`);

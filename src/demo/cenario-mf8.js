@@ -80,6 +80,21 @@ function idDe(tipo, chave) {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 const FUSO = '-03:00';
 
+// ⭐ A ÂNCORA DA APRESENTAÇÃO, e por que ela é constante declarada e não só um argumento.
+//
+// Todas as vigências de contrato saem de deslocamentos de dia sobre esta data. Mudá-la move as
+// dez datas — medido: âncora 04/11 dá o primeiro vencimento em 25/09; âncora 02/11 dá 23/09.
+//
+// E isso deixou de ser detalhe interno em 02/11/2026, quando a frente do dashboard decidiu
+// ESPELHAR estes dez contratos no BI (nomes, serviços e vigências), porque o público da
+// apresentação é uma consultoria tributária e a tela de Renovações não pode discordar do painel
+// de contratos. As datas dela são literais, fixadas no outro repositório.
+//
+// Logo: um `--hoje` diferente aqui faria os dois lados voltarem a discordar — e em silêncio, com
+// cada tela certa sozinha. `deploy/seed-demo-mf8.js` RECUSA outra âncora sem `--reancorar`, para
+// que mover as datas seja uma decisão escrita e não um argumento digitado por hábito.
+const ANCORA_DA_APRESENTACAO = '2026-11-04';
+
 /** 'YYYY-MM-DD' + n dias → 'YYYY-MM-DD'. PURA, em UTC (sem fuso: é data, não instante). */
 function maisDias(dataISO, n) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dataISO));
@@ -579,6 +594,6 @@ function resumo({ tenantId, hoje }) {
 }
 
 module.exports = {
-  NAMESPACE, PLANOS, CONVERSAS, CONTRATOS_SEM_CONVERSA, FUSO,
+  NAMESPACE, PLANOS, CONVERSAS, CONTRATOS_SEM_CONVERSA, FUSO, ANCORA_DA_APRESENTACAO,
   idDe, maisDias, instante, plano, tabelasDoPlano, resumo,
 };
