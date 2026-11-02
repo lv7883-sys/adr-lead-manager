@@ -549,6 +549,26 @@ test('a unidade de demonstração cai no conjunto de saúde — pelo perfil que 
   assert.equal(c.find((s) => s.key === 'convertido').label, 'Em tratamento');
 });
 
+test('a ÂNCORA é declarada, e mudá-la move as dez vigências — que outro repositório espelha', () => {
+  // A frente do dashboard fixou estas dez datas como LITERAIS no BI (decisão de 02/11/2026,
+  // porque o público soma e a tela de Renovações não pode discordar do painel de contratos).
+  // Então a âncora deixou de ser detalhe interno: ela é contrato entre dois repositórios.
+  assert.equal(cenario.ANCORA_DA_APRESENTACAO, '2026-11-04');
+
+  const vencimentos = (ancora) => comoObjetos(blocoDe(cenario.plano({ tenantId: TENANT, hoje: ancora }), 'service_account'))
+    .map((c) => c.fim_vigencia).sort();
+
+  // Na âncora da apresentação, as dez datas são ESTAS — escritas à mão, porque é exatamente a
+  // lista que o outro repositório copiou. Se elas mudarem, este teste cai e alguém tem de avisar.
+  assert.deepEqual(vencimentos('2026-11-04'), [
+    '2026-09-25', '2026-10-15', '2026-10-30', '2026-11-06', '2026-11-11',
+    '2026-11-14', '2026-11-19', '2026-12-04', '2026-12-19', '2027-01-21',
+  ]);
+
+  // E a prova de que a âncora realmente desloca — senão a trava do seed protegeria nada.
+  assert.notDeepEqual(vencimentos('2026-11-02'), vencimentos('2026-11-04'));
+});
+
 test('o resumo conta linhas de verdade, e o cenário tem tamanho de roteiro de 10 minutos', () => {
   const r = cenario.resumo({ tenantId: TENANT, hoje: HOJE });
   assert.equal(r.tabelas, 10);
