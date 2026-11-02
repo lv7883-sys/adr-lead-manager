@@ -212,15 +212,29 @@ async function provisionar() {
   // passe atualizar em vez de duplicar. Sorteio aqui faria cada execução criar outra unidade.
   const novoId = cenario.idDe('tenant', slug);
 
-  // Recusa explícita: nome igual já existente que NÃO seja de demonstração. Pode ser unidade real
-  // com nome parecido, e marcar is_demo nela a tiraria de telas e laços sem ninguém pedir.
-  const homonimo = (await pool.query(
-    'SELECT id, is_demo FROM lead_manager.tenants WHERE name = $1 AND id <> $2', [t.name, novoId])).rows[0];
-  if (homonimo) {
-    throw new Error(
-      `provisionar: já existe o tenant ${JSON.stringify(t.name)} com outro id (${homonimo.id}, `
-      + `is_demo=${homonimo.is_demo}). Não vou criar um segundo com o mesmo nome.`);
-  }
+  // ⚠ AQUI HAVIA UMA GUARDA QUE NUNCA DISPARAVA, e ela merece ficar documentada em vez de apenas
+  // removida. Era:
+  //
+  //     SELECT id, is_demo FROM lead_manager.tenants WHERE name = $1 AND id <> $2
+  //
+  // lida por `pool.query`, isto é, FORA de `withTenant`. `lead_manager.tenants` tem RLS com FORCE
+  // e policy `USING (id = current_tenant)`; sem contexto de tenant a consulta devolve ZERO LINHAS
+  // — então a guarda achava que nunca havia homônimo, qualquer que fosse o banco. Proteção com
+  // nome de proteção, e sem nenhum sintoma: o seed passava.
+  //
+  // E ela NÃO TEM COMO funcionar nesta credencial: achar "um tenant com este nome e outro id"
+  // exige ver linha de outro tenant, que é exatamente o que a RLS existe para impedir.
+  //
+  // O que protege de verdade, dito por extenso:
+  //   • o uuid é DERIVADO do slug, então duas execuções com o mesmo slug dão o MESMO id, e o
+  //     ON CONFLICT (id) atualiza em vez de criar um segundo;
+  //   • o `name` é constante neste arquivo, então não há caminho em que dois slugs gerem o mesmo
+  //     nome com ids diferentes;
+  //   • logo abaixo, dentro do contexto, o script recusa seguir se o id já existir SEM is_demo.
+  //
+  // O que NÃO protege: nada impede, no banco, duas linhas com o mesmo `name`. Medido em produção
+  // em 02/11/2026 — `lead_manager.tenants` tem PRIMARY KEY (id) e índices únicos parciais em
+  // meta_page_id e meta_ig_id, e NENHUM único em `name`.
 
   const p = demo.planoProvisionamento({
     tenantId: novoId, hoje, slug, maisDias: cenario.maisDias, instante: cenario.instante,
@@ -232,7 +246,22 @@ async function provisionar() {
 
   // RLS: a policy de `tenants` é `id = current_tenant`, então o contexto da transação tem de ser
   // o uuid do tenant que está NASCENDO. É outra razão para o uuid ser gerado aqui, não no banco.
-  const gravadas = await withTenant(novoId, (c) => aplicaPlano(c, p, novoId, { ensaio, rotulo: 'prov' }));
+  //
+  // E a conferência de "já existe, e é de demonstração?" roda DENTRO do contexto, pelo mesmo
+  // motivo da guarda morta acima: fora dele a resposta é sempre "não existe".
+  const gravadas = await withTenant(novoId, async (c) => {
+    const ja = (await c.query(
+      'SELECT id, name, is_demo, lead_manager_active FROM lead_manager.tenants WHERE id = $1',
+      [novoId])).rows[0];
+    if (ja && !demo.ehTenantDeDemonstracao(ja)) {
+      throw new Error(
+        `provisionar: o tenant ${novoId} já existe como ${JSON.stringify(ja.name)} e tem `
+        + 'is_demo = false. Não vou marcá-lo como demonstração: marcar tira a unidade de telas e '
+        + 'de laços sem ninguém ter pedido.');
+    }
+    if (ja) console.log(`Tenant já existe (${ja.name}) e é de demonstração — o passe vai ATUALIZAR.`);
+    return aplicaPlano(c, p, novoId, { ensaio, rotulo: 'prov' });
+  });
 
   const total = Object.values(gravadas).reduce((a, b) => a + b, 0);
   console.log(`\nCAMADA 3 ok — ${total} linhas gravadas numa transação só.`);
@@ -271,23 +300,36 @@ async function gravarCenario() {
 
   // O portão, em JavaScript, só para a MENSAGEM ser legível. A trava é a subconsulta.
   //
-  // ⚠ Esta medição é refeita AQUI, imediatamente antes da escrita — não na hora em que alguém
+  // ⚠ DENTRO de withTenant, e isto foi aprendido errando: a primeira versão lia `tenants` por
+  // `pool.query`, fora de qualquer contexto de tenant. A tabela tem RLS com FORCE e policy
+  // `USING (id = current_tenant)` — sem contexto, ZERO LINHAS. O script recusava gravar dizendo
+  // "Nenhum tenant <uuid> em lead_manager.tenants" para um tenant que acabara de ser criado.
+  // Modo de falha clássico deste projeto: chave/contexto errado dá zero linhas, não erro, e a
+  // mensagem culpa a ausência do dado em vez da ausência do contexto.
+  //
+  // ⚠ E a medição é refeita AQUI, imediatamente antes da escrita — não na hora em que alguém
   // pediu autorização. A espera pela permissão é onde o mundo se move: entre o pedido e o
   // comando, outra sessão pode ter ligado o tenant.
-  const t = (await pool.query(
-    'SELECT id, name, is_demo, lead_manager_active FROM lead_manager.tenants WHERE id = $1',
-    [tenantId])).rows[0];
-  if (!t) throw new Error(`Nenhum tenant ${tenantId} em lead_manager.tenants.`);
-  if (!demo.ehTenantDeDemonstracao(t)) throw new Error(demo.MOTIVO_RECUSA);
-  if (t.lead_manager_active) {
-    throw new Error(
-      `RECUSADO: o tenant ${t.name} tem lead_manager_active = true. Gravar o cenário aqui o `
-      + 'colocaria nos laços de fundo (renovação, boas-vindas, silenciosos, waSync) com dados '
-      + 'fictícios. Desligue a coluna antes.');
-  }
-  console.log(`\nPortão ok — ${t.name} (is_demo=true, lead_manager_active=false), medido agora`);
-
-  const gravadas = await withTenant(tenantId, (c) => aplicaPlano(c, p, tenantId, { ensaio, rotulo: 'cen' }));
+  const gravadas = await withTenant(tenantId, async (c) => {
+    const t = (await c.query(
+      'SELECT id, name, is_demo, lead_manager_active FROM lead_manager.tenants WHERE id = $1',
+      [tenantId])).rows[0];
+    if (!t) {
+      throw new Error(
+        `Nenhum tenant ${tenantId} VISÍVEL em lead_manager.tenants sob o contexto deste tenant. `
+        + 'Ou ele não existe, ou o id está errado — e as duas coisas se parecem porque a RLS '
+        + 'devolve zero linhas em vez de erro. Rode `provisionar` primeiro.');
+    }
+    if (!demo.ehTenantDeDemonstracao(t)) throw new Error(demo.MOTIVO_RECUSA);
+    if (t.lead_manager_active) {
+      throw new Error(
+        `RECUSADO: o tenant ${t.name} tem lead_manager_active = true. Gravar o cenário aqui o `
+        + 'colocaria nos laços de fundo (renovação, boas-vindas, silenciosos, waSync) com dados '
+        + 'fictícios. Desligue a coluna antes.');
+    }
+    console.log(`\nPortão ok — ${t.name} (is_demo=true, lead_manager_active=false), medido agora`);
+    return aplicaPlano(c, p, tenantId, { ensaio, rotulo: 'cen' });
+  });
 
   const total = Object.values(gravadas).reduce((a, b) => a + b, 0);
   console.log(`\nCAMADA 3 ok — ${total} linhas gravadas numa transação só.`);
@@ -320,8 +362,11 @@ async function apagar() {
     console.log('ZERO linhas. Isso pode significar duas coisas DIFERENTES, e vale conferir qual:');
     console.log('  (a) o cenário não estava gravado, ou');
     console.log('  (b) o tenant não tem is_demo = true, e o portão recusou tudo em silêncio.');
-    const t = (await pool.query('SELECT is_demo FROM lead_manager.tenants WHERE id = $1', [tenantId])).rows[0];
-    console.log(`  Medido agora: ${t ? `is_demo = ${t.is_demo}` : 'o tenant não existe'}.`);
+    // DENTRO do contexto: fora dele a RLS devolveria zero e o diagnóstico diria "não existe"
+    // para um tenant existente — trocando uma dúvida por outra, com cara de resposta.
+    const t = await withTenant(tenantId, async (c) => (await c.query(
+      'SELECT is_demo FROM lead_manager.tenants WHERE id = $1', [tenantId])).rows[0]);
+    console.log(`  Medido agora: ${t ? `is_demo = ${t.is_demo}` : 'nenhuma linha visível para este id'}.`);
   }
 }
 
