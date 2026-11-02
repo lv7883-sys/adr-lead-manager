@@ -441,6 +441,26 @@ function rotulosDeTela(perfil) {
 }
 
 /**
+ * ⭐ O CONTRATO DO RÓTULO, para quem consome este catálogo.
+ *
+ * `label` é um ESTADO em que o lead se encontra — "Novo", "Qualificando", "Em tratamento". Não é
+ * substantivo de ação, não é objeto, e NÃO DEVE SER FLEXIONADO nem encaixado dentro de uma frase
+ * montada. Cite-o: `Mover para "<label>"`. Não conjugue: `Confirmar <label.toLowerCase()}>?`.
+ *
+ * Isto não é preciosismo — é um defeito que ACONTECEU em 02/11/2026, no consumidor. A tela de
+ * confirmação escrevia `Confirmar ${rotulo.toLowerCase()}?`, pensando em "Confirmar matrícula?".
+ * Com o rótulo que este catálogo serve de verdade, a frase passou a ler **"Confirmar
+ * matriculado?"** na escola e **"Confirmar em tratamento?"** na clínica — errada nas duas, e na
+ * escola uma REGRESSÃO em relação ao literal que havia antes.
+ *
+ * ⚠ E a lição que sobra para quem escreve teste AQUI: uma trava que afirma que o rótulo VEM do
+ * catálogo não diz nada sobre a frase em que ele CABE. São duas propriedades diferentes, e a
+ * primeira passa verde enquanto a segunda está quebrada. A trava do consumidor passou.
+ *
+ * Com a migr 188 isso deixou de ser teórico: a unidade pode escrever QUALQUER rótulo, em qualquer
+ * coluna que ela criar. Consumidor que flexiona vai quebrar com o primeiro rótulo que alguém
+ * digitar. Citar funciona com todos.
+ *
  * @param {object} [perfil]    perfil da assistente (decide o conjunto de rótulos por ramo)
  * @param {object} [stageUi]   `tenant_lead_config.stage_ui` já VALIDADO (migr 188). Ausente ou
  *                             vazio = o quadro canônico, byte a byte — o caso de toda unidade
