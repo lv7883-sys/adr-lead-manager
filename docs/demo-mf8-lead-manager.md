@@ -427,7 +427,73 @@ tela de quem trabalha.
    pacientes. Virou um guarda-chuva de **outro ramo** (ensino + serviços profissionais) que vence
    a menção a saúde e devolve o default.
 
-### 🔴 ISTO EXIGE PUBLICAR O LEAD MANAGER — e antes não exigia
+### ✅ PUBLICADO em 02/11/2026, 10:53 (America/Sao_Paulo), autorizado pelo Leo
+
+```
+suíte antes de publicar ... 115/115
+merge ..................... PR #6 rebaseado na main (histórico linear), 6348e8e
+pull + rebuild ............ /apps/lead-manager seguiu em main; compose project lead-manager
+reinício .................. 10:52:54 → 10:53:04  (10 s, do início do build ao container Started)
+saúde ..................... {"status":"ok"} · container healthy
+backfill .................. 10:54 ciclo do cron (0 reconexões) + 10:56 RASO da Valinhos:
+                            99 conversas conferidas contra o WhatsApp, 0 inseridos, 0 erros
+```
+
+**O CATÁLOGO SERVIDO AGORA, medido nos dois tenants pela rota real:**
+
+| tenant | `ramo_rotulo` | a coluna da consulta | a coluna de quem fechou |
+|---|---|---|---|
+| Clínica (demo) | `"saude"` | 🩺 **Avaliação** — "Consulta de avaliação agendada" | 🩺 **Em tratamento** |
+| ADR Valinhos | `null` | 🎯 Experimental — "Aula experimental agendada" | 🎓 Matriculado |
+
+A segunda linha é a que importa: a unidade real **não mudou**, e isso está medido no serviço no ar,
+não inferido de um teste.
+
+**⭐ A CONTAGEM DE REFERÊNCIA QUE FALTOU NA PRIMEIRA GRAVAÇÃO, agora tomada.** Antes (10:51:46) e
+depois (10:56:37) do reinício, por tenant:
+
+| tabela | Valinhos antes | Valinhos depois | clínica antes | clínica depois |
+|---|---|---|---|---|
+| messages | 61.944 | **61.944** | 23 | 23 |
+| staff_outbound_samples | 81.388 | **81.388** | 9 | 9 |
+| conversations | 2.305 | **2.305** | 12 | 12 |
+| leads | 964 | **964** | 10 | 10 |
+| service_account | 1.139 | **1.139** | 10 | 10 |
+| renovacao_touchpoint | 543 | **543** | 3 | 3 |
+
+Idênticas. **Nada foi perdido na janela do reinício** — e isto é medição, não a inferência
+estrutural que a primeira gravação teve de usar.
+
+⚠ E a diferença entre as duas rodadas de backfill vale entender, porque uma delas quase bastou e
+não bastava: a das 10:54 (`--all`, o ciclo do cron) devolveu `reconexoes: 0, inseridos: 0` — ela
+NÃO puxou nada, apenas concluiu que não havia motivo para puxar. Um reinício de 10 s não muda o
+estado da instância na Evolution, então nenhuma reconexão é detectada. "0 inseridos" ali significa
+"não procurei", não "procurei e não havia". A das 10:56 (`backfillTenant(deep:false)`) é a que
+PROCUROU: conferiu 99 conversas contra o histórico do WhatsApp.
+
+### 🔴 Um defeito que a publicação revelou: `deploy/` não entra na imagem
+
+O runbook deste repositório, e a prática registrada de que "todo deploy do LM pede backfill
+depois", mandam rodar `node deploy/wa-sync-once.js`. **Não roda no container:** o `.dockerignore`
+não o exclui, mas o `Dockerfile` tem exatamente quatro `COPY`: `package.json`, `src`, `db` e
+`scripts`. `/app/deploy` não existe. Medido em 02/11/2026 nas duas pontas — `grep COPY Dockerfile`
+e `ls /app` na imagem publicada.
+
+(Observação achada no caminho, sem ação e fora do escopo de hoje: a linha 8 é
+`npm install --omit=dev`, sem o `package-lock.json` no `COPY` — então a imagem não está presa às
+versões travadas no lock. Não medi consequência nenhuma disso; só registro.)
+
+E rodar no host também falha, por outro motivo: o `DATABASE_URL` e o endereço da Evolution usam
+NOMES DE CONTAINER, que o host não resolve (`EAI_AGAIN`). O caminho que funcionou foi copiar o
+script para dentro de `/app/` e rodar ali — mas isso é contorno, não procedimento.
+
+**Consequência prática:** o passo de backfill do runbook é inexecutável como está escrito, e o
+modo de falha é silencioso — quem seguir o runbook vê um erro de módulo e pode concluir que o
+backfill "não era necessário". Conserto: incluir `deploy/` na imagem (uma linha no `Dockerfile`),
+ou reescrever o passo do runbook com o caminho real. **Não consertei** — é mudança no `Dockerfile`,
+que muda a imagem publicada, e a publicação de hoje já foi autorizada para outra coisa.
+
+### Como exigir isto (o que exigiu publicar)
 
 Medido em 02/11/2026: o LM no ar serve `🎯 Experimental` e `🎓 Matriculado`, e o campo
 `ramo_rotulo` **não existe** no código publicado. Então, ao contrário do cenário (que era só
@@ -450,8 +516,8 @@ Renovações) não têm nenhum desses dois rótulos e já funcionam com o que es
 
 ## O que NÃO está feito
 
-- **O rótulo novo do Kanban NÃO está no ar** — exige publicar o Lead Manager (ver a seção
-  acima). O que está no ar segue dizendo "Experimental" e "Matriculado 🎓".
+- **O passo de backfill do runbook é inexecutável como está escrito** ( não entra na
+  imagem) — ver a seção da publicação. Não consertei: mexe no Dockerfile.
 - **A TELA RENDERIZADA não foi vista POR MIM.** O dashboard pede login e eu não digito senha. Abri o
   painel do navegador em `/f/clinica-exemplo/inbox` e ele redirecionou para `/login` — que é o
   comportamento certo, e é onde eu paro. Tudo até a borda da tela está conferido (a régua de
