@@ -147,16 +147,26 @@ trava do produto recusaria. Um teste varre todo texto do plano procurando `R$`, 
 
 ### O que a demonstração mostra, em 10 minutos
 
-1. Caixa de Entrada, aba **Todas**: 12 conversas, 3 com entrada não lida.
-2. Aba **Leads**: 8 em estágios diferentes (novo, qualificando, qualificado, matriculado, perdido).
-3. Aba **Outras**: as que não são lead — fornecedor, contato administrativo. O sistema **separa**,
-   em vez de tratar todo número como oportunidade.
-4. A assistente: 5 conversas com resposta já enviada e **2 com sugestão esperando aprovação** —
-   é o modo `semi` (a IA escreve, a recepção decide).
-5. Aba **Renovações** e a tela de Renovações: contratos em **D-10**, **D-2** e um vencido há 20
-   dias, com rascunho pronto.
-6. O lembrete de um dos contratos vai para a **filha que paga**, não para o paciente, porque a
-   régua resolve o pagador antes do beneficiário.
+Os números abaixo foram **medidos no banco depois da gravação**, em 02/11/2026 — não são o que o
+plano pretendia, são o que está lá. (Dois deles eu havia escrito errado antes de medir: a aba
+Leads tem 9 conversas e não 8, e a Outras tem 3 e não 4.)
+
+1. Caixa de Entrada, aba **Todas**: **12** conversas, **3** com entrada não lida.
+2. Aba **Leads**: **9** conversas, em 5 estágios — `NEW` 2, `QUALIFYING` 2, `QUALIFIED` 2,
+   `CONVERTED` 2, `PERDIDO` 1.
+3. Aba **Outras**: **3** — o fornecedor (marcado `NOT_LEAD`) e dois contatos que só têm contrato,
+   sem nunca terem sido lead. O sistema **separa**, em vez de tratar todo número como oportunidade.
+4. A assistente: **7** respostas já enviadas e **2 sugestões esperando aprovação** — é o modo
+   `semi` (a IA escreve, a recepção decide).
+5. Aba **Renovações** do inbox: **3** conversas elegíveis. A tela de Renovações enxerga **6**
+   contratos na janela (de 38 dias vencido a 12 dias para vencer), porque três deles são de
+   pessoas que têm contrato e nunca escreveram — é o caso real de quem foi atendido antes de a
+   unidade usar o sistema.
+6. O lembrete de um dos contratos vai para a **filha que paga** (Renata), não para o paciente
+   (Sr. Otávio), porque a régua resolve o pagador antes do beneficiário. Conferido no banco: os
+   **3** toques estão endereçados ao pagador do respectivo contrato.
+7. A ponte conversa × cadastro casa **4** conversas (as que têm contrato) pela coluna `br_key`,
+   que o banco calcula sozinho nas duas pontas.
 
 Telefones no bloco `19 99000-00XX`, sequencial e visivelmente falso. ⚠ Isso **não** garante que o
 número não pertença a alguém — no Brasil não há faixa reservada para ficção. O que garante que
@@ -294,19 +304,35 @@ idempotente — os uuids são derivados das chaves declaradas, e o segundo passe
 
 ---
 
+## O estado em produção (02/11/2026, autorizado pelo Leo)
+
+```
+migração 187 .............. APLICADA (ALTER instantâneo, lock_timeout=5s, 0 locks na tabela)
+tenant de demonstração .... CRIADO   6c857c85-0803-5575-ac85-4862b36974d6
+   is_demo = true · lead_manager_active = false · sem token de Evolution · sem token de Z-API
+cenário ................... GRAVADO  118 linhas, uma transação só
+   person 11 · contact_point 11 · service_account 10 · account_member 20 · conversations 12
+   leads 10 · messages 23 · staff_outbound 9 · pending_approvals 9 · renovacao_touchpoint 3
+ADR Valinhos .............. is_demo = false, lead_manager_active = true (intacta)
+tenants_active() .......... devolve SÓ "ADR Valinhos" — a clínica está fora de todo laço de fundo
+```
+
+⚠ Sobre "intacta": eu **não tomei contagem de referência das tabelas da Valinhos antes** de
+gravar, então não posso dizer "220 antes e 220 depois". O que posso dizer, e é verificável: toda
+linha gravada resolveu `tenant_id` pela subconsulta que exige `is_demo`, dentro de uma transação
+só, com ids derivados do namespace da demonstração — uma linha da Valinhos só teria sido tocada
+se o id dela colidisse com um uuid derivado desse namespace. As contagens da Valinhos hoje
+(690 pessoas, 1.139 contratos, 61.944 mensagens, 81.388 saídas) são as dela.
+
 ## O que NÃO está feito
 
-- **Nada foi gravado em produção.** Nem a migração 187, nem o tenant, nem o cenário. As três
-  escritas esperam o Leo autorizar.
-- **`test/fixtures/esquema-demo.json` não existe neste PR**, porque gerá-lo exige ler produção e
-  a leitura foi barrada no meu ambiente. Consequência direta e dita com estas palavras:
-  **a CAMADA 1 ainda não foi conferida contra o esquema real.** `test/demo-mf8-esquema.test.js`
-  falha até o dump existir — de propósito, porque pular com aviso seria suíte verde esconder
-  afirmação não conferida. Os 29 testes de `test/demo-mf8.test.js` **não** dependem do dump e
-  passam (medido: 100/100 na lista `UNIT_TESTS` do Makefile, em 02/11/2026).
 - **`app.franquia.lead_tenant_id` e os módulos `LEADS`/`QUALIDADE`** são do adr-whatsapp-scheduler.
-  Pedidos por mensagem à sessão `Fase 0: diagnóstico demo MF8` em 02/11; não editei aquele
-  repositório.
+  O número está em mão da outra sessão desde antes da gravação; não editei aquele repositório.
+  **Enquanto esse campo não for gravado, nenhuma tela mostra o cenário** — o dado está lá e as
+  telas não sabem onde procurar.
+- **A âncora de datas é 04/11/2026**, o dia da apresentação. Consequência hoje (02/11): as três
+  mensagens mais novas aparecem com data **futura**, 04/11. Na apresentação ficam certas. Rodar
+  `cenario` de novo com outra âncora leva segundos e é idempotente (os uuids são derivados).
 - **Não abri nenhuma tela.** Não há prova visual de que a Caixa de Entrada da clínica renderiza o
   cenário. Toda afirmação sobre as telas aqui é *verificado em código*, nunca *verificado na tela*.
 - **O rótulo do módulo `QUALIDADE` é "Gestão de Retenção"** e os comentários do demo-seed do
@@ -329,14 +355,23 @@ idempotente — os uuids são derivados das chaves declaradas, e o segundo passe
 | `service_account` não tem coluna de valor | *verificado em código* (060 + 072/105/185) |
 | o CHECK de `marco` hoje aceita 6 valores, não 2 | *verificado em código* (092 → 109) |
 | 131, 132–169, 185 e 186 não estão aplicadas em produção | *verificado em código* (RESERVAS.md) — e RESERVAS.md é documento, não medição: **inferido** sobre o estado atual do banco |
-| a Caixa de Entrada da clínica mostra o cenário | **não conferido** — nenhuma tela foi aberta |
+| a clínica tem 12 conversas, 10 contratos e 3 toques, todos endereçados ao pagador | *verificado em produção, 02/11/2026* |
+| a aba Renovações do inbox lista 3 conversas e a tela enxerga 6 contratos na janela | *verificado em produção, 02/11/2026* |
+| `tenants_active()` devolve só a Valinhos depois da criação da clínica | *verificado em produção, 02/11/2026* |
+| a Caixa de Entrada da clínica **desenha** o cenário | **não conferido** — nenhuma tela foi aberta, e sem o `lead_tenant_id` não há como abrir |
+| as contagens da Valinhos não mudaram | **não conferido** — não tomei contagem de referência antes de gravar |
 | os telefones fictícios não pertencem a ninguém | **não conferido** — não há como conferir; a garantia é o tenant sem credencial |
 
 ---
 
 ## Resumo em uma linha, sem sigla
 
-Está pronto o jeito de a clínica de demonstração ter conversas e contratos de mentira dentro do
-Lead Manager, com três conferências antes de qualquer gravação e nenhum número sorteado. **Nada
-foi gravado ainda**, e a conferência contra o banco de verdade ainda não aconteceu — falta uma
-leitura de produção que eu não tenho permissão para fazer.
+O cenário de mentira da clínica **está gravado** dentro do Lead Manager: 12 conversas de WhatsApp,
+10 contratos e 3 lembretes de renovação, com nenhum número sorteado e nenhum valor em dinheiro. As
+três conferências rodaram contra o banco de verdade e passaram. A Valinhos não foi tocada e a
+clínica está fora de todas as rotinas que rodam sozinhas.
+
+**O que falta para alguém VER isso numa tela:** o campo que liga a unidade a esta conta, que é do
+outro repositório. Enquanto ele não for gravado, o dado está lá e as telas não sabem onde procurar.
+
+**O que eu não conferi:** nenhuma tela foi aberta.
