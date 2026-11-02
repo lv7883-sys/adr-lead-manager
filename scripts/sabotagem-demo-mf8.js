@@ -29,13 +29,13 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const RAIZ = path.join(__dirname, '..');
-const SUITE = path.join(RAIZ, 'test', 'demo-mf8.test.js');
+const SUITES = [path.join(RAIZ, 'test', 'demo-mf8.test.js'), path.join(RAIZ, 'test', 'kanban-colunas.test.js')];
 
 // Guarda: o script restaura os arquivos no fim, mas uma interrupção no meio deixaria um arquivo
 // sabotado no disco. Com a árvore limpa, `git status` mostra na hora; com alterações pendentes,
 // a sabotagem se esconde no meio delas. Então recusa.
 try {
-  const sujo = execFileSync('git', ['status', '--porcelain', '--', 'src/demo', 'src/stages.js'], { cwd: RAIZ })
+  const sujo = execFileSync('git', ['status', '--porcelain', '--', 'src/demo', 'src/stages.js', 'src/stagesUi.js'], { cwd: RAIZ })
     .toString().trim();
   if (sujo) {
     console.error('RECUSADO: há alterações não commitadas em src/demo ou src/stages.js —\n' + sujo
@@ -95,16 +95,36 @@ const SABOTAGENS = [
     'o rótulo da clínica volta a ser de escola'],
   ['src/stages.js', "  'consultoria', 'assessoria',", "  'assessoria',",
     'quem presta serviço PARA a saúde passa a ver rótulo de paciente'],
-  ['src/stages.js', '        key: s.key, status: s.status, emoji: r.emoji, label: r.label,',
-    '        key: s.key, status: r.label, emoji: r.emoji, label: r.label,',
+  ['src/stages.js', '      key: s.key, status: s.status, emoji: r.emoji, label: r.label,',
+    '      key: s.key, status: r.label, emoji: r.emoji, label: r.label,',
     'o status passa a depender do rótulo — mover-kanban quebraria'],
+  // Colunas do kanban por unidade (migr 188). A primeira é a que protege quem não configurou nada.
+  ['src/stagesUi.js', "const NAO_OCULTAVEIS = Object.freeze(['novo']);",
+    'const NAO_OCULTAVEIS = Object.freeze([]);',
+    'a coluna de entrada passa a poder ser escondida — lead novo ficaria invisível'],
+  ['src/stagesUi.js', "    if (cardsPorColuna && Number(cardsPorColuna[key] || 0) > 0) {",
+    '    if (false) {',
+    'esconder coluna COM card deixa de ser recusado — esconderia leads'],
+  // ⚠ A guarda do prefixo é REDUNDANTE: desligá-la sozinha não muda nada, porque o teste do
+  // formato (`/^x_[a-z0-9_]+$/`) logo abaixo recusa a mesma chave. A sabotagem precisa quebrar a
+  // EFETIVA, senão ela prova apenas que existe redundância — que é verdade e não é o ponto.
+  // Descoberto rodando este próprio script: a primeira versão desta linha deixava a suíte verde.
+  ['src/stagesUi.js', "    if (!/^x_[a-z0-9_]+$/.test(key)) {",
+    '    if (false) {',
+    'coluna extra pode colidir com uma chave da régua'],
+  ['src/stagesUi.js', '  const fora = canonicas.filter((c) => !ocultas.has(c.key)).map(comRotulo);',
+    '  const fora = canonicas.map(comRotulo);',
+    'esconder deixa de esconder — a configuração não faz nada'],
+  ['src/stages.js', "  saude: Object.freeze({ filtro_interesse: 'Todas as especialidades', interesse: 'especialidade' }),",
+    "  saude: Object.freeze({ filtro_interesse: 'Todos os instrumentos', interesse: 'instrumento' }),",
+    'o filtro da clínica volta a dizer "instrumentos"'],
   ['src/demo/check-sql.js', '  if (a === true || b === true) return true;',
     '  if (a === true || b === true) return true;   // (marcador)', '(controle) mudança inócua'],
 ];
 
 function rodaSuite() {
   try {
-    execFileSync(process.execPath, ['--test', '--test-reporter=tap', SUITE], { cwd: RAIZ, stdio: 'pipe' });
+    execFileSync(process.execPath, ['--test', '--test-reporter=tap', ...SUITES], { cwd: RAIZ, stdio: 'pipe' });
     return { passou: true };
   } catch (e) {
     return { passou: false, saida: String(e.stdout || '') + String(e.stderr || '') };

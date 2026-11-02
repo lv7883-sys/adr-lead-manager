@@ -1,5 +1,6 @@
 'use strict';
 // stages.js — RÉGUA CANÔNICA de estágios do lead (Passo 1 da consolidação; molde do lifecycle.js
+const stagesUi = require('./stagesUi');   // colunas como a unidade quer ver (migr 188)
 // da Fatia A). FONTE ÚNICA da partição do kanban, das transições, dos desfechos de "perdido" e dos
 // buckets do funil. Fecha as 3 réguas conceituais que estavam espalhadas em 7 pontos e DUPLICADAS
 // à mão em 2 repos (kanbanColuna no LM / colunaDeLead no dashboard / DESTINO/ETAPAS no client JS).
@@ -422,21 +423,50 @@ function rotuloDoEstagio(stage, perfil) {
 //
 // `perfil` é opcional: sem ele, o catálogo é o de hoje. `dashboard/views/stages.js` é ESPELHO DE
 // CONTINGÊNCIA (usado só quando este payload falta) — quem rotula é aqui.
-function stageCatalog(perfil) {
+// Vocabulário da TELA que depende do ramo e não é nome de coluna. Serve para o consumidor parar
+// de ter literais de escola de música espalhados: em 02/11/2026 o Leo marcou num print o filtro
+// "Todos os instrumentos" na tela de uma clínica — medido, era UMA string visível em
+// `views/recep-kanban.js:118` do outro repositório, e o resto eram nomes de variável.
+//
+// O campo filtrado é `lead_qualifications.instrument`: "o que a pessoa procura". Numa escola é o
+// instrumento; numa clínica, a especialidade. A palavra muda; o campo não.
+const ROTULOS_DE_TELA = Object.freeze({
+  padrao: Object.freeze({ filtro_interesse: 'Todos os instrumentos', interesse: 'instrumento' }),
+  saude: Object.freeze({ filtro_interesse: 'Todas as especialidades', interesse: 'especialidade' }),
+});
+
+function rotulosDeTela(perfil) {
+  const ramo = ramoDoRotulo(perfil);
+  return { ...ROTULOS_DE_TELA.padrao, ...(ramo && ROTULOS_DE_TELA[ramo] ? ROTULOS_DE_TELA[ramo] : {}) };
+}
+
+/**
+ * @param {object} [perfil]    perfil da assistente (decide o conjunto de rótulos por ramo)
+ * @param {object} [stageUi]   `tenant_lead_config.stage_ui` já VALIDADO (migr 188). Ausente ou
+ *                             vazio = o quadro canônico, byte a byte — o caso de toda unidade
+ *                             que não configurou nada.
+ */
+function stageCatalog(perfil, stageUi) {
+  const canonicas = KANBAN_STAGES.map((s) => {
+    const r = rotuloDoEstagio(s, perfil);
+    return {
+      key: s.key, status: s.status, emoji: r.emoji, label: r.label,
+      dica: r.dica, auto: !!s.auto, requerMotivo: !!s.requerMotivo,
+    };
+  });
+  const stages = stagesUi.aplicarConfig(canonicas, stageUi);
   return {
-    stages: KANBAN_STAGES.map((s) => {
-      const r = rotuloDoEstagio(s, perfil);
-      return {
-        key: s.key, status: s.status, emoji: r.emoji, label: r.label,
-        dica: r.dica, auto: !!s.auto, requerMotivo: !!s.requerMotivo,
-      };
-    }),
+    stages,
     transicoes: KANBAN_TRANSICOES,
     key_to_status: KEY_TO_STATUS,
     motivos_perda: MOTIVOS_PERDA,
     // Diz ao consumidor QUAL conjunto foi aplicado — sem isso, "por que está escrito Avaliação?"
     // só se responde lendo código. null = o conjunto de hoje.
     ramo_rotulo: ramoDoRotulo(perfil),
+    rotulos: rotulosDeTela(perfil),
+    // As chaves das colunas que a unidade CRIOU. O consumidor precisa distinguir: card numa
+    // coluna extra não mudou de etapa no funil — mudou de lugar no quadro.
+    extras: stages.filter((s) => s.extra).map((s) => s.key),
   };
 }
 
@@ -461,6 +491,6 @@ module.exports = {
   PERDIDO_DESFECHOS, CLIENTE_DESFECHO, MOTIVOS_PERDA, AULA_REALIZADA, AULA_COM_MATRICULA, KANBAN_TRANSICOES, KEY_TO_STATUS, STATUS_TO_KEY,
   stageKey, stageOfLead, isStage, stageSql,
   detectSql, funilBucketSql, temFatoExtranetSql, renovacaoSql, stageCatalog, loadStages,
-  ROTULOS_POR_RAMO, ramoDoRotulo, rotuloDoEstagio,
+  ROTULOS_POR_RAMO, ramoDoRotulo, rotuloDoEstagio, rotulosDeTela, ROTULOS_DE_TELA,
   terminalParaSugestaoSql, sugestaoAtivaSql, isSugestaoAtiva,
 };
