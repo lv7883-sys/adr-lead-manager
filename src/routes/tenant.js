@@ -368,7 +368,29 @@ router.post('/:tenantId/leads/:id/sugestao-etapa/confirmar', authenticate, requi
         'SELECT status, desfecho, desfecho_em, suggested_stage, stage_reasoning, stage_suggested_at FROM leads WHERE id = $1', [id])).rows[0];
       if (!lead) return { notFound: true };
       const destCol = lead.suggested_stage;
-      if (!destCol || !_COL_TO_STATUS[destCol]) return { semSugestao: true };
+      if (!destCol) return { semSugestao: true };
+
+      // ⭐ A IA pode sugerir uma coluna CRIADA pela unidade (migr 188 + stagesUi.definicoesParaIA).
+      // Confirmar ali grava `etapa_custom` e NÃO mexe em `status`: a sugestão é sobre onde o card
+      // fica no quadro, e o lead continua na etapa canônica dele para o funil e o BI.
+      //
+      // Sem este ramo, a sugestão de coluna extra morreria em "semSugestao": o chip apareceria na
+      // tela, a pessoa clicaria em confirmar, e NADA aconteceria — sem erro. O pior tipo.
+      if (destCol.startsWith(stagesUi.PREFIXO_EXTRA)) {
+        const cfg = (await c.query('SELECT stage_ui FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
+        const vv = stagesUi.validarConfig(cfg && cfg.stage_ui, stages.KANBAN_KEYS);
+        if (!vv.ok || !vv.config.extras.some((e) => e.key === destCol)) return { semSugestao: true };
+        await c.query('UPDATE leads SET etapa_custom = $3, updated_at = now() WHERE id = $1 AND tenant_id = $2',
+          [id, req.tenantId, destCol]);
+        await _limparSugestaoEtapa(c, id);
+        await c.query(
+          `INSERT INTO lead_eventos (tenant_id, lead_id, tipo, autor, conteudo) VALUES ($1, $2, 'etapa', $3, $4)`,
+          [req.tenantId, id, req.tenantRole || null,
+            `movido para ${destCol} — sugestão da IA confirmada${req.tenantRole ? ` por ${req.tenantRole}` : ''}`]);
+        return { row: { id, etapa_custom: destCol }, destCol, extra: true };
+      }
+
+      if (!_COL_TO_STATUS[destCol]) return { semSugestao: true };
       const conteudo = `movido para ${destCol} — sugestão da IA confirmada${req.tenantRole ? ` por ${req.tenantRole}` : ''}`;
       const r = await _aplicarMoverEtapa(c, {
         tenantId: req.tenantId, id, destCol, autor: req.tenantRole, conteudoEtapa: conteudo, limparSugestao: true,

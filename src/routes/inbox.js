@@ -18,7 +18,8 @@
 // um Postgres real (test/inbox.itest.js) — os handlers HTTP só orquestram parse + withTenant.
 
 const { SQL_PERFIL } = require('../perfilAssistente');   // perfil da assistente junto da config (migr. 119)
-const stages = require('../stages');   // etapa do funil (mesma régua do kanban) na lista e na conversa
+const stages = require('../stages');
+const stagesUi = require('../stagesUi');   // colunas da unidade (migr 188): a aba mostra a MESMA etapa do kanban
 const { sanitizarIdentidade } = require('../temaProibido');   // sugestão nunca chega com nome de recepcionista
 const { autorHumano } = require('../autoria');   // by_name do dashboard → review_by (autoria real)
 const express = require('express');
@@ -213,7 +214,8 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     leadk AS (
       SELECT DISTINCT ON (${IDENT_LEAD})
              ${IDENT_LEAD} AS ident,
-             l.id, l.name, l.phone, l.meta_psid, l.status, l.desfecho, l.origem, l.aborda_renovacao
+             l.id, l.name, l.phone, l.meta_psid, l.status, l.desfecho, l.origem, l.aborda_renovacao,
+             l.etapa_custom
         FROM leads l
        WHERE l.tenant_id = $1 AND ${IDENT_LEAD} <> ''
        ORDER BY ${IDENT_LEAD}, l.created_at ASC
@@ -350,7 +352,8 @@ ${cortaCedo}
     matched AS (
       SELECT c.*, lk.id AS lead_id, lk.name AS lead_name, lk.phone AS lead_phone,
              lk.meta_psid AS lead_psid, lk.status AS lead_status, lk.desfecho AS lead_desfecho,
-             lk.origem AS lead_origem, lk.aborda_renovacao AS lead_aborda_renovacao
+             lk.origem AS lead_origem, lk.aborda_renovacao AS lead_aborda_renovacao,
+             lk.etapa_custom AS lead_etapa_custom
         FROM conv c
         LEFT JOIN leadk lk ON c.ident <> '' AND lk.ident = c.ident
     ),
@@ -503,7 +506,7 @@ ${renovCtesDepois}
 }
 
 // Projeta uma linha do SELECT no shape ConversationListItem do contrato.
-function mapConversationRow(r) {
+function mapConversationRow(r, cfgColunas) {
   return {
     conversation_id: r.conversation_id,
     channel: r.channel,
@@ -513,8 +516,14 @@ function mapConversationRow(r) {
     is_group: r.conversation_kind === 'GROUP',
     is_lead: r.is_lead === true,
     is_lead_ativo: r.is_lead_ativo === null || r.is_lead_ativo === undefined ? null : r.is_lead_ativo === true,
-    // etapa do funil (key do kanban: novo/qualificando/qualificado/experimental/convertido/perdido) — só p/ lead
-    etapa: r.is_lead === true ? stages.stageKey(r.lead_status, r.lead_desfecho) : null,
+    // Etapa do funil COMO A UNIDADE VÊ (migr 188): se ela criou colunas e este lead está numa
+    // delas, a aba mostra a MESMA coluna que o kanban. Régua única em `stagesUi.etapaDoLead` —
+    // este projeto já pagou caro por "etapa" reimplementada em cada tela.
+    etapa: r.is_lead === true
+      ? stagesUi.etapaDoLead(
+        { status: r.lead_status, desfecho: r.lead_desfecho, etapa_custom: r.lead_etapa_custom },
+        cfgColunas, stages.stageKey)
+      : null,
     lead_id: r.lead_id || null,
     lead_status: r.lead_status || null,
     desfecho: r.lead_desfecho || null,
@@ -556,13 +565,26 @@ function mapConversationRow(r) {
 // Executa a listagem com um client já no contexto (RLS no handler; postgres no itest).
 async function listConversations(client, tenantId, opts = {}) {
   const { sql, params, limit } = buildConversationsSql(tenantId, opts);
+  // Colunas da unidade (migr 188), para a aba mostrar a MESMA etapa que o kanban. UMA consulta,
+  // numa tabela de uma linha por tenant, dentro do client que já está aberto — a listagem é
+  // caminho quente e este projeto já teve incidente de performance aqui.
+  //
+  // Falha FECHADA: erro ou config inválida → `null` → etapa canônica, o comportamento de hoje.
+  // Perder o rótulo novo numa aba é incômodo; a listagem parar de abrir é outra coisa.
+  let cfgColunas = null;
+  try {
+    const row = (await client.query('SELECT stage_ui FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
+    const v = stagesUi.validarConfig(row && row.stage_ui, stages.KANBAN_KEYS);
+    cfgColunas = v.ok ? v.config : null;
+  } catch { cfgColunas = null; }
+
   const rows = (await client.query(sql, params)).rows;
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
-  const items = page.map(mapConversationRow);
+  const items = page.map((r) => mapConversationRow(r, cfgColunas));
   const last = page[page.length - 1];
   const next_cursor = hasMore && last ? encodeCursor(last.last_activity_at, last.conversation_id) : null;
-  return { items, next_cursor };
+  return { items, next_cursor, colunas: cfgColunas };
 }
 
 // Move o cursor de leitura (compartilhado por tenant — migr. 080) e recalcula não-lidas.
@@ -659,6 +681,15 @@ async function getConversationThread(client, tenantId, conversationId, usuario, 
     : { itens: await fetchTimeline(client, argsTl), temMais: false, cursor: null, fim: null };
   const timeline = pag.itens;
 
+  // Colunas da unidade (migr 188), para o cabeçalho da conversa dizer a mesma etapa que o kanban.
+  // Falha FECHADA: erro ou config inválida → etapa canônica, o comportamento de hoje.
+  let cfgColunasThread = null;
+  try {
+    const rowCfg = (await client.query('SELECT stage_ui FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
+    const vCfg = stagesUi.validarConfig(rowCfg && rowCfg.stage_ui, stages.KANBAN_KEYS);
+    cfgColunasThread = vCfg.ok ? vCfg.config : null;
+  } catch { cfgColunasThread = null; }
+
   // ADR-042 — marca as bolhas FAVORITADAS (estrela) DO USUÁRIO (favorited_by). Cada recepcionista
   // vê só as suas. Sem usuario => nenhuma (favorited_by nunca é null nas linhas gravadas).
   const favSet = new Set((await client.query(
@@ -699,8 +730,9 @@ async function getConversationThread(client, tenantId, conversationId, usuario, 
       lead_id: lead ? lead.id : null,
       lead_status: lead ? lead.status : null,
       desfecho: lead ? lead.desfecho : null,
-      // Mover o lead de etapa pelo cabeçalho da conversa (mesma régua e mesma rota do kanban).
-      etapa: is_lead ? stages.stageOfLead(lead) : null,
+      // Mover o lead de etapa pelo cabeçalho da conversa (mesma régua e mesma rota do kanban) —
+      // e, desde a migr 188, a MESMA coluna que o kanban mostra, inclusive as que a unidade criou.
+      etapa: is_lead ? stagesUi.etapaDoLead(lead, cfgColunasThread, stages.stageKey) : null,
       sugestao_etapa: (is_lead && stages.isSugestaoAtiva(lead)) ? { etapa: lead.suggested_stage, motivo: lead.stage_reasoning || null } : null,
       last_read_at: cv.last_read_at,
       arquivada: !!cv.arquivada_em, fixada: !!cv.fixada_em,   // migr. 118

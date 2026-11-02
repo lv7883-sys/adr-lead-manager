@@ -152,6 +152,84 @@ test('dica vazia APAGA a dica herdada — por isso o teste é de presença, não
 // E. O vocabulário da tela que não é nome de coluna (o print do Leo, 02/11)
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// F. O ELO COM A CLASSIFICAÇÃO (pedido do Leo em 02/11: "também na classificação de leads")
+//
+// A classificação JÁ era configurável por unidade: `tenant_lead_config.stage_definitions` é um
+// mapa {chave: condição} que vira bloco de prompt e contra o qual a saída da IA é validada. Não
+// havia régua nova a inventar — havia uma régua a LIGAR na outra.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const DEFS = { novo: 'acabou de chegar', qualificado: 'demonstrou interesse claro', experimental: 'marcou a avaliação' };
+
+test('sem configuração, a lista da IA é EXATAMENTE a de hoje', () => {
+  assert.deepEqual(stagesUi.definicoesParaIA(DEFS, null), DEFS);
+  assert.deepEqual(stagesUi.definicoesParaIA(DEFS, {}), DEFS);
+  // sem definições e sem extras → null, que é como o recurso FICA DESLIGADO hoje
+  assert.equal(stagesUi.definicoesParaIA(null, null), null);
+  assert.equal(stagesUi.definicoesParaIA({}, null), null);
+});
+
+test('⭐ coluna ESCONDIDA sai da lista que a IA pode sugerir', () => {
+  // Senão o chip diria "IA sugere → Avaliação" apontando para uma coluna que não está na tela,
+  // e confirmar moveria o card para fora da vista.
+  const v = stagesUi.validarConfig({ ocultas: ['experimental'] }, K);
+  const fora = stagesUi.definicoesParaIA(DEFS, v.config);
+  assert.ok(!('experimental' in fora), 'a IA ainda pode sugerir a coluna escondida');
+  assert.deepEqual(Object.keys(fora).sort(), ['novo', 'qualificado']);
+});
+
+test('⭐ coluna CRIADA entra na lista da IA — mas só com a CONDIÇÃO escrita', () => {
+  const comDef = stagesUi.validarConfig({ extras: [{ key: 'x_triagem', label: 'Triagem', definicao: 'pediu avaliação mas ainda não mandou o pedido médico' }] }, K);
+  assert.equal(stagesUi.definicoesParaIA(DEFS, comDef.config).x_triagem, 'pediu avaliação mas ainda não mandou o pedido médico');
+
+  // Sem condição, NÃO entra — sugerir etapa sem condição escrita é adivinhar, e a saída seria
+  // um chip que ninguém sabe justificar.
+  const semDef = stagesUi.validarConfig({ extras: [{ key: 'x_outra', label: 'Outra', dica: 'isto é dica de tela, não condição' }] }, K);
+  assert.ok(!('x_outra' in stagesUi.definicoesParaIA(DEFS, semDef.config)));
+});
+
+test('⭐ a IA raciocina sobre a CHAVE, nunca sobre o RÓTULO que a unidade deu', () => {
+  // Se o rótulo entrasse na decisão, duas unidades com a mesma régua e nomes diferentes
+  // classificariam diferente — e renomear uma coluna mudaria o que a IA decide.
+  const v = stagesUi.validarConfig({ rotulos: { qualificado: { label: 'Pronto para marcar' } } }, K);
+  assert.deepEqual(stagesUi.definicoesParaIA(DEFS, v.config), DEFS);
+  assert.equal(JSON.stringify(stagesUi.definicoesParaIA(DEFS, v.config)).includes('Pronto para marcar'), false);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// G. A MESMA etapa em todas as abas — régua única, não cópia por tela
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('⭐ etapaDoLead é a régua ÚNICA de "em que coluna o card aparece"', () => {
+  const v = stagesUi.validarConfig({ extras: [{ key: 'x_triagem', label: 'Triagem' }] }, K);
+  const sk = stages.stageKey;
+
+  // sem coluna extra: a canônica, igualzinho a hoje
+  assert.equal(stagesUi.etapaDoLead({ status: 'QUALIFIED' }, v.config, sk), 'qualificado');
+  assert.equal(stagesUi.etapaDoLead({ status: 'NEW' }, null, sk), 'novo');
+  assert.equal(stagesUi.etapaDoLead({ status: 'QUALIFYING', desfecho: 'nao_matriculado_preco' }, null, sk), 'perdido');
+
+  // com coluna extra: ela manda
+  assert.equal(stagesUi.etapaDoLead({ status: 'QUALIFIED', etapa_custom: 'x_triagem' }, v.config, sk), 'x_triagem');
+
+  // ⭐ FALHA FECHADA: coluna extra que a unidade APAGOU não deixa o card no vazio — ele volta
+  // para a coluna canônica, onde sempre esteve.
+  assert.equal(stagesUi.etapaDoLead({ status: 'QUALIFIED', etapa_custom: 'x_apagada' }, v.config, sk), 'qualificado');
+  assert.equal(stagesUi.etapaDoLead({ status: 'QUALIFIED', etapa_custom: 'x_triagem' }, null, sk), 'qualificado');
+
+  // e coluna extra ESCONDIDA também devolve o card à canônica
+  const vOculta = stagesUi.validarConfig({ extras: [{ key: 'x_triagem', label: 'T' }], ocultas: ['x_triagem'] }, K);
+  assert.equal(stagesUi.etapaDoLead({ status: 'QUALIFIED', etapa_custom: 'x_triagem' }, vOculta.config, sk), 'qualificado');
+});
+
+test('etapaDoLead EXIGE a partição canônica — ela não se reimplementa aqui', () => {
+  // A régua da partição mora em stages.js e já esteve copiada em cinco lugares. Receber a função
+  // em vez de reescrever o CASE é o que impede a sexta cópia.
+  assert.throws(() => stagesUi.etapaDoLead({ status: 'NEW' }, null), /stageKey é obrigatório/);
+  assert.throws(() => stagesUi.etapaDoLead({ status: 'NEW' }, null, 'nao é função'), /stageKey é obrigatório/);
+});
+
 test('o catálogo serve o rótulo do FILTRO — o "Todos os instrumentos" do print', () => {
   // Medido: era UMA string visível, em views/recep-kanban.js:118 do outro repositório. Servir
   // daqui evita que o conserto seja palavra por palavra na tela, e que ele se perca no próximo
