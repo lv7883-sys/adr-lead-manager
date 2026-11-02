@@ -1,0 +1,254 @@
+# Demonstração do Lead Manager — MF8, 04/11/2026
+
+O que este documento é: o roteiro de como a Caixa de Entrada e as Renovações da unidade de
+demonstração ficam no ar, **o que não está feito**, e as duas decisões que não são minhas.
+
+---
+
+## Em linguagem simples, antes de qualquer sigla
+
+O sistema do Leo é dividido em pedaços que moram em lugares diferentes. Um deles — o que mostra
+as conversas de WhatsApp e os contratos vencendo — é um programa separado, o **Lead Manager**.
+As telas são de um programa; os dados são de outro.
+
+Para a clínica de demonstração aparecer nessas telas, três coisas têm de existir:
+
+1. **Uma "conta" da clínica dentro do Lead Manager.** Ela não existia. Eu criei o jeito de
+   criá-la (um comando), mas criar de verdade grava no banco de produção, e isso é decisão do Leo.
+2. **Uma anotação, do lado das telas, dizendo qual é a conta da clínica no Lead Manager.** Esse
+   campo é do outro programa, de outra sessão. Eu pedi; não mexi.
+3. **Dados fictícios** — conversas, pacientes, contratos. Escritos à mão, um por um, neste
+   repositório. Nenhum número foi sorteado e nenhum valor em dinheiro existe.
+
+O que **não dá para desfazer**: nada do que eu escrevi até agora. Nenhuma linha foi gravada em
+produção. A partir do momento em que o comando rodar, o que ele cria dá para apagar (há comando
+para isso, e ele só apaga unidade marcada como de demonstração). O que **não** se desfaz com
+comando é a coluna nova no banco (`is_demo`) — ela é aditiva, não muda dado nenhum, e sair dela
+é uma linha de SQL. Nada disso toca a unidade de Valinhos.
+
+---
+
+## O bloqueio, medido
+
+A unidade de demonstração **não tem** `lead_tenant_id`. Medido em produção em **02/11/2026** pela
+sessão `Fase 0: diagnóstico demo MF8`:
+
+```
+id | slug            | bi_tenant_id                         | lead_tenant_id | id_unidade_extranet
+ 1 | valinhos        | cmo7t25gz0000rkd8y1reic0c            | ed731a58-…     |                  13
+ 7 | clinica-exemplo | fbecb933-522b-44ba-9a55-5caeff93180b | (VAZIO)        |                9001
+```
+
+**São três chaves de tenant neste sistema e elas não são intercambiáveis:**
+
+| chave | de quem é | onde mora |
+|---|---|---|
+| `bi_tenant_id` | BI, Compasso, Regente Fiscal | `app.franquia` |
+| `lead_tenant_id` | **Lead Manager** | `app.franquia` |
+| `slug` | a URL (`/f/clinica-exemplo/…`) | `app.franquia` |
+
+O modo de falha de chave errada neste projeto é **zero linhas, não erro**. Antes de concluir que
+algo "não existe" no LM, confira com qual chave a consulta foi feita.
+
+E a razão de o campo estar vazio **não foi esquecimento**: é decisão escrita, em
+`dashboard/lib/demo-seed.js:84` do adr-whatsapp-scheduler — `lead_tenant_id: null, // sem Lead
+Manager: as telas de Leads avisam e não chamam`, com `LEADS: false` e `QUALIDADE: false` em
+`MODULOS_DA_DEMO`. A demonstração foi desenhada SEM o Lead Manager. O pedido do Leo de 02/11
+reverte essa decisão, e a reversão é daquele repositório. *(verificado em código, 02/11/2026)*
+
+---
+
+## O que o Lead Manager serve, e o que o dashboard serve
+
+| tela | HTML | dados |
+|---|---|---|
+| Caixa de Entrada (`/f/<slug>/inbox`) | dashboard, `routes/leads.js:909` | LM, `/tenant/:id/inbox/*` |
+| Renovações (`/f/<slug>/qualidade/renovacoes`) | dashboard, `routes/renovacoes.js` | LM, por `withTenant` |
+
+O dashboard autentica no LM com `SERVICE_TOKEN` e resolve o tenant por
+`tenantIdDaFranquia(f)` → `f.lead_tenant_id`. Sem o campo: a tela de Renovações devolve
+`ERRO_SEM_TENANT` em texto puro e o inbox mostra o banner "unidade sem tenant do Lead Manager".
+*(verificado em código nos dois repositórios, 02/11/2026)*
+
+---
+
+## Como a contenção funciona aqui (e por que `lead_manager_active=false` é o equivalente de `ativo=false`)
+
+Criar um tenant no LM o colocaria, por si só, em **todas** as rotinas de fundo. O que evita isso:
+
+`lead_manager.tenants_active()` é literalmente `SELECT id FROM tenants WHERE lead_manager_active`
+(migr 031), e **toda** rotina de fundo lê dela: `renovacao-sweep`, `renovacao-auto-envio`,
+`boas-vindas-sweep`, `detectar-silenciosos`, `reprocessar-pendentes`, `waSync.syncReconnections`,
+`plantao-noturno`, `dataRetention`. E `routes/webhook.js:179` recusa webhook de tenant inativo.
+
+As rotas que as telas usam — `/tenant/:id/inbox/*` e as leituras da tela de Renovações — **não**
+consultam essa coluna. Então: **as telas abrem e nada roda sozinho.**
+*(verificado em código, 02/11/2026)*
+
+Por cima disso, três gates a mais, nesta ordem de confiança:
+
+1. `is_demo = true` (migr 187) — o **portão do seed**, e é SQL: cada INSERT resolve o tenant por
+   `(SELECT id FROM tenants WHERE id = $1 AND is_demo)`. Em tenant real a subconsulta devolve
+   NULL, a coluna é NOT NULL, e a transação cai. Errar grava **nada**.
+2. `renovacao_auto_envio = false` e `boas_vindas_modo = 'desligado'` — os dois caminhos que
+   mandam mensagem sem alguém clicar.
+3. Nenhuma credencial (`evolution_token_enc` e `zapi_token` nulos). ⚠ Este é **gate de dado**:
+   proteção que some no dia em que alguém preencher o campo "para a demo ficar mais completa", e
+   sem erro nenhum. É o terceiro item, nunca o primeiro.
+
+---
+
+## As três camadas de conferência, e o que cada uma pega
+
+| camada | onde | pega | NÃO pega |
+|---|---|---|---|
+| 1 — plano × restrições CHECK reais, sem banco | `src/demo/conformidade.js`, `test/demo-mf8-esquema.test.js` | valor fora do CHECK, coluna inexistente, coluna gerada escrita, NOT NULL faltando | esquema congelado desatualizado, tipo de verdade, FK |
+| 2 — `PREPARE` de cada INSERT | `deploy/seed-demo-mf8.js` | nome de coluna, aridade, tipo, **contra a tabela real** | o que só o dado existente revela |
+| 3 — uma transação só | idem | FK, índice único, gatilho | — |
+
+**A lista de tabelas das três sai do próprio plano** (`tabelasDoPlano`). Não existe segunda lista
+escrita à mão, e tabela que esteja no plano e fora do esquema congelado é **problema**, nunca
+omissão silenciosa. Foi exatamente isso que matou a gravação do cenário do dashboard em
+31/10/2026: a sexta de oito tabelas ficou sem conferência, com 22 testes verdes.
+
+O mesmo furo apareceu **aqui**, um nível acima, e está consertado: a primeira versão deste script
+gravava o cenário por plano e o provisionamento por quatro INSERTs escritos à mão — quatro tabelas
+fora de qualquer conferência. Hoje o provisionamento também é plano
+(`tenant-demo.planoProvisionamento`), e um teste conta as tabelas dos **dois**.
+
+### Por que o esquema congelado vem de produção, e não das migrações
+
+A 092 define `CHECK (marco IN ('D-10','D-2'))`; a 109 a substitui por seis valores. Quem conferir
+pelo arquivo que criou a tabela acha que `'D-45'` é inválido.
+
+E o inverso também vale: **replicar as migrações num banco vazio não dá o esquema de produção**,
+porque a `RESERVAS.md` lista 131, 132–139, 140–169, 185 e 186 como não aplicadas. Só produção
+produz o esquema de produção — por isso o dump diz de onde veio e quando.
+
+---
+
+## O cenário
+
+12 conversas, 10 contratos, 3 toques de renovação, 118 linhas em 10 tabelas (+ 4 do
+provisionamento). Declarado à mão em `src/demo/cenario-mf8.js`.
+
+**Nada é sorteado.** A regra do projeto diz que o sorteio nunca toca em total de dinheiro
+— valores fechados vêm de tabela declarada e o aleatório só distribui dentro dela, com semente
+fixa. Aqui a regra está na versão forte: não há sorteio nenhum, e a única conta é deslocamento de
+dias sobre uma data recebida. Semente fixa ainda exige confiar na semente, no gerador e na ordem
+em que ele é consumido; tabela declarada é conferível por leitura.
+
+**E não há dinheiro**, por duas razões que se somam: `lead_manager.service_account` não tem coluna
+de valor (migr 060 cria a tabela; 072, 105 e 185 são os únicos ALTERs e nenhum adiciona valor), e
+o texto dos rascunhos não pode afirmar valor — `src/temaProibido.js` barra "valores" na entrada e
+na saída. Um preço no cenário seria, ao mesmo tempo, dado que o schema não guarda e frase que a
+trava do produto recusaria. Um teste varre todo texto do plano procurando `R$`, "reais" e
+`\d+[.,]\d{2}`.
+
+### O que a demonstração mostra, em 10 minutos
+
+1. Caixa de Entrada, aba **Todas**: 12 conversas, 3 com entrada não lida.
+2. Aba **Leads**: 8 em estágios diferentes (novo, qualificando, qualificado, matriculado, perdido).
+3. Aba **Outras**: as que não são lead — fornecedor, contato administrativo. O sistema **separa**,
+   em vez de tratar todo número como oportunidade.
+4. A assistente: 5 conversas com resposta já enviada e **2 com sugestão esperando aprovação** —
+   é o modo `semi` (a IA escreve, a recepção decide).
+5. Aba **Renovações** e a tela de Renovações: contratos em **D-10**, **D-2** e um vencido há 20
+   dias, com rascunho pronto.
+6. O lembrete de um dos contratos vai para a **filha que paga**, não para o paciente, porque a
+   régua resolve o pagador antes do beneficiário.
+
+Telefones no bloco `19 99000-00XX`, sequencial e visivelmente falso. ⚠ Isso **não** garante que o
+número não pertença a alguém — no Brasil não há faixa reservada para ficção. O que garante que
+nada sai é o tenant (sem credencial, fora dos laços). Nenhum texto menciona diagnóstico, exame,
+medicamento ou prognóstico: dado de saúde fictício ainda ensinaria o público que o produto trata
+dado de saúde — e não trata.
+
+---
+
+## Runbook
+
+```bash
+# 0. aplicar a migração do portão (aditiva: 1 ADD COLUMN IF NOT EXISTS)
+docker exec -i <pg> psql -U postgres -d adr_scheduler -v ON_ERROR_STOP=1 \
+  -f db/migrations/187_tenant_demo.sql
+
+# 1. congelar o esquema real (READ-ONLY; grava test/fixtures/esquema-demo.json)
+node deploy/dump-esquema-demo.js
+
+# 2. a CAMADA 1 como teste, agora que o dump existe
+node --test test/demo-mf8-esquema.test.js
+
+# 3. provisionar o tenant (passa pelas 3 camadas; imprime o lead_tenant_id)
+node deploy/seed-demo-mf8.js provisionar --slug=clinica-exemplo --ensaio   # confere sem gravar
+node deploy/seed-demo-mf8.js provisionar --slug=clinica-exemplo
+
+# 4. gravar o cenário, com a âncora de datas no dia da apresentação
+node deploy/seed-demo-mf8.js cenario --tenant=<uuid> --hoje=2026-11-04 --ensaio
+node deploy/seed-demo-mf8.js cenario --tenant=<uuid> --hoje=2026-11-04
+
+# 5. (no OUTRO repositório) gravar o uuid em app.franquia.lead_tenant_id da unidade id=7
+#    e ligar LEADS e QUALIDADE em MODULOS_DA_DEMO
+
+# desfazer o cenário (só apaga tenant com is_demo=true)
+node deploy/seed-demo-mf8.js apagar --tenant=<uuid>
+```
+
+`--ensaio` roda as três camadas e **desfaz a transação de propósito**: prova que a escrita
+funciona sem deixar nada.
+
+### A âncora de datas
+
+Os contratos em D-10 e D-2 são relativos a `--hoje`. Rodar em 02/11 com a âncora em 02/11 põe os
+vencimentos em 12/11 e 04/11 — e no dia 04 o contrato "D-2" estará **vencendo hoje**, não em 2
+dias. Para a apresentação: rodar com `--hoje=2026-11-04`, ou rodar de novo no próprio dia (é
+idempotente — os uuids são derivados das chaves declaradas, e o segundo passe atualiza).
+
+---
+
+## O que NÃO está feito
+
+- **Nada foi gravado em produção.** Nem a migração 187, nem o tenant, nem o cenário. As três
+  escritas esperam o Leo autorizar.
+- **`test/fixtures/esquema-demo.json` não existe neste PR**, porque gerá-lo exige ler produção e
+  a leitura foi barrada no meu ambiente. Consequência direta e dita com estas palavras:
+  **a CAMADA 1 ainda não foi conferida contra o esquema real.** `test/demo-mf8-esquema.test.js`
+  falha até o dump existir — de propósito, porque pular com aviso seria suíte verde esconder
+  afirmação não conferida. Os 29 testes de `test/demo-mf8.test.js` **não** dependem do dump e
+  passam (medido: 100/100 na lista `UNIT_TESTS` do Makefile, em 02/11/2026).
+- **`app.franquia.lead_tenant_id` e os módulos `LEADS`/`QUALIDADE`** são do adr-whatsapp-scheduler.
+  Pedidos por mensagem à sessão `Fase 0: diagnóstico demo MF8` em 02/11; não editei aquele
+  repositório.
+- **Não abri nenhuma tela.** Não há prova visual de que a Caixa de Entrada da clínica renderiza o
+  cenário. Toda afirmação sobre as telas aqui é *verificado em código*, nunca *verificado na tela*.
+- **O rótulo do módulo `QUALIDADE` é "Gestão de Retenção"** e os comentários do demo-seed do
+  dashboard o descrevem como "de escola". Não conferi como ele aparece na navegação da clínica.
+- **Fora do escopo por escolha:** módulo de boas-vindas (desligado), Kanban de leads (os dados
+  existem; não conferi a tela), mídia nas conversas além de um áudio com transcrição, grupos de
+  WhatsApp, e a aba de Reconquista da tela de Renovações.
+- **Não usei o estágio `EXPERIMENTAL_AGENDADA`** no cenário: ele significa "aula experimental
+  agendada", vocabulário de escola de música, e apareceria na tela de uma clínica.
+
+---
+
+## Afirmações e suas fontes
+
+| afirmação | marca |
+|---|---|
+| `lead_tenant_id` da clínica está vazio | *verificado em produção, 02/11/2026* (sessão Fase 0) |
+| `tenants_active()` é `WHERE lead_manager_active`, e 8 rotinas leem dela | *verificado em código* |
+| as rotas do inbox e de renovações não consultam `lead_manager_active` | *verificado em código* |
+| `service_account` não tem coluna de valor | *verificado em código* (060 + 072/105/185) |
+| o CHECK de `marco` hoje aceita 6 valores, não 2 | *verificado em código* (092 → 109) |
+| 131, 132–169, 185 e 186 não estão aplicadas em produção | *verificado em código* (RESERVAS.md) — e RESERVAS.md é documento, não medição: **inferido** sobre o estado atual do banco |
+| a Caixa de Entrada da clínica mostra o cenário | **não conferido** — nenhuma tela foi aberta |
+| os telefones fictícios não pertencem a ninguém | **não conferido** — não há como conferir; a garantia é o tenant sem credencial |
+
+---
+
+## Resumo em uma linha, sem sigla
+
+Está pronto o jeito de a clínica de demonstração ter conversas e contratos de mentira dentro do
+Lead Manager, com três conferências antes de qualquer gravação e nenhum número sorteado. **Nada
+foi gravado ainda**, e a conferência contra o banco de verdade ainda não aconteceu — falta uma
+leitura de produção que eu não tenho permissão para fazer.
