@@ -96,6 +96,15 @@ const CASOS = [
   ['CHECK ((char_length(x) <= 10))', { x: 'abc' }, true],
   ['CHECK (NOT (a AND b))', { a: true, b: false }, true],
   ['CHECK ((is_group OR (x IS NULL)))', { is_group: false, x: null }, true],
+  // Restrição REAL de automacao_config, achada ao rodar a camada 1 contra produção em 02/11/2026.
+  // O avaliador recusava a expressão (função desconhecida); agora a entende.
+  ["CHECK ((jsonb_typeof(v) = 'object'::text))", { v: '{"a":1}' }, true],
+  ["CHECK ((jsonb_typeof(v) = 'object'::text))", { v: '[1,2]' }, false],
+  ["CHECK ((jsonb_typeof(v) = 'object'::text))", { v: { a: 1 } }, true],
+  // Coluna que o plano NÃO escreve: o banco põe o default, e o CHECK fica em desconhecido.
+  ["CHECK ((jsonb_typeof(v) = 'object'::text))", {}, null],
+  // Texto que não é json: devolve desconhecido em vez de chutar um tipo — quem recusa é o banco.
+  ["CHECK ((jsonb_typeof(v) = 'object'::text))", { v: 'nao e json' }, null],
 ];
 
 test('o avaliador acerta as formas de CHECK que este schema realmente usa', () => {
@@ -120,7 +129,10 @@ test('LÓGICA DE TRÊS VALORES: valor nulo deixa o CHECK em desconhecido, e desc
 
 test('RECUSA em vez de chutar: expressão fora do subconjunto não passa calada', () => {
   assert.throws(() => avaliaCheck("CHECK ((x ~ '^[0-9]+$'))", { x: '1' }), /não suportado/);
-  assert.throws(() => avaliaCheck("CHECK ((jsonb_typeof(v) = 'object'))", { v: '{}' }),
+  // Função que o avaliador NÃO conhece. (Até 02/11/2026 o exemplo aqui era `jsonb_typeof`, até a
+  // camada 1 topar com ela em produção: foi recusada, eu olhei, e ela entrou na lista. É o laço
+  // que o desenho pretende — recusar, ser visto, e então ser decidido por alguém.)
+  assert.throws(() => avaliaCheck("CHECK ((to_tsvector(v) = 'x'))", { v: 'a' }),
     /não está na lista de funções conhecidas/);
   assert.throws(() => avaliaCheck('CHECK ((a + b) > 0)', { a: 1, b: 2 }), /não suportado/);
   // E a coluna que não existe na tabela é recusada, não tratada como nula.
