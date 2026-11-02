@@ -573,7 +573,7 @@ test('⭐ os leads caem dentro do filtro PADRÃO do Kanban (30 dias) — senão 
   // coluna conta a mesma história pobre que um zerado.
   const porStatus = {};
   dentro.forEach((l) => { porStatus[l.status] = (porStatus[l.status] || 0) + 1; });
-  for (const s of ['NEW', 'QUALIFYING', 'QUALIFIED', 'CONVERTED', 'PERDIDO']) {
+  for (const s of ['NEW', 'QUALIFYING', 'QUALIFIED', 'EXPERIMENTAL_AGENDADA', 'CONVERTED', 'PERDIDO']) {
     assert.ok(porStatus[s] >= 1, `a coluna de ${s} ficaria vazia no Kanban de ${DIAS_PADRAO_DO_KANBAN} dias`);
   }
 

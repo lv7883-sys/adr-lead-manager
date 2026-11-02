@@ -284,12 +284,20 @@ const CONVERSAS = Object.freeze([
   {
     chave: 'vera', nome: 'Vera Lúcia Andrade', telefone: '5519990000012',
     naoLida: false,
-    lead: { status: 'QUALIFIED', intent: 'SCHEDULE_INTEREST', origem: 'site' },
+    // A coluna do meio do funil. ⚠ Ela ficou VAZIA na primeira versão, e por uma decisão que
+    // deixou de valer: eu evitei o estágio porque o rótulo dele era "Experimental" (de AULA
+    // experimental, vocabulário de escola de música) e apareceria na tela de uma clínica.
+    // Desde 02/11/2026 o rótulo sai por ramo e, para a clínica, ele é "Avaliação" — exatamente
+    // o passo que existe aqui. A razão de evitar morreu, e a coluna vazia no meio do funil passou
+    // a parecer buraco. Achado quando o Leo abriu a tela.
+    lead: { status: 'EXPERIMENTAL_AGENDADA', intent: 'SCHEDULE_INTEREST', origem: 'site' },
     mensagens: [
       [7, '09:00', 'cliente', 'Olá, preenchi o formulário no site e ninguém me respondeu ainda'],
       [7, '09:02', 'ia:APPROVED', 'Olá, Vera! Aqui é a Janis. Peço desculpas pela espera — já localizei seu cadastro e estou encaminhando para a recepção te atender agora.'],
       [7, '09:35', 'recepcao', 'Oi Vera! Desculpe a demora. Vou te passar os horários de avaliação ainda hoje.'],
       [5, '17:10', 'cliente', 'Obrigada! Prefiro de manhã'],
+      [2, '11:20', 'recepcao', 'Oi Vera! Sua avaliação ficou marcada. Qualquer coisa, é só chamar por aqui.'],
+      [2, '11:48', 'cliente', 'Perfeito, anotado. Obrigada!'],
     ],
   },
 ]);
