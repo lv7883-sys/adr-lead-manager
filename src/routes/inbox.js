@@ -583,7 +583,14 @@ async function listConversations(client, tenantId, opts = {}) {
     const row = (await client.query('SELECT stage_ui FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
     const v = stagesUi.validarConfig(row && row.stage_ui, stages.KANBAN_KEYS);
     cfgColunas = v.ok ? v.config : null;
-  } catch { cfgColunas = null; }
+    // ⚠ FALHAR FECHADO SEM DIZER NADA ESCONDE A CAUSA. A recusa aqui é correta — sem config
+    // válida, a etapa canônica — mas o sintoma que ela produz é "configurei as colunas e a aba
+    // não mudou", e nada no sistema explica por quê. Então a recusa DIZ qual erro foi.
+    if (!v.ok) logger.warn('tenant.inbox.stage_ui_invalida', { tenant_id: tenantId, erro: v.erro, detalhe: v.detalhe });
+  } catch (e) {
+    cfgColunas = null;
+    logger.warn('tenant.inbox.stage_ui_erro', { tenant_id: tenantId, error: e.message });
+  }
 
   const rows = (await client.query(sql, params)).rows;
   const hasMore = rows.length > limit;
@@ -695,7 +702,11 @@ async function getConversationThread(client, tenantId, conversationId, usuario, 
     const rowCfg = (await client.query('SELECT stage_ui FROM tenant_lead_config WHERE tenant_id = $1', [tenantId])).rows[0];
     const vCfg = stagesUi.validarConfig(rowCfg && rowCfg.stage_ui, stages.KANBAN_KEYS);
     cfgColunasThread = vCfg.ok ? vCfg.config : null;
-  } catch { cfgColunasThread = null; }
+    if (!vCfg.ok) logger.warn('tenant.inbox.thread_stage_ui_invalida', { tenant_id: tenantId, erro: vCfg.erro, detalhe: vCfg.detalhe });
+  } catch (e) {
+    cfgColunasThread = null;
+    logger.warn('tenant.inbox.thread_stage_ui_erro', { tenant_id: tenantId, error: e.message });
+  }
 
   // ADR-042 — marca as bolhas FAVORITADAS (estrela) DO USUÁRIO (favorited_by). Cada recepcionista
   // vê só as suas. Sem usuario => nenhuma (favorited_by nunca é null nas linhas gravadas).
