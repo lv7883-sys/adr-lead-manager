@@ -35,10 +35,10 @@ const SUITE = path.join(RAIZ, 'test', 'demo-mf8.test.js');
 // sabotado no disco. Com a árvore limpa, `git status` mostra na hora; com alterações pendentes,
 // a sabotagem se esconde no meio delas. Então recusa.
 try {
-  const sujo = execFileSync('git', ['status', '--porcelain', '--', 'src/demo'], { cwd: RAIZ })
+  const sujo = execFileSync('git', ['status', '--porcelain', '--', 'src/demo', 'src/stages.js'], { cwd: RAIZ })
     .toString().trim();
   if (sujo) {
-    console.error('RECUSADO: há alterações não commitadas em src/demo —\n' + sujo
+    console.error('RECUSADO: há alterações não commitadas em src/demo ou src/stages.js —\n' + sujo
       + '\n\nEste script EDITA esses arquivos e os restaura. Com a árvore suja, uma interrupção '
       + 'no meio deixaria a sabotagem escondida entre as suas mudanças. Commite antes.');
     process.exit(1);
@@ -85,6 +85,19 @@ const SABOTAGENS = [
   ['src/demo/tenant-demo.js', "    nome_ia: 'Janis',",
     "    nome_ia: 'Janis',\n    placeholder_exemplo: 'ex.: violão, guitarra, bateria',",
     'exemplo pré-escrito de escola de música aparece num campo do LM'],
+  // Kanban por ramo (decisão do Leo em 02/11). A primeira é a mais importante do arquivo: ela
+  // prova que a trava que protege a ADR Valinhos DISPARA.
+  ['src/stages.js', "emoji: '🎓', label: 'Matriculado', column: true,",
+    "emoji: '🩺', label: 'Em tratamento', column: true,",
+    'o DEFAULT foi adaptado em vez de o ramo — a Valinhos veria rótulo de clínica'],
+  ['src/stages.js', "    experimental: { label: 'Avaliação', emoji: '🩺', dica: 'Consulta de avaliação agendada' },",
+    "    experimental: { label: 'Experimental', emoji: '🎯', dica: 'Aula experimental agendada' },",
+    'o rótulo da clínica volta a ser de escola'],
+  ['src/stages.js', "  'consultoria', 'assessoria',", "  'assessoria',",
+    'quem presta serviço PARA a saúde passa a ver rótulo de paciente'],
+  ['src/stages.js', '        key: s.key, status: s.status, emoji: r.emoji, label: r.label,',
+    '        key: s.key, status: r.label, emoji: r.emoji, label: r.label,',
+    'o status passa a depender do rótulo — mover-kanban quebraria'],
   ['src/demo/check-sql.js', '  if (a === true || b === true) return true;',
     '  if (a === true || b === true) return true;   // (marcador)', '(controle) mudança inócua'],
 ];
