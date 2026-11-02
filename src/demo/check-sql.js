@@ -86,6 +86,27 @@ const FUNCOES = Object.freeze({
   length: (v) => (v == null ? null : String(v).length),
   char_length: (v) => (v == null ? null : String(v).length),
   abs: (v) => (v == null ? null : Math.abs(Number(v))),
+  // jsonb_typeof: achado ao rodar a CAMADA 1 contra PRODUÇÃO em 02/11/2026 —
+  // `automacao_config` tem CHECK (jsonb_typeof(boas_vindas_variaveis) = 'object').
+  // O avaliador RECUSOU a restrição em vez de deixá-la passar, que é o desenho; esta entrada é a
+  // resposta a essa recusa.
+  //
+  // Como o valor chega: node-pg manda para uma coluna jsonb ou um TEXTO json (o plano usa
+  // JSON.stringify) ou um objeto/array JS. Os dois casos estão tratados. Texto que NÃO é json
+  // válido devolve null (desconhecido) em vez de chutar um tipo — o banco é que vai recusar a
+  // linha, com a mensagem dele, e não cabe a este avaliador adivinhar o que ela seria.
+  jsonb_typeof: (v) => {
+    if (v == null) return null;
+    if (Array.isArray(v)) return 'array';
+    if (typeof v === 'object') return 'object';
+    if (typeof v === 'boolean') return 'boolean';
+    if (typeof v === 'number') return 'number';
+    let x;
+    try { x = JSON.parse(String(v)); } catch { return null; }
+    if (x === null) return 'null';
+    if (Array.isArray(x)) return 'array';
+    return typeof x === 'object' ? 'object' : typeof x;
+  },
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,2488 @@
+{
+  "_meta": {
+    "gerado_em": "2026-11-02T13:19:42.363Z",
+    "banco": "adr_scheduler",
+    "porta": 5432,
+    "postgres": "PostgreSQL 16.13",
+    "tabelas_pedidas": [
+      "lead_manager.person",
+      "lead_manager.contact_point",
+      "lead_manager.service_account",
+      "lead_manager.account_member",
+      "lead_manager.conversations",
+      "lead_manager.leads",
+      "lead_manager.messages",
+      "lead_manager.staff_outbound_samples",
+      "lead_manager.pending_approvals",
+      "lead_manager.renovacao_touchpoint",
+      "lead_manager.tenants",
+      "lead_manager.tenant_subscriptions",
+      "lead_manager.tenant_lead_config",
+      "lead_manager.automacao_config"
+    ],
+    "tabelas_ausentes": [],
+    "como_refazer": "node deploy/dump-esquema-demo.js",
+    "fonte_da_lista": "src/demo/cenario-mf8.js → tabelasDoPlano(plano(...)) — NÃO editar à mão"
+  },
+  "tabelas": {
+    "lead_manager.account_member": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "account_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "person_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "bond": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK ((bond = ANY (ARRAY['beneficiario'::text, 'pagador'::text, 'professor'::text])))"
+      ]
+    },
+    "lead_manager.automacao_config": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "modo_comercial": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": true,
+          "default": "'manual'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "modo_fora_horario": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": true,
+          "default": "'semi'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "modo_fds": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": true,
+          "default": "'semi'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "primeira_resposta_auto": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": true,
+          "temDefault": true,
+          "default": "true",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "qualificacao_auto": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": true,
+          "temDefault": true,
+          "default": "true",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "proposta_sempre_manual": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": true,
+          "temDefault": true,
+          "default": "true",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "agendamento_sempre_manual": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": true,
+          "temDefault": true,
+          "default": "true",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "updated_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "updated_by": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "nome_ia": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "contexto_ia": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "ia_fora_leads": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": false,
+          "temDefault": true,
+          "default": "true",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "ia_fora_nao_leads": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": false,
+          "temDefault": true,
+          "default": "true",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "renovacao_habilitada": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": false,
+          "temDefault": true,
+          "default": "true",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "renovacao_auto_envio": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": false,
+          "temDefault": true,
+          "default": "false",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "renovacao_orientacao": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "ramo_atividade": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "objetivo_conversa": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "estilo_ia": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "comportamento_ia": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "nao_falar": {
+          "tipo": "ARRAY",
+          "udt": "_text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'{}'::text[]",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "boas_vindas_modo": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'desligado'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "boas_vindas_alerta_dias": {
+          "tipo": "smallint",
+          "udt": "int2",
+          "nulo": false,
+          "temDefault": true,
+          "default": "21",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "boas_vindas_variaveis": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'{}'::jsonb",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "boas_vindas_modelo": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "boas_vindas_ativado_em": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK (((boas_vindas_alerta_dias >= 7) AND (boas_vindas_alerta_dias <= 30)))",
+        "CHECK ((boas_vindas_modo = ANY (ARRAY['desligado'::text, 'avisa'::text, 'auto'::text])))",
+        "CHECK ((jsonb_typeof(boas_vindas_variaveis) = 'object'::text))",
+        "CHECK (((estilo_ia IS NULL) OR (estilo_ia = ANY (ARRAY['acolhedora'::text, 'consultiva'::text, 'profissional'::text, 'objetiva'::text, 'descontraida'::text]))))",
+        "CHECK ((modo_comercial = ANY (ARRAY['manual'::text, 'semi'::text, 'auto'::text])))",
+        "CHECK ((modo_fds = ANY (ARRAY['manual'::text, 'semi'::text, 'auto'::text])))",
+        "CHECK ((modo_fora_horario = ANY (ARRAY['manual'::text, 'semi'::text, 'auto'::text])))"
+      ]
+    },
+    "lead_manager.contact_point": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "person_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "kind": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "value_raw": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "source": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "confidence": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "proven_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tipo": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "br_key": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": true,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK ((confidence = ANY (ARRAY['alegado'::text, 'provado'::text])))",
+        "CHECK ((kind = ANY (ARRAY['phone'::text, 'email'::text])))",
+        "CHECK ((source = ANY (ARRAY['extranet'::text, 'api_extranet'::text, 'whatsapp'::text, 'native'::text, 'conversa'::text])))",
+        "CHECK (((tipo IS NULL) OR (tipo = ANY (ARRAY['cadastro'::text, 'whatsapp'::text, 'outro'::text]))))"
+      ]
+    },
+    "lead_manager.conversations": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "channel": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'whatsapp'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "external_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "updated_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "last_read_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "conversation_kind": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'DIRECT'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "auto_reply_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "renovacao_draft": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": false,
+          "temDefault": true,
+          "default": "false",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "last_activity_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "br_key": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": true,
+          "tamanhoMax": null
+        },
+        "arquivada_em": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "fixada_em": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "silenciada_ate": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK ((conversation_kind = ANY (ARRAY['DIRECT'::text, 'GROUP'::text, 'COMMUNITY'::text, 'COMMENT'::text])))"
+      ]
+    },
+    "lead_manager.leads": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "name": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "phone": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "email": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "status": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'NEW'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "updated_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "intent": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "meta_leadgen_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "meta_psid": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "desfecho": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "desfecho_notas": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "desfecho_em": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "classification_confidence": {
+          "tipo": "numeric",
+          "udt": "numeric",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "classification_reasoning": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "classification_signals": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "review_queue": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": false,
+          "temDefault": true,
+          "default": "false",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "review_result": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "review_em": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "review_by": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "temperatura_manual": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "notif_last_sent": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "conversation_state": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "state_reasoning": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "state_computed_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "suggested_stage": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "stage_reasoning": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "stage_suggested_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "suggested_stage_dismissed": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "desfecho_source": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "desfecho_motivo": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "origem": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "classification_pending_since": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "classification_attempts": {
+          "tipo": "integer",
+          "udt": "int4",
+          "nulo": false,
+          "temDefault": true,
+          "default": "0",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "classification_last_error": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "bola_nossa_desde": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "adiamentos": {
+          "tipo": "integer",
+          "udt": "int4",
+          "nulo": false,
+          "temDefault": true,
+          "default": "0",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "aborda_renovacao": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK ((desfecho = ANY (ARRAY['matriculado'::text, 'nao_matriculado_preco'::text, 'nao_matriculado_horario'::text, 'nao_matriculado_concorrente'::text, 'nao_matriculado_desistiu'::text, 'nao_compareceu_aula'::text, 'nao_e_lead'::text, 'cliente'::text, 'outro'::text])))",
+        "CHECK ((intent = ANY (ARRAY['SCHEDULE_INTEREST'::text, 'PRICE_INQUIRY'::text, 'GENERAL_INFO'::text, 'OUT_OF_SCOPE'::text])))",
+        "CHECK ((review_result = ANY (ARRAY['confirmed_lead'::text, 'confirmed_not_lead'::text])))",
+        "CHECK ((temperatura_manual = ANY (ARRAY['quente'::text, 'morno'::text, 'frio'::text])))"
+      ]
+    },
+    "lead_manager.messages": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "conversation_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "direction": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'inbound'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "external_message_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "sender": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "body": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "raw": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "received_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "role": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "media_url": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "media_type": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "media_filename": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "media_transcription": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "discarded": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": true,
+          "temDefault": true,
+          "default": "false",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "discard_reason": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "reply_to_message_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "edited_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "original_body": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "deleted_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "conteudo": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "reply_to_external_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK ((role = ANY (ARRAY['USER'::text, 'ASSISTANT'::text])))"
+      ]
+    },
+    "lead_manager.pending_approvals": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "lead_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "conversation_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "suggested_response": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "status": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'PENDING'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "decided_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "decided_by": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "reply_to_message_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK ((status = ANY (ARRAY['PENDING'::text, 'APPROVED'::text, 'REJECTED'::text, 'EDITED'::text, 'ARCHIVED'::text])))"
+      ]
+    },
+    "lead_manager.person": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "display_name": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "updated_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "data_nascimento": {
+          "tipo": "date",
+          "udt": "date",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "payer_relation": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK (((payer_relation IS NULL) OR (payer_relation = ANY (ARRAY['self_paid'::text, 'financially_dependent'::text]))))"
+      ]
+    },
+    "lead_manager.renovacao_touchpoint": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "account_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "person_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "marco": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "fim_vigencia": {
+          "tipo": "date",
+          "udt": "date",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "due_date": {
+          "tipo": "date",
+          "udt": "date",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "phone": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "destinatario_nome": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "aluno_nome": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "servico_label": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "estrategia": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "rascunho": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "status": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'pendente'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "auto": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": false,
+          "temDefault": true,
+          "default": "false",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "enviado_em": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "erro": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "updated_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK ((marco = ANY (ARRAY['D-45'::text, 'D-30'::text, 'D-15'::text, 'D-10'::text, 'D-7'::text, 'D-2'::text])))",
+        "CHECK ((status = ANY (ARRAY['pendente'::text, 'aprovado'::text, 'enviado'::text, 'descartado'::text, 'erro'::text])))"
+      ]
+    },
+    "lead_manager.service_account": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "status": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "servico_label": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "plano_label": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "periodicidade": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "ini_vigencia": {
+          "tipo": "date",
+          "udt": "date",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "fim_vigencia": {
+          "tipo": "date",
+          "udt": "date",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "status_renovacao": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "updated_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "last_synced_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "fonte_ausente_em": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "professor_person_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "professor_nome": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tipo_saida": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "data_inativacao_real": {
+          "tipo": "date",
+          "udt": "date",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "data_ultima_aula": {
+          "tipo": "date",
+          "udt": "date",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tipo_entrada": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "enriquecido_em": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "data_matricula": {
+          "tipo": "date",
+          "udt": "date",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK (((periodicidade IS NULL) OR (periodicidade = ANY (ARRAY['mensal'::text, 'trimestral'::text, 'semestral'::text, 'anual'::text, 'outro'::text]))))"
+      ]
+    },
+    "lead_manager.staff_outbound_samples": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "channel": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'whatsapp'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "external_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "external_message_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "source": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "sender": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "body": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "raw": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "received_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "media_url": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "media_type": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "media_filename": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "reply_to_message_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "ack_status": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "deleted_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "edited_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "original_body": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "is_group": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": false,
+          "temDefault": true,
+          "default": "false",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "conteudo": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "reply_to_external_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "entregue_em": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "lida_em": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK (((ack_status IS NULL) OR (ack_status = ANY (ARRAY['sent'::text, 'delivered'::text, 'read'::text]))))"
+      ]
+    },
+    "lead_manager.tenant_lead_config": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "school_name": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "system_prompt_override": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "available_instruments": {
+          "tipo": "ARRAY",
+          "udt": "_text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'{}'::text[]",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "business_hours": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'{}'::jsonb",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "notification_whatsapp": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "updated_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "nao_lead_motivos": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "stage_definitions": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "lead_definition": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "desfecho_catalog": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "gate_suppression_mode": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'off'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "presignal_ttl_days": {
+          "tipo": "integer",
+          "udt": "int4",
+          "nulo": false,
+          "temDefault": true,
+          "default": "30",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "dormancy_days": {
+          "tipo": "integer",
+          "udt": "int4",
+          "nulo": false,
+          "temDefault": true,
+          "default": "7",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "reactivation_expiry_days": {
+          "tipo": "integer",
+          "udt": "int4",
+          "nulo": false,
+          "temDefault": true,
+          "default": "45",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "bola_mode": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'shadow'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "rescue_conv_mode": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'off'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "stage_autoapply_mode": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'off'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "stage_autoapply_stages": {
+          "tipo": "ARRAY",
+          "udt": "_text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'{experimental,qualificado}'::text[]",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "contract_convert_mode": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'off'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "contract_convert_janela_dias": {
+          "tipo": "integer",
+          "udt": "int4",
+          "nulo": false,
+          "temDefault": true,
+          "default": "7",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "extranet_lead_mode": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'off'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK ((bola_mode = ANY (ARRAY['off'::text, 'shadow'::text, 'on'::text])))",
+        "CHECK (((contract_convert_janela_dias >= 0) AND (contract_convert_janela_dias <= 90)))",
+        "CHECK ((contract_convert_mode = ANY (ARRAY['off'::text, 'suggestion'::text, 'auto'::text])))",
+        "CHECK (((dormancy_days >= 1) AND (dormancy_days <= 365)))",
+        "CHECK ((extranet_lead_mode = ANY (ARRAY['off'::text, 'suggestion'::text, 'auto'::text])))",
+        "CHECK ((gate_suppression_mode = ANY (ARRAY['off'::text, 'shadow'::text, 'on'::text])))",
+        "CHECK (((presignal_ttl_days >= 1) AND (presignal_ttl_days <= 365)))",
+        "CHECK (((reactivation_expiry_days >= 1) AND (reactivation_expiry_days <= 365)))",
+        "CHECK ((rescue_conv_mode = ANY (ARRAY['off'::text, 'shadow'::text, 'on'::text])))",
+        "CHECK ((stage_autoapply_mode = ANY (ARRAY['off'::text, 'on'::text])))"
+      ]
+    },
+    "lead_manager.tenant_subscriptions": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "tenant_id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "feature": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "status": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": true,
+          "default": "'TRIALING'::text",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "trial_started_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "valid_until": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "grace_until": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "converted_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "canceled_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "stripe_subscription_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "stripe_price_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "updated_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": [
+        "CHECK ((feature = ANY (ARRAY['SCHEDULER'::text, 'LEAD_MANAGER'::text])))",
+        "CHECK ((status = ANY (ARRAY['TRIALING'::text, 'ACTIVE'::text, 'PAST_DUE'::text, 'GRACE'::text, 'EXPIRED'::text, 'SUSPENDED'::text, 'CANCELED'::text])))"
+      ]
+    },
+    "lead_manager.tenants": {
+      "colunas": {
+        "id": {
+          "tipo": "uuid",
+          "udt": "uuid",
+          "nulo": false,
+          "temDefault": true,
+          "default": "gen_random_uuid()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "name": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": false,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "created_at": {
+          "tipo": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nulo": false,
+          "temDefault": true,
+          "default": "now()",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "lead_manager_active": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": false,
+          "temDefault": true,
+          "default": "false",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "zapi_token": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "stripe_customer_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "retention_days": {
+          "tipo": "integer",
+          "udt": "int4",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "evolution_instance": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "evolution_token_enc": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "meta_page_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "meta_ig_id": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "meta_page_token_enc": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "notif_enabled": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": true,
+          "temDefault": true,
+          "default": "true",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "notif_phones": {
+          "tipo": "ARRAY",
+          "udt": "_text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "notif_min_confidence": {
+          "tipo": "numeric",
+          "udt": "numeric",
+          "nulo": true,
+          "temDefault": true,
+          "default": "0.85",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "notif_link_base": {
+          "tipo": "text",
+          "udt": "text",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "horario_comercial_inicio": {
+          "tipo": "time without time zone",
+          "udt": "time",
+          "nulo": true,
+          "temDefault": true,
+          "default": "'08:00:00'::time without time zone",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "horario_comercial_fim": {
+          "tipo": "time without time zone",
+          "udt": "time",
+          "nulo": true,
+          "temDefault": true,
+          "default": "'18:00:00'::time without time zone",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "horario_comercial_dias": {
+          "tipo": "ARRAY",
+          "udt": "_int4",
+          "nulo": true,
+          "temDefault": true,
+          "default": "'{1,2,3,4,5}'::integer[]",
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "horario_comercial": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "periodos_ocupacao": {
+          "tipo": "jsonb",
+          "udt": "jsonb",
+          "nulo": true,
+          "temDefault": false,
+          "default": null,
+          "gerada": false,
+          "tamanhoMax": null
+        },
+        "is_demo": {
+          "tipo": "boolean",
+          "udt": "bool",
+          "nulo": false,
+          "temDefault": true,
+          "default": "false",
+          "gerada": false,
+          "tamanhoMax": null
+        }
+      },
+      "checks": []
+    }
+  }
+}
