@@ -12,6 +12,7 @@ const { authenticate } = require('../auth');
 const { requireTenantRole, requireTenantAccess } = require('../rbac');
 const { patchLeadConfig } = require('../leadConfig');
 const { isUuid } = require('../validation');
+const { prepararLeadManual } = require('../leadManual');   // lead que a recepção digita (02/11/2026)
 const { fromLegacy, canonicaliza, validaHorarioJson, normaliza, minToHm } = require('../horario'); // H1: horário por-dia
 const logger = require('../logger');
 const { resumoPlantao } = require('../plantao');   // ADR-040: plantão (resumo de saúde)
@@ -415,6 +416,60 @@ router.get('/:tenantId/leads/:id/eventos', authenticate, requireTenantAccess(REA
   } catch (err) {
     logger.error('tenant.lead.eventos_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
     res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /tenant/:tid/leads — a recepção ANOTA um contato que não veio pelo WhatsApp.
+//
+// Até 02/11/2026 isto não existia: todos os caminhos de criação de lead partiam de uma conversa
+// (engine pela mensagem recebida, marcar-lead, unclassified/promote, sync da Extranet). O contorno
+// aparente, `inbox/iniciar`, exige um texto e ENVIA um WhatsApp de verdade — então anotar quem
+// ligou ou apareceu na porta obrigava a mandar mensagem para a pessoa.
+//
+// ⚠ ESTA ROTA NÃO ENVIA NADA. É registro interno. E não cria conversa: quando a pessoa escrever,
+//   a conversa casa com este lead pelos dígitos do telefone (a mesma régua do `leadk` do inbox).
+//
+// A decisão de o que é um lead válido mora em `src/leadManual.js`, PURA e testada sem banco.
+router.post('/:tenantId/leads', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
+  const prep = prepararLeadManual({
+    nome: req.body?.nome ?? req.body?.name,
+    telefone: req.body?.telefone ?? req.body?.phone,
+    origem: req.body?.origem,
+  });
+  if (!prep.ok) return res.status(400).json({ error: prep.erro, detail: prep.detalhe });
+
+  try {
+    const r = await withTenant(req.tenantId, async (c) => {
+      // ⭐ TELEFONE DUPLICADO NÃO CRIA UM SEGUNDO LEAD, e a razão é o modo de falha, não a
+      // arrumação: o casamento conversa×lead pega o lead MAIS ANTIGO daquele telefone. Um segundo
+      // existiria na tabela e NUNCA apareceria na conversa — contagem e tela discordando sem erro.
+      // A busca é pelos DÍGITOS dos dois lados, igual ao `leadk` de routes/inbox.js.
+      const digitos = prep.lead.phone.replace(/\D/g, '');
+      const existente = (await c.query(
+        `SELECT id, name, status, origem, created_at FROM leads
+          WHERE tenant_id = $1
+            AND regexp_replace(coalesce(phone, meta_psid, ''), '[^0-9]', '', 'g') = $2
+          ORDER BY created_at ASC LIMIT 1`,
+        [req.tenantId, digitos])).rows[0];
+      if (existente) return { lead: existente, criado: false };
+
+      const novo = (await c.query(
+        `INSERT INTO leads (tenant_id, name, phone, status, origem)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, name, status, origem, created_at`,
+        [req.tenantId, prep.lead.name, prep.lead.phone, prep.lead.status, prep.lead.origem])).rows[0];
+      return { lead: novo, criado: true };
+    });
+
+    logger.info('tenant.lead.manual', {
+      tenant_id: req.tenantId, lead_id: r.lead.id, criado: r.criado, origem: r.lead.origem,
+    });
+    // 201 quando nasceu, 200 quando já existia — quem chama precisa distinguir para a mensagem
+    // na tela ("lead criado" x "esse telefone já está na sua base, abri o que existe").
+    return res.status(r.criado ? 201 : 200).json({ ok: true, criado: r.criado, lead: r.lead });
+  } catch (err) {
+    logger.error('tenant.lead.manual_error', { tenant_id: req.tenantId, error: err.message });
+    return res.status(500).json({ error: 'internal error' });
   }
 });
 
