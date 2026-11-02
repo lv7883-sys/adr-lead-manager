@@ -110,7 +110,6 @@ function sqlDoBloco(bloco) {
     sql: `INSERT INTO ${bloco.tabela} (${cols.join(', ')}) VALUES (${valores.join(', ')}) ${onConflict}`,
     // Parâmetros de uma linha: [tenantId, ...valores sem a coluna de tenant]
     paramsDaLinha: (linha) => [null, ...linha.filter((_, k) => k !== iTenant)],
-    nParams: comPortao ? cols.length : cols.length,
   };
 }
 
@@ -137,24 +136,30 @@ async function aplicaPlano(c, plano, tenantId, { ensaio, rotulo }) {
   let k = 0;
   for (const bloco of plano) {
     if (!bloco.linhas.length) continue;
-    const { sql, paramsDaLinha, nParams } = sqlDoBloco(bloco);
+    const { sql, paramsDaLinha } = sqlDoBloco(bloco);
     k += 1;
     const nome = `seed_demo_${rotulo}_${k}`;
-    // CAMADA 2: o banco analisa o INSERT contra a tabela REAL — nome de coluna, aridade e tipo —
+    // CAMADA 2: o banco ANALISA o INSERT contra a tabela REAL — nome de coluna, aridade e tipo —
     // e NÃO executa. Erro aqui é erro de plano, antes de qualquer linha escrita.
+    //
+    // ⚠ E o statement preparado é SOLTO em seguida, de propósito. A primeira versão tentava
+    // executá-lo com `EXECUTE nome ($1, $2, …)`, e o PostgreSQL recusa: no protocolo estendido os
+    // `$n` de um EXECUTE não são parâmetros do EXECUTE ("bind message supplies 7 parameters, but
+    // prepared statement requires 0"). A camada 3 roda o MESMO texto SQL que a camada 2 analisou
+    // — é a mesma instrução, não uma parecida, e é isso que faz a análise valer para a escrita.
     await c.query(`PREPARE ${nome} AS ${sql}`);
-    preparados.push({ nome, bloco, paramsDaLinha, nParams });
+    await c.query(`DEALLOCATE ${nome}`);
+    preparados.push({ sql, bloco, paramsDaLinha });
   }
   console.log(`CAMADA 2 ok — ${preparados.length} INSERTs analisados pelo banco (PREPARE), nenhum executado`);
 
   // CAMADA 3: tudo aqui dentro, uma transação só.
   const gravadas = {};
-  for (const { nome, bloco, paramsDaLinha, nParams } of preparados) {
-    const marcadores = Array.from({ length: nParams }, (_, j) => `$${j + 1}`).join(', ');
+  for (const { sql, bloco, paramsDaLinha } of preparados) {
     for (const linha of bloco.linhas) {
       const params = paramsDaLinha(linha);
       params[0] = tenantId;          // $1 = o parâmetro do portão
-      await c.query(`EXECUTE ${nome} (${marcadores})`, params);
+      await c.query(sql, params);
       gravadas[bloco.tabela] = (gravadas[bloco.tabela] || 0) + 1;
     }
   }
@@ -166,9 +171,6 @@ async function aplicaPlano(c, plano, tenantId, { ensaio, rotulo }) {
     const { rows } = await c.query(`SELECT count(*)::int AS n FROM ${tab} WHERE ${col} = $1`, [tenantId]);
     console.log(`  ${String(rows[0].n).padStart(4)}  ${tab}  (linhas do tenant após a escrita)`);
   }
-
-  // Os statements preparados são da CONEXÃO, não da transação — e a conexão volta para o pool.
-  await c.query('DEALLOCATE ALL');
 
   if (ensaio) {
     const e = new Error('__ENSAIO__');
