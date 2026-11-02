@@ -79,6 +79,12 @@ const SABOTAGENS = [
   ['src/demo/check-sql.js',
     '    throw new Error(`check-sql: caractere não suportado ${JSON.stringify(c)} em ${JSON.stringify(src)}`);',
     '    i += 1; continue;', 'caractere desconhecido ignorado em vez de recusado'],
+  // Vocabulário (pedido do Leo em 02/11: exemplos de clínica, não de escola de música).
+  ['src/demo/tenant-demo.js', "    ramo_atividade: 'clínica ortopédica',", "    ramo_atividade: '',",
+    'ramo vazio — o prompt da assistente deixa de dizer de que empresa ela é'],
+  ['src/demo/tenant-demo.js', "    nome_ia: 'Janis',",
+    "    nome_ia: 'Janis',\n    placeholder_exemplo: 'ex.: violão, guitarra, bateria',",
+    'exemplo pré-escrito de escola de música aparece num campo do LM'],
   ['src/demo/check-sql.js', '  if (a === true || b === true) return true;',
     '  if (a === true || b === true) return true;   // (marcador)', '(controle) mudança inócua'],
 ];
