@@ -21,11 +21,19 @@
 // ⚠ POR ISSO O ARQUIVO GERADO DIZ DE ONDE VEIO E QUANDO. Um esquema congelado sem procedência é
 //   uma afirmação sobre produção sem fonte nem data — exatamente o que este projeto não aceita.
 //
-// A LISTA DE TABELAS SAI DO PLANO, NUNCA DE UMA SEGUNDA LISTA
+// A LISTA DE TABELAS SAI DOS PLANOS, NUNCA DE UMA SEGUNDA LISTA
 //
-// `tabelasDoPlano(plano(...))`. Se amanhã o cenário passar a escrever numa décima primeira
-// tabela, o dump a inclui sozinho — e, se ninguém refizer o dump, a camada 1 ACUSA a tabela
-// faltando em vez de deixá-la sem conferência (foi esse o defeito de 31/10/2026 no dashboard).
+// `tabelasDoPlano` dos DOIS planos: o do cenário e o do provisionamento. Se amanhã o cenário
+// passar a escrever numa décima primeira tabela, o dump a inclui sozinho — e, se ninguém refizer
+// o dump, a camada 1 ACUSA a tabela faltando em vez de deixá-la sem conferência (foi esse o
+// defeito de 31/10/2026 no dashboard).
+//
+// ⚠ A PRIMEIRA VERSÃO DESTE SCRIPT LIA SÓ O PLANO DO CENÁRIO, e congelou 10 das 14 tabelas —
+// as 4 do provisionamento ficariam sem conferência. Terceira aparição da MESMA forma nesta
+// frente: o caminho principal ganha a conferência e o caminho de setup fica de fora porque "é só
+// o setup". Quem pegou foi o teste `demo-mf8-esquema.test.js`, que re-deriva a lista dos dois
+// planos e exige as 14 — ou seja, a propriedade é garantida pelo TESTE, não pela boa intenção
+// de quem escreve o dump. Medido em 02/11/2026, rodando contra produção.
 //
 // USO (na VPS, no container do LM, ou de qualquer lugar com DATABASE_URL para o banco alvo):
 //   node deploy/dump-esquema-demo.js                       # grava test/fixtures/esquema-demo.json
@@ -34,7 +42,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { pool } = require('../src/db');
-const { plano, tabelasDoPlano } = require('../src/demo/cenario-mf8');
+const cenario = require('../src/demo/cenario-mf8');
+const demo = require('../src/demo/tenant-demo');
+const { tabelasDoPlano } = cenario;
 
 // tenant/hoje fictícios: o plano só é usado aqui para DERIVAR a lista de tabelas; nenhum valor
 // dele é gravado nem lido. Qualquer uuid e qualquer data servem — e precisam ser constantes,
@@ -69,8 +79,14 @@ async function principal() {
     ? saidaArg.slice('--saida='.length)
     : path.join(__dirname, '..', 'test', 'fixtures', 'esquema-demo.json');
 
-  const tabelas = tabelasDoPlano(plano({ tenantId: TENANT_FICTICIO, hoje: DATA_FICTICIA }));
-  console.log(`Tabelas derivadas do plano: ${tabelas.length}`);
+  const tabelas = [...new Set([
+    ...tabelasDoPlano(cenario.plano({ tenantId: TENANT_FICTICIO, hoje: DATA_FICTICIA })),
+    ...tabelasDoPlano(demo.planoProvisionamento({
+      tenantId: TENANT_FICTICIO, hoje: DATA_FICTICIA, slug: 'esquema',
+      maisDias: cenario.maisDias, instante: cenario.instante,
+    })),
+  ])];
+  console.log(`Tabelas derivadas dos DOIS planos (cenário + provisionamento): ${tabelas.length}`);
   tabelas.forEach((t) => console.log(`  • ${t}`));
 
   const [colunas, checks, ondeEstou] = await Promise.all([
