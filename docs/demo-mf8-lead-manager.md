@@ -471,6 +471,54 @@ estado da instância na Evolution, então nenhuma reconexão é detectada. "0 in
 "não procurei", não "procurei e não havia". A das 10:56 (`backfillTenant(deep:false)`) é a que
 PROCUROU: conferiu 99 conversas contra o histórico do WhatsApp.
 
+### 🔴 INCIDENTE que eu causei em 02/11/2026, 11:00 — e o conserto
+
+**O que aconteceu.** Para testar a trava de âncora nova, rodei na VPS
+`cenario --hoje=2026-11-02` **sem `--ensaio`**, confiando que o `git fetch` anterior tinha
+trazido o código com a trava. **O fetch falhou** — aquele clone foi feito com
+`--branch X --depth 1`, então o refspec do remoto só cobre X e `origin/<outra-branch>` nunca
+existe. O script não tinha `set -e`, o erro passou, e o comando rodou com o **código antigo** e a
+**âncora errada**.
+
+**O dano, medido:** as dez vigências foram sobrescritas 2 dias antes (primeiro vencimento
+`2026-09-23` em vez de `2026-09-25`). **Nenhuma duplicação** — 10 contratos, 23 mensagens, 12
+conversas, 3 toques, iguais antes e depois: os uuids derivados fizeram um UPDATE limpo, que é
+exatamente o que eles existem para fazer.
+
+**O conserto:** nova rodada com `--hoje=2026-11-04`. As dez datas conferidas uma a uma contra a
+lista esperada: **iguais**. Toques de volta em D-10 (Beatriz, vence 14/11, toque 04/11) e D-2
+(Renata, vence 06/11, toque 04/11).
+
+**As três coisas que isto ensina, e as três são sobre como eu verifico:**
+
+1. **Não conferi que a AÇÃO terminou antes de usar o que ela produziu.** O `git fetch` falhou em
+   silêncio e eu segui. Código de saída não lido, `set -e` ausente.
+2. **A trava que eu estava testando era a que teria me barrado** — e ela não estava publicada
+   ainda. Testar uma proteção contra produção antes de a proteção existir ali é rodar o caso
+   ruim sem a proteção.
+3. **`--ensaio` foi o que separou um susto de um estrago** nas duas vezes que eu errei a âncora.
+   Ele não é cerimônia.
+
+### 🔴 E um erro de LEITURA, no mesmo minuto: `tail` cortou a resposta
+
+Ao conferir as contagens, vi as saídas da Valinhos irem de 81.388 para **81.390** (+2) e fui
+procurar a origem. Pedi "as 4 mais recentes" e a saída mostrou linhas de **10:00** e **08:25** —
+anteriores à minha referência. Conclusão aparente: contradição entre o `count` e a listagem.
+
+**Não havia contradição.** O corpo daquelas mensagens tem VÁRIAS LINHAS, e o meu `tail -12`
+empurrou as duas linhas realmente mais recentes para fora da saída. As +2 são de **11:00:04 e
+11:00:05** — um "Alerta de faltas" real, enviado pela recepção **7 minutos DEPOIS** da janela do
+reinício (10:52:54–10:53:04).
+
+Então, com a leitura certa:
+
+- **entradas da Valinhos na janela do reinício: 0** (`messages` 61.944 nas duas pontas)
+- **as +2 saídas são atividade legítima posterior**, e o LM as CAPTUROU — o que é prova positiva
+  de que o recebimento voltou funcionando depois do reinício
+
+A lição é a mesma de sempre, e aqui ela não foi sobre o sistema: **cortar a saída produziu um
+fato falso.** Eu quase registrei "anomalia nas contagens da Valinhos" por causa de um `tail`.
+
 ### 🔴 Um defeito que a publicação revelou: `deploy/` não entra na imagem
 
 O runbook deste repositório, e a prática registrada de que "todo deploy do LM pede backfill
