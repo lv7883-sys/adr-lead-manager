@@ -76,9 +76,19 @@ async function _classifierConfig(tenantId) {
     // é o comportamento de hoje. Classificador não pode parar porque alguém salvou uma coluna
     // malformada na tela.
     const v = stagesUi.validarConfig(row.stage_ui, stages.KANBAN_KEYS);
+    // ⚠ A recusa é correta (sem config válida, as definições canônicas), mas ela não pode ser
+    // MUDA: o sintoma que produz é "criei a coluna com condição e a IA nunca a sugere", e isso é
+    // indistinguível de "a IA não achou que se aplicava". Dizer qual erro foi é o que separa as
+    // duas — e uma trava certa que esconde a causa errada custa horas.
+    if (!v.ok) {
+      logger.warn('classifier.stage_ui_invalida', { tenant_id: tenantId, erro: v.erro, detalhe: v.detalhe });
+    }
     const stageDefinitions = stagesUi.definicoesParaIA(row.stage_definitions || null, v.ok ? v.config : null);
     return { leadDefinition: row.lead_definition || null, stageDefinitions };
-  } catch { return { leadDefinition: null, stageDefinitions: null }; }
+  } catch (e) {
+    logger.warn('classifier.config_erro', { tenant_id: tenantId, error: e.message });
+    return { leadDefinition: null, stageDefinitions: null };
+  }
 }
 
 // ============================================================================
