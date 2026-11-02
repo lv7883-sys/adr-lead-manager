@@ -16,6 +16,7 @@ const redisClient = require('./redisClient');
 const gating = require('./gating');
 const { kanbanColuna } = require('./metrics');   // ADR sugestão-de-etapa: travas de posição
 const stages = require('./stages');              // régua canônica: KEY_TO_STATUS/KANBAN_TRANSICOES (auto-apply)
+const stagesUi = require('./stagesUi');          // colunas da unidade: entram na lista sugerível (migr 188)
 const extranetStage = require('./cadastro/extranetLeadStage');   // migr 102: HUMANO > EXTRANET > IA
 const { gateSaida } = require('./bolaGate');     // ADR-030 Passo 2: gate determinístico da saída
 
@@ -62,8 +63,21 @@ async function _fewShotExamples(tenantId) {
 async function _classifierConfig(tenantId) {
   try {
     const res = await withTenant(tenantId, (c) => c.query(
-      'SELECT lead_definition, stage_definitions FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]));
-    return { leadDefinition: res.rows[0]?.lead_definition || null, stageDefinitions: res.rows[0]?.stage_definitions || null };
+      'SELECT lead_definition, stage_definitions, stage_ui FROM tenant_lead_config WHERE tenant_id = $1', [tenantId]));
+    const row = res.rows[0] || {};
+    // 02/11/2026 — a CONFIGURAÇÃO DE COLUNAS entra aqui (migr 188). Pedido do Leo: editar coluna
+    // no kanban tem de se refletir "também na classificação de leads".
+    //
+    // Coluna escondida sai da lista de etapas sugeríveis (senão a IA apontaria para um lugar que
+    // não está na tela) e coluna criada entra, se a unidade escreveu a CONDIÇÃO dela. Ver o
+    // cabeçalho de stagesUi.definicoesParaIA.
+    //
+    // Falha FECHADA: configuração inválida → `v.ok` falso → `null` → as definições canônicas, que
+    // é o comportamento de hoje. Classificador não pode parar porque alguém salvou uma coluna
+    // malformada na tela.
+    const v = stagesUi.validarConfig(row.stage_ui, stages.KANBAN_KEYS);
+    const stageDefinitions = stagesUi.definicoesParaIA(row.stage_definitions || null, v.ok ? v.config : null);
+    return { leadDefinition: row.lead_definition || null, stageDefinitions };
   } catch { return { leadDefinition: null, stageDefinitions: null }; }
 }
 

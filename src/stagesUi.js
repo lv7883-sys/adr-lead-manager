@@ -34,6 +34,7 @@
 const MAX_EXTRAS = 4;
 const MAX_LABEL = 28;        // cabe no cabeçalho da coluna sem quebrar o layout
 const MAX_DICA = 80;
+const MAX_DEFINICAO = 300;   // condição para a IA; cabe numa frase longa, não num manual
 const PREFIXO_EXTRA = 'x_';
 // A coluna de ENTRADA não pode sumir. `novo` é marcada `auto: true` na régua canônica: é origem
 // de tudo e nunca destino de arraste — é nela que um lead recém-criado nasce.
@@ -91,7 +92,19 @@ function validarConfig(bruta, chavesCanonicas, cardsPorColuna) {
       return _recusa('posicao_invalida',
         `A coluna ${JSON.stringify(key)} pede para vir depois de ${JSON.stringify(depois)}, que não existe.`);
     }
-    extras.push({ key, label, emoji: _texto(o.emoji, 8) || '•', dica: _texto(o.dica, MAX_DICA) || null, depois: depois || null });
+    // `definicao` é OUTRA coisa que `dica`, e confundir as duas seria caro:
+    //   dica      → texto para o HUMANO, aparece embaixo do título da coluna
+    //   definicao → CONDIÇÃO para a IA: "o que tem de acontecer na conversa para o lead estar
+    //               aqui". Vai para o prompt do classificador, ao lado das etapas canônicas
+    //               (tenant_lead_config.stage_definitions). Sem ela, a IA nunca sugere esta
+    //               coluna — e isso é o default, porque sugerir sem condição é adivinhar.
+    extras.push({
+      key, label,
+      emoji: _texto(o.emoji, 8) || '•',
+      dica: _texto(o.dica, MAX_DICA) || null,
+      definicao: _texto(o.definicao, MAX_DEFINICAO) || null,
+      depois: depois || null,
+    });
   }
 
   // ---- ocultas ----
@@ -180,7 +193,85 @@ function aplicarConfig(canonicas, config) {
   return fora;
 }
 
+/**
+ * ⭐ As etapas que a IA pode SUGERIR, depois da configuração da unidade. PURA.
+ *
+ * Pedido do Leo em 02/11/2026: a edição de colunas tem de se refletir "também na classificação
+ * de leads". Isto é o elo — e ele existe porque a classificação JÁ é configurável por unidade:
+ * `tenant_lead_config.stage_definitions` é um mapa `{chave: condição}` que vira bloco de prompt
+ * em `gemini._stageBlock`, e a saída da IA é validada contra essas chaves. Não havia régua nova
+ * a inventar; havia uma régua a LIGAR na outra.
+ *
+ * As duas coisas que mudam, e cada uma conserta uma incoerência de verdade:
+ *
+ *   1. COLUNA ESCONDIDA SAI DA LISTA. Sem isso, a IA sugeriria mover um lead para uma coluna
+ *      que a unidade escondeu — o chip "IA sugere → X" apontando para um lugar que não está na
+ *      tela, e o botão de confirmar movendo o card para fora da vista.
+ *   2. COLUNA CRIADA ENTRA, se tiver `definicao`. Sem `definicao` ela NÃO entra, e isso é
+ *      decisão: sugerir etapa sem condição escrita é adivinhar, e a saída seria um chip que
+ *      ninguém sabe justificar.
+ *
+ * ⚠ E o que NÃO muda: o rótulo. A IA raciocina sobre a CHAVE e a CONDIÇÃO, nunca sobre o nome
+ * que a unidade deu à coluna. Renomear uma coluna não pode mudar o que a IA decide — senão a
+ * classificação passaria a depender de texto de interface, e duas unidades com a mesma régua e
+ * nomes diferentes classificariam diferente.
+ *
+ * @param {object|null} stageDefinitions  `tenant_lead_config.stage_definitions` ({chave: texto})
+ * @param {object|null} config            saída de validarConfig
+ * @returns {object|null}  o mapa para o prompt, ou null quando não há nada sugerível (o que
+ *                         DESLIGA o recurso, que é o comportamento de hoje para quem não tem defs)
+ */
+function definicoesParaIA(stageDefinitions, config) {
+  const base = (stageDefinitions && typeof stageDefinitions === 'object' && !Array.isArray(stageDefinitions))
+    ? stageDefinitions : {};
+  const cfg = (config && typeof config === 'object') ? config : {};
+  const ocultas = new Set(Array.isArray(cfg.ocultas) ? cfg.ocultas : []);
+  const extras = Array.isArray(cfg.extras) ? cfg.extras : [];
+
+  const fora = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (ocultas.has(k)) continue;                                   // (1)
+    if (typeof v === 'string' && v.trim()) fora[k] = v;
+  }
+  for (const e of extras) {                                          // (2)
+    if (!e || ocultas.has(e.key)) continue;
+    if (typeof e.definicao === 'string' && e.definicao.trim()) fora[e.key] = e.definicao;
+  }
+  return Object.keys(fora).length ? fora : null;
+}
+
+/**
+ * ⭐ A ETAPA EM QUE O CARD APARECE, para QUALQUER aba. PURA, e é FONTE ÚNICA.
+ *
+ * Pedido do Leo em 02/11/2026: a configuração de colunas tem de se refletir em todas as abas.
+ * O jeito errado de atender seria repetir `l.etapa_custom || stageKey(...)` em cada lugar que
+ * mostra etapa — e este projeto já pagou por réguas copiadas em quatro, cinco e sete lugares
+ * (o nome do contato, a bola, a chave de tenant). Então a régua nasce uma vez, aqui.
+ *
+ * ⚠ E ela cai para a canônica quando a coluna extra NÃO EXISTE MAIS na configuração — unidade
+ * que apagou a coluna não pode deixar card apontando para o vazio. Falha fechada: o lead
+ * reaparece onde sempre esteve, em vez de sumir da aba.
+ *
+ * @param {{status?, desfecho?, etapa_custom?}} lead
+ * @param {object|null} config  saída de validarConfig
+ * @param {(status, desfecho) => string} stageKey  a partição canônica (stages.stageKey)
+ */
+function etapaDoLead(lead, config, stageKey) {
+  if (typeof stageKey !== 'function') {
+    throw new Error('stagesUi.etapaDoLead: stageKey é obrigatório — a partição canônica não se reimplementa aqui.');
+  }
+  const l = lead || {};
+  const custom = typeof l.etapa_custom === 'string' ? l.etapa_custom.trim() : '';
+  if (custom) {
+    const cfg = (config && typeof config === 'object') ? config : {};
+    const extras = Array.isArray(cfg.extras) ? cfg.extras : [];
+    const ocultas = new Set(Array.isArray(cfg.ocultas) ? cfg.ocultas : []);
+    if (extras.some((e) => e && e.key === custom) && !ocultas.has(custom)) return custom;
+  }
+  return stageKey(l.status, l.desfecho);
+}
+
 module.exports = {
-  validarConfig, aplicarConfig,
-  MAX_EXTRAS, MAX_LABEL, MAX_DICA, PREFIXO_EXTRA, NAO_OCULTAVEIS,
+  validarConfig, aplicarConfig, definicoesParaIA, etapaDoLead,
+  MAX_EXTRAS, MAX_LABEL, MAX_DICA, MAX_DEFINICAO, PREFIXO_EXTRA, NAO_OCULTAVEIS,
 };
