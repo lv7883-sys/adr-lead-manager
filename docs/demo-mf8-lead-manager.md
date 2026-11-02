@@ -324,12 +324,76 @@ só, com ids derivados do namespace da demonstração — uma linha da Valinhos 
 se o id dela colidisse com um uuid derivado desse namespace. As contagens da Valinhos hoje
 (690 pessoas, 1.139 contratos, 61.944 mensagens, 81.388 saídas) são as dela.
 
+## Conferência depois da ponte (02/11/2026, 13h40)
+
+A outra sessão gravou `app.franquia.lead_tenant_id = 6c857c85-…` na unidade 7 e ligou os módulos
+`LEADS` e `QUALIDADE` (medido). Então deu para conferir o caminho inteiro, até a borda da tela.
+
+**O dashboard publicado resolve a clínica para o tenant certo.** Não é leitura de código: eu
+chamei a função dele, `tenantDaFranquia`, dentro do container, com a linha real do banco.
+
+```
+tenantDaFranquia("clinica-exemplo")      -> tenant da DEMO
+tenantDaFranquia("valinhos")             -> tenant da VALINHOS
+tenantDaFranquia(sem lead_tenant_id)     -> null  (a tela AVISA; não cai na Valinhos)
+```
+
+Essa terceira linha importa: havia o risco de a unidade sem ponte cair no
+`process.env.LEAD_MANAGER_TENANT_ID`, que **aponta para a Valinhos** neste container. A régua do
+inbox não usa esse env — confirmado na linha 25 do arquivo publicado, e pelo retorno `null` acima.
+
+**As rotas HTTP que as telas chamam** (chamadas com o próprio `SERVICE_TOKEN` do dashboard, do
+jeito que o dashboard chama):
+
+| rota | resposta |
+|---|---|
+| `GET /health` | `200 ok` |
+| `GET /inbox/conversations?view=todas` | **12** conversas |
+| `GET /inbox/conversations?view=leads` | **9** |
+| `GET /inbox/conversations?view=nao_lead` | **3** |
+| `GET /inbox/conversations?view=renovacoes` | **3** |
+| `GET /inbox/nao-lidas` | `{"total":7,"conversas":3}` |
+| `GET /inbox/conversations/<id>` (Rogério) | **5** itens, nos 3 lados: `lead`, `ia`, `recepcao`, na ordem |
+
+**ISOLAMENTO — a conferência que mais importa:** os **12** telefones devolvidos pela API estão
+todos no bloco fictício `5519990000XXX`, **nenhum fora**. Nenhum dado da Valinhos atravessa.
+
+**Os nomes resolvem:** 0 de 12 conversas sem nome. E as etapas do funil que a lista devolve são
+`novo`, `qualificando`, `qualificado`, `convertido`, `perdido` — **nenhuma `experimental`**, como
+o cenário pretendia. O rótulo que a tela desenha para `convertido` é "Matriculado 🎓", e esse
+continua sendo o único vocabulário de escola que aparece.
+
+**A tarja de renovação funciona:** Beatriz vem com `{"venc":"2026-11-14","dias":12,"toque":"D-10"}`.
+
+### Um achado no outro repositório, reportado e não consertado
+
+`/app/lib/campanha.js:310` (código **publicado**) é o único caminho vivo que cai no env:
+
+```js
+(r.rows[0] && r.rows[0].lead_tenant_id) || process.env.LEAD_MANAGER_TENANT_ID || null
+```
+
+É o resolvedor de telefone da **fila de envio em massa**. Numa unidade sem `lead_tenant_id`, ele
+resolveria o telefone **dentro do tenant da Valinhos**. Medido: BASE 125 arquivos `.js` em
+`/app/lib` + rotas; PADRÃO `LEAD_MANAGER_TENANT_ID` → **3** ocorrências, das quais **2 são
+comentários** (`tenant-franquia.js:11`, `routes/leads.js:355`) e **1 é código vivo** (esta).
+
+**Risco hoje: nenhum, e medido.** `app.campanha` tem 179 linhas e `app.campanha_alvo` 1.071 (316
+com `person_id`), **todas da franquia 1**. Zero para a clínica — nada na fila, nada a resolver. E
+com a ponte gravada o env deixou de ser alcançável para ela.
+
+⚠ Mas há um detalhe de cache que vale dizer: `_tenantPorFranquia` é um `Map` de módulo **sem
+invalidação**. Se alguém criasse campanha para a clínica *antes* de a ponte existir, o tenant
+errado ficaria em cache até o processo reiniciar. Isso é do adr-whatsapp-scheduler; reportei à
+sessão dona e não toquei.
+
 ## O que NÃO está feito
 
-- **`app.franquia.lead_tenant_id` e os módulos `LEADS`/`QUALIDADE`** são do adr-whatsapp-scheduler.
-  O número está em mão da outra sessão desde antes da gravação; não editei aquele repositório.
-  **Enquanto esse campo não for gravado, nenhuma tela mostra o cenário** — o dado está lá e as
-  telas não sabem onde procurar.
+- **A TELA RENDERIZADA não foi vista.** O dashboard pede login e eu não digito senha. Abri o
+  painel do navegador em `/f/clinica-exemplo/inbox` e ele redirecionou para `/login` — que é o
+  comportamento certo, e é onde eu paro. Tudo até a borda da tela está conferido (a régua de
+  tenant do dashboard publicado e as 6 rotas HTTP que a tela consome); o que falta é alguém
+  logado olhando os pixels.
 - **A âncora de datas é 04/11/2026**, o dia da apresentação. Consequência hoje (02/11): as três
   mensagens mais novas aparecem com data **futura**, 04/11. Na apresentação ficam certas. Rodar
   `cenario` de novo com outra âncora leva segundos e é idempotente (os uuids são derivados).
