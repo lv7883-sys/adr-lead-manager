@@ -549,6 +549,43 @@ test('a unidade de demonstração cai no conjunto de saúde — pelo perfil que 
   assert.equal(c.find((s) => s.key === 'convertido').label, 'Em tratamento');
 });
 
+test('⭐ os leads caem dentro do filtro PADRÃO do Kanban (30 dias) — senão a tela abre ZERADA', () => {
+  // Este teste nasce de um defeito que NENHUMA das minhas conferências pegou, e que só apareceu
+  // quando o Leo ABRIU A TELA: eu dava a todos os leads o mesmo `created_at`, 90 dias antes da
+  // âncora. O Kanban filtra `leads.created_at >= now() - <período>` e o período PADRÃO é
+  // **30 dias** (metrics.js, KANBAN_DEFAULT_PERIOD) — então as seis colunas apareciam zeradas
+  // enquanto a Caixa de Entrada mostrava as 12 conversas normalmente.
+  //
+  // Por que escapou: todas as minhas conferências mediam o BANCO, e o defeito estava na
+  // interseção entre o dado e o filtro padrão de uma tela do OUTRO repositório. Medir as duas
+  // pontas separadamente deixa o meio sem ninguém.
+  const DIAS_PADRAO_DO_KANBAN = 30;   // metrics.js: KANBAN_PERIODS['30d'], KANBAN_DEFAULT_PERIOD
+  const corte = cenario.maisDias(HOJE, -DIAS_PADRAO_DO_KANBAN);
+
+  const leads = comoObjetos(blocoDe(plano(), 'leads'))
+    .filter((l) => !['NOT_LEAD', 'REVIEW_QUEUE'].includes(l.status));
+  const dentro = leads.filter((l) => String(l.created_at).slice(0, 10) >= corte);
+
+  assert.ok(dentro.length >= 7,
+    `só ${dentro.length} de ${leads.length} leads caem nos ${DIAS_PADRAO_DO_KANBAN} dias — a tela abriria quase vazia`);
+
+  // E as colunas precisam estar POVOADAS, não só o total: um Kanban com 8 leads todos na mesma
+  // coluna conta a mesma história pobre que um zerado.
+  const porStatus = {};
+  dentro.forEach((l) => { porStatus[l.status] = (porStatus[l.status] || 0) + 1; });
+  for (const s of ['NEW', 'QUALIFYING', 'QUALIFIED', 'CONVERTED', 'PERDIDO']) {
+    assert.ok(porStatus[s] >= 1, `a coluna de ${s} ficaria vazia no Kanban de ${DIAS_PADRAO_DO_KANBAN} dias`);
+  }
+
+  // O lead nasce na PRIMEIRA mensagem da conversa — é daí que o `created_at` sai.
+  const convs = comoObjetos(blocoDe(plano(), 'conversations'));
+  for (const l of comoObjetos(blocoDe(plano(), 'leads'))) {
+    const cv = convs.find((c) => c.external_id === l.phone);
+    assert.equal(l.created_at, cv.created_at,
+      `o lead ${l.name} não nasce junto com a conversa dele`);
+  }
+});
+
 test('a ÂNCORA é declarada, e mudá-la move as dez vigências — que outro repositório espelha', () => {
   // A frente do dashboard fixou estas dez datas como LITERAIS no BI (decisão de 02/11/2026,
   // porque o público soma e a tela de Renovações não pode discordar do painel de contratos).
