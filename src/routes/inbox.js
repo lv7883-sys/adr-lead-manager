@@ -440,6 +440,13 @@ ${renovCtesDepois}
         m.renovacao_draft,   -- rascunho de renovação (migr. 097): só na aba Renovação até enviar
         m.arquivada_em, m.fixada_em, m.silenciada_ate,   -- migr. 118
         m.lead_id, m.lead_status, m.lead_desfecho,
+        -- ⚠ ESTE CAMPO FALTAVA e o defeito era SILENCIOSO: lead_etapa_custom chegava até o CTE
+        -- "matched" e MORRIA AQUI, porque "projected" lista coluna a coluna em vez de m.*.
+        -- O mapConversationRow lia undefined, caía na etapa canônica, e a ABA mostrava "novo"
+        -- enquanto o KANBAN mostrava a coluna criada pela unidade. Nenhum erro, nenhum log — as
+        -- duas telas simplesmente discordavam. Achado abrindo a rota DEPOIS de publicar, não no
+        -- teste: os meus testes são puros e nenhum deles atravessa esta consulta.
+        m.lead_etapa_custom,
         -- Nome exibido: AGENDA DA UNIDADE primeiro (migr 184 — como NÓS salvamos), depois o pushName
         -- do WhatsApp, depois cadastro/lead. A ordem e o porquê de cada degrau: src/contato-nome.js.
         ${nomeCt.nomeContatoSql({
