@@ -166,7 +166,95 @@ dado de saúde — e não trata.
 
 ---
 
+## Vocabulário: o que é de clínica e o que ainda é de escola de música
+
+Pedido do Leo em 02/11: os exemplos pré-escritos nos campos têm de ser de clínica.
+
+**Medido primeiro.** BASE: 128 arquivos `.js` em `src/`. PADRÃO `/placeholder/i`: **20 linhas, todas
+rótulo de mídia** (`[áudio]`, `[imagem]`, `[documento: …]`). **Nenhuma é exemplo de campo** — o
+Lead Manager não tem formulário nenhum: é API JSON, e as telas são do dashboard. Um teste trava
+essa afirmação (`o Lead Manager não tem campo de formulário com exemplo pré-escrito`): placeholder
+novo que não seja de mídia derruba a suíte.
+
+**O que o LM pré-escreve e alcança a demonstração é um texto só: o prompt da assistente.** E ele
+sai limpo — zero ocorrências de "escola de música", "instrumento", "aula experimental", "matrícul",
+"aluno", "professor", "violão", "música" e "curso". O mecanismo:
+`templates.renderDefaultPrompt` escolhe o `GENERIC_SYSTEM_PROMPT` quando
+`perfilAssistente.generico()` é verdade, e ela é verdade porque o perfil da demo preenche
+`ramo_atividade`. Sem ramo, o template padrão diria "uma escola de música".
+*(verificado em código + teste, 02/11/2026)*
+
+### O que continua de escola de música, e não consertei
+
+**1. Quatro prompts de classificação, em `src/gemini.js`:**
+
+| linha | prompt | o que diz |
+|---|---|---|
+| 67 | `TRIAGE_PROMPT` | "classificador de triagem … de **uma escola de música**" |
+| 303 | `_INTERESSES_PROMPT` | "conversa entre **uma escola de música** e um contato" |
+| 859 | `INTENT_PROMPT` | "intenção … do lead de **uma escola de música**" |
+| 879 | `EXTRACT_PROMPT` | "dados do lead para **matrícula em escola de música**" |
+
+Os quatro vão direto para `generateContent` (linhas 113, 328, 872, 896) **sem passar pelo
+adaptador de ramo `_adaptar`** — que existe e é extenso (linha 406, ~35 trocas, inclusive
+`['uma escola de música', descricaoEmpresa(p)]`). Então a voz da assistente adapta por ramo; a
+triagem não. *(verificado em código, 02/11/2026)*
+
+**Não rodam nesta demonstração** — o webhook é recusado por tenant inativo e os rascunhos são
+pré-escritos. **E não os consertei**, por uma razão que não é preguiça: envolvê-los no `_adaptar`
+mudaria o prompt do classificador **de Valinhos** se ela tiver `ramo_atividade` configurado, e eu
+não sei se tem — isso é leitura de produção. A dois dias da apresentação, mexer num classificador
+que roda de verdade, sem essa medição, é risco maior que o ganho. Fica como tarefa própria.
+
+**2. Os rótulos do funil, em `src/stages.js`** — chegam à tela pelo `stageCatalog()` e o dashboard
+desenha as colunas do Kanban de Leads:
+
+| rótulo | dica | emoji |
+|---|---|---|
+| Experimental | "Aula experimental agendada" | 🎯 |
+| Experimental realizada | — | 🎯 |
+| Matriculado | — | 🎓 |
+
+Não dependem de ramo. Mitigação já tomada no cenário: **não uso o estágio
+`EXPERIMENTAL_AGENDADA`**, então essas colunas ficariam **visíveis e vazias** na clínica —
+"Matriculado 🎓" teria 2 leads.
+
+Rotular por ramo é **feature nova** em `stages.js`, que é a régua canônica lida pelos **dois**
+repositórios (substituiu cinco cópias duplicadas) — mudá-la altera as telas de Valinhos. A
+recomendação é não mostrar o Kanban de Leads nesta demonstração: o pedido era Caixa de Entrada e
+Renovações, e essas duas não têm nenhum desses rótulos.
+
+**3. Fora do caminho da demo, e registrado para não parecer ausência:**
+`src/resources/adapters/valinhos.js` (28 literais: Guitarra, Violão…) só serve Valinhos;
+`src/boasVindas/recepcao.js` ("Falta o professor", "Já era aluno") só aparece com o módulo de
+boas-vindas ligado, e na demo ele está desligado.
+
+Varredura completa: **202 literais de texto em 34 dos 128 arquivos** casam o padrão
+`/instrumento|violão|guitarra|bateria|teclado|escola de música|matrícul|alunos?|professor|aula
+experimental|turma|música/i`. A maioria esmagadora é nome de coluna, chave de enum
+(`nao_matriculado_preco`, `matriculado`, `professor`) e SQL — não chega a tela nenhuma. *(medido em
+02/11/2026)*
+
+---
+
 ## Runbook
+
+⚠ **A ORDEM IMPORTA, e por um motivo que o jargão esconde.** O `lead_tenant_id` do lado do
+dashboard aponta para uma conta no LM. Se ele for gravado **antes** de a conta existir, as telas
+param de mostrar o aviso "unidade sem tenant do Lead Manager" e passam a mostrar uma **lista
+vazia** — porque o modo de falha de chave errada neste projeto é zero linhas, não erro. Numa
+demonstração, tela que parece funcionando e está vazia é pior que aviso explícito. Então: **conta
+no LM primeiro, ponte do dashboard depois.**
+
+O uuid da conta é **derivado do slug** e pode ser calculado antes de qualquer gravação:
+
+```bash
+node -e "console.log(require('./src/demo/cenario-mf8').idDe('tenant','clinica-exemplo'))"
+# 6c857c85-0803-5575-ac85-4862b36974d6
+```
+
+Dois cálculos dão o mesmo valor, e o provisionamento usa exatamente este — então a outra frente
+pode preparar a ponte com o número em mão antes de o tenant existir, só não gravar antes.
 
 ```bash
 # 0. aplicar a migração do portão (aditiva: 1 ADD COLUMN IF NOT EXISTS)
