@@ -356,13 +356,33 @@ function plano({ tenantId, hoje }) {
         const t = instante(hoje, d, h);
         return !acc || t > acc ? t : acc;
       }, null);
+    // ⭐ A PRIMEIRA mensagem é o nascimento do lead — e isso não é estética.
+    //
+    // A primeira versão dava a TODOS os leads o mesmo `created_at`, 90 dias antes da âncora. O
+    // Kanban filtra por `leads.created_at >= now() - <período>` e o período PADRÃO da tela é
+    // 30 DIAS (metrics.js, KANBAN_DEFAULT_PERIOD) — então as seis colunas apareciam ZERADAS,
+    // enquanto a Caixa de Entrada mostrava as 12 conversas normalmente.
+    //
+    // O modo de falha é o pior tipo: a tela não dava erro, não dava aviso, e cada metade estava
+    // certa sozinha. Só foi descoberto quando o Leo ABRIU A TELA e mandou o print — nenhuma das
+    // minhas conferências o pegaria, porque todas mediam o banco e nenhuma media o filtro padrão
+    // de uma tela do outro repositório. Medido em 02/11/2026.
+    //
+    // Ancorar na primeira mensagem conserta e é mais honesto: o lead nasce quando a pessoa
+    // escreve. Quem conversou hoje é lead de hoje; a Beatriz, que escreveu há 80 dias, segue
+    // fora dos 30 dias — e deve ficar, porque ela é cliente antiga cujo contrato está vencendo.
+    const primeira = c.mensagens.reduce(
+      (acc, [d, h]) => {
+        const t = instante(hoje, d, h);
+        return !acc || t < acc ? t : acc;
+      }, null);
 
     conversas.push([
       convId, tenantId, 'whatsapp', c.telefone, 'DIRECT',
       ultima,                              // last_activity_at — é o que ordena a lista
       c.naoLida ? null : ultima,           // last_read_at: null = tem entrada não lida
       ultima,                              // updated_at (último inbound, no produto)
-      instante(hoje, 90, '08:00'),         // created_at
+      primeira,                            // created_at — a conversa nasce na 1ª mensagem
     ]);
 
     // Cadastro: só quem tem contrato entra em person/contact_point. Lead sem contrato ainda não
@@ -429,7 +449,7 @@ function plano({ tenantId, hoje }) {
         l.desfechoNotas || null,
         l.desfechoDiasAtras == null ? null : instante(hoje, l.desfechoDiasAtras, '17:00'),
         l.abordaRenovacao === true ? true : null,
-        instante(hoje, 90, '08:00'),   // created_at
+        primeira,                      // created_at — o lead nasce na 1ª mensagem (filtro do Kanban)
         ultima,                        // updated_at
       ]);
     }
