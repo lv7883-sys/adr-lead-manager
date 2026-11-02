@@ -173,6 +173,47 @@ function perfilDaAssistente() {
 }
 
 /**
+ * A COLUNA QUE A CLÍNICA CRIOU no quadro (migr 188). PURA.
+ *
+ * Decisão do Leo em 02/11/2026: a tela de configurar colunas não fica pronta para a apresentação
+ * de 04/11 (a outra frente está no BI, por ordem dele), então a demonstração mostra o RESULTADO
+ * em vez da configuração.
+ *
+ * ⚠ E isso tem um limite de honestidade que precisa ser dito em voz alta na apresentação: o
+ * quadro prova que o sistema SUPORTA coluna por unidade, não que a MF8 conseguiria criar uma
+ * hoje. Se alguém perguntar "como eu faço isso?", a resposta verdadeira é "a tela está em
+ * construção".
+ *
+ * POR QUE ESTA COLUNA, E NÃO UMA GENÉRICA
+ *
+ * "Aguardando convênio" é um passo que existe numa clínica e em nenhuma escola de música — então
+ * ela demonstra a adaptação ao fluxo real da unidade, que é o ponto. E ela não é inventada no
+ * vácuo: a Clarice Rendell, no cenário, pergunta exatamente "meu convênio cobre a avaliação?" e a
+ * Janis responde que quem confirma cobertura é a recepção. O card e a coluna contam a MESMA
+ * história — a conversa justifica a coluna, em vez de a coluna decorar o quadro.
+ *
+ * E ela vem com `definicao`: é a condição que vai para o prompt do classificador, então a IA
+ * passa a saber sugerir esta coluna. Sem a definição ela existiria no quadro e seria invisível
+ * para a classificação — metade do recurso.
+ */
+function colunasDoKanban() {
+  return {
+    rotulos: {},
+    ocultas: [],
+    extras: [{
+      key: 'x_convenio',
+      label: 'Aguardando convênio',
+      emoji: '🪪',
+      dica: 'A recepção ainda vai confirmar a cobertura',
+      // CONDIÇÃO para a IA (≠ dica, que é texto de tela). Vai para o bloco de etapas do prompt.
+      definicao: 'a pessoa perguntou se o convênio dela cobre o atendimento e a recepção ainda '
+        + 'não confirmou a cobertura',
+      depois: 'novo',
+    }],
+  };
+}
+
+/**
  * `true` quando o tenant pode receber (e perder) o cenário de demonstração.
  *
  * PURA de propósito — mas ela NÃO é a trava, é o AVISO. A trava de verdade é a subconsulta que
@@ -262,10 +303,14 @@ function planoProvisionamento({ tenantId, hoje, slug, maisDias, instante }) {
     {
       tabela: 'lead_manager.tenant_lead_config',
       colunas: ['tenant_id', 'school_name', 'system_prompt_override',
-        'available_instruments', 'business_hours', 'notification_whatsapp'],
+        'available_instruments', 'business_hours', 'notification_whatsapp', 'stage_ui'],
       chaveConflito: ['tenant_id'],
       linhas: [[tenantId, cfg.school_name, cfg.system_prompt_override,
-        cfg.available_instruments, JSON.stringify(cfg.business_hours), cfg.notification_whatsapp]],
+        cfg.available_instruments, JSON.stringify(cfg.business_hours), cfg.notification_whatsapp,
+        // A coluna do quadro vem do SEED e não de um ajuste à mão: configuração feita fora do
+        // plano some na próxima regravação e ninguém descobre por quê. Declarada, ela é
+        // reproduzível e passa pelas três camadas de conferência como o resto.
+        JSON.stringify(colunasDoKanban())]],
     },
     {
       tabela: 'lead_manager.automacao_config',
@@ -288,5 +333,5 @@ function planoProvisionamento({ tenantId, hoje, slug, maisDias, instante }) {
 module.exports = {
   CHAVE_DO_LEAD_MANAGER, NOME_DO_TENANT, MOTIVO_RECUSA,
   tenantDeDemonstracao, assinaturaDaDemonstracao, configDaUnidade, perfilDaAssistente,
-  ehTenantDeDemonstracao, sqlTenantSoSeDemo, planoProvisionamento,
+  ehTenantDeDemonstracao, sqlTenantSoSeDemo, planoProvisionamento, colunasDoKanban,
 };
