@@ -554,6 +554,56 @@ backfill "não era necessário", exatamente quando ele é.
 e o `npm install` segue sem ele. Trocar para `npm ci` mudaria as versões instaladas na imagem —
 é outra decisão, com outro risco, e não se enfia numa correção de "fazer o backfill rodar".
 
+**✅ PUBLICADO em 02/11/2026, 18:13 (SP), autorizado pelo Leo.** Segunda publicação do dia.
+
+```
+medição que TRAVA a ação .... mensagens da Valinhos nos últimos 2 min: 0 → pode seguir
+                              (o script aborta com exit 9 se houver conversa acontecendo)
+pull ....................... 6348e8e..7191132, código de saída 0
+rebuild .................... 18:13:41 → 18:13:44  (3 s; todas as camadas em cache,
+                              porque o build de teste das 13:05 já as tinha produzido)
+imagem ..................... 34373567… → bfc6c3ab…   (trocou: foi este deploy)
+deploy/ na imagem .......... SIM, 16 arquivos
+saúde ...................... ok, healthy
+```
+
+**O comando do runbook rodou, pela primeira vez:**
+
+```
+$ docker exec -w /app adr-lead-manager node deploy/wa-sync-once.js --all
+sync (todos): {"tenants":1,"reconexoes":0,"safety":0,"inseridos":0}        SAIU COM: 0
+
+backfill RASO da Valinhos:
+RASO: {"state":"open","chats":49,"inseridos":0,"erros":0}                  SAIU COM: 0
+```
+
+**49 conversas conferidas contra o histórico do WhatsApp, 0 recuperadas, 0 erros** — nada se
+perdeu nos 3 segundos. E zero ocorrências de erro em toda a saída (152 linhas, varridas inteiras,
+não por `tail`).
+
+**Contagens, antes (18:13:40) e depois (18:15:59):**
+
+| | Valinhos antes | Valinhos depois | clínica |
+|---|---|---|---|
+| messages | 61.957 | **61.957** | 23 → 23 |
+| staff_outbound_samples | 81.395 | **81.395** | 9 → 9 |
+| conversations | 2.305 | **2.305** | 12 → 12 |
+| service_account | 1.139 | **1.139** | 10 → 10 |
+
+As dez datas da clínica: **iguais**. E o Kanban por ramo **sobreviveu** ao segundo deploy —
+clínica `saude` → Avaliação / Em tratamento; Valinhos `null` → Experimental / Matriculado.
+
+### Um achado anotado e NÃO investigado
+
+O backfill raso emitiu **140** eventos `wa_edicao.aplicada` (marcadores de mensagem editada), onde
+a rodada das 10:56 emitira **2**. São UPDATEs, não inserções — as contagens não mudaram — e o
+código de `waSync` não foi tocado por mim, então **não é regressão deste deploy**.
+
+Mas o número sugere que esses marcadores podem estar sendo reaplicados a cada rodada, em vez de
+ficarem resolvidos. Se for isso, todo backfill faz ~140 escritas inúteis e o log fica barulhento
+no lugar errado. **Não investiguei** — está fora do escopo de hoje e eu não quero trocar um
+registro medido por uma hipótese. Fica nomeado para quem for olhar.
+
 **PROVADO POR BUILD, antes de publicar e sem tocar no container no ar** (02/11/2026, 13:05):
 imagem construída com tag própria a partir desta branch, código de saída 0; `/app/deploy` presente
 com os 16 arquivos; e `node deploy/wa-sync-once.js` **sem argumento** respondeu com a própria
