@@ -387,9 +387,72 @@ invalidação**. Se alguém criasse campanha para a clínica *antes* de a ponte 
 errado ficaria em cache até o processo reiniciar. Isso é do adr-whatsapp-scheduler; reportei à
 sessão dona e não toquei.
 
+## O Kanban por ramo (decisão do Leo, 02/11/2026)
+
+Pedido: *"o kanban precisa ser adaptado para uma clínica médica"*. Minha recomendação anterior era
+não mostrar o Kanban; ele decidiu mostrar **adaptado**.
+
+**Por que a tarefa é deste repositório.** `stageCatalog()` é servido em
+`GET /tenant/:id/leads/kanban` no campo `catalog`, e o comentário da própria rota já dizia que o
+dashboard deve **consumir** em vez de espelhar. `dashboard/views/stages.js` é espelho de
+**contingência**, usado só quando esse payload falta. Conferido no meu código antes de aceitar.
+
+**Dos seis rótulos, só dois são de escola** — lista inteira, para a conta ser refeita:
+`Novo` · `Qualificando` · `Qualificado` · **`Experimental`** · **`Matriculado`** · `Perdido`.
+Os motivos de perda (Preço, Horário, Concorrente, Desistiu, Não compareceu, Outro) são neutros, e
+as chaves deles são enum no banco — não mudam.
+
+| coluna | hoje | ramo de saúde |
+|---|---|---|
+| `experimental` | 🎯 Experimental — "Aula experimental agendada" | 🩺 **Avaliação** — "Consulta de avaliação agendada" |
+| `convertido` | 🎓 Matriculado | 🩺 **Em tratamento** |
+
+**O que NÃO muda:** a `key` e o `status`. `experimental`/`EXPERIMENTAL_AGENDADA` e
+`convertido`/`CONVERTED` continuam sendo o que `mover-kanban` espera. Só o texto muda — trocar a
+chave mexeria em `leads.status` já gravado, nas transições e no de-para do arraste, e nada disso
+aparece na tela.
+
+**O default é o de hoje, byte a byte, e isso é a direção da falha.** Ramo ausente → lista
+inalterada. *Medido em produção em 02/11/2026: o `ramo_atividade` da ADR Valinhos está VAZIO*,
+então ela cai no default. Falha ao ler o perfil na rota → `null` → catálogo de hoje: unidade real
+perder o rótulo novo é incômodo; ganhar rótulo de outro ramo por erro de leitura seria defeito na
+tela de quem trabalha.
+
+### Dois achados testando o reconhecedor de ramo, nenhum imaginado
+
+1. **`consultori` é prefixo de "consultorIA".** "consultoria tributária" casava como saúde — o
+   ramo da própria empresa a quem a demonstração é feita. Virou `consultorio`.
+2. **"consultoria tributária para empresas médicas" ainda casava**, por "médicas". Mas o ramo
+   descreve o que a empresa **faz**, não quem ela atende: os clientes da MF8 são empresas, não
+   pacientes. Virou um guarda-chuva de **outro ramo** (ensino + serviços profissionais) que vence
+   a menção a saúde e devolve o default.
+
+### 🔴 ISTO EXIGE PUBLICAR O LEAD MANAGER — e antes não exigia
+
+Medido em 02/11/2026: o LM no ar serve `🎯 Experimental` e `🎓 Matriculado`, e o campo
+`ramo_rotulo` **não existe** no código publicado. Então, ao contrário do cenário (que era só
+dado), o rótulo novo só aparece com **merge na main + `git pull` + rebuild da imagem** em
+`/apps/lead-manager`.
+
+Custo medido, para a decisão não ser no escuro:
+
+- O reinício derruba o LM por alguns segundos. **O webhook dispatcher não tem fila nem retry**:
+  mensagem de WhatsApp que chegar na janela é PERDIDA, e a rede de 3 minutos **não** cobre
+  reinício — pede `deploy/wa-sync-once.js` depois.
+- Volume da Valinhos nas últimas 24h: **11** mensagens de entrada (0,5/hora) e **3** saídas da
+  recepção. Última mensagem 40 min antes desta medição. Então a chance de a janela coincidir com
+  uma mensagem é pequena — e o backfill a recupera.
+- O que sobe junto: tudo deste PR. É aditivo, e a mudança no `stages.js` é idêntica ao de hoje
+  para a Valinhos — provado por teste, não por inspeção.
+
+**Alternativa sem publicar:** não mostrar o Kanban. As telas pedidas (Caixa de Entrada e
+Renovações) não têm nenhum desses dois rótulos e já funcionam com o que está no ar.
+
 ## O que NÃO está feito
 
-- **A TELA RENDERIZADA não foi vista.** O dashboard pede login e eu não digito senha. Abri o
+- **O rótulo novo do Kanban NÃO está no ar** — exige publicar o Lead Manager (ver a seção
+  acima). O que está no ar segue dizendo "Experimental" e "Matriculado 🎓".
+- **A TELA RENDERIZADA não foi vista POR MIM.** O dashboard pede login e eu não digito senha. Abri o
   painel do navegador em `/f/clinica-exemplo/inbox` e ele redirecionou para `/login` — que é o
   comportamento certo, e é onde eu paro. Tudo até a borda da tela está conferido (a régua de
   tenant do dashboard publicado e as 6 rotas HTTP que a tela consome); o que falta é alguém
