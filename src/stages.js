@@ -329,17 +329,114 @@ function isSugestaoAtiva(l) {
   return true;
 }
 
+// ---- RÓTULO POR RAMO (multi-ramo, 02/11/2026) ---------------------------------------------------
+//
+// Dois dos seis rótulos do kanban nasceram numa escola de música: 'Experimental' (de AULA
+// experimental) e 'Matriculado' 🎓. Numa clínica eles mentem na tela. Decisão do Leo em
+// 02/11/2026: o kanban precisa ser adaptado para clínica médica.
+//
+// ⚠ O QUE **NÃO** MUDA, E É O QUE TORNA ISTO BARATO
+//
+// A `key` e o `status` continuam os mesmos: 'experimental' / 'EXPERIMENTAL_AGENDADA',
+// 'convertido' / 'CONVERTED'. Só o TEXTO muda. Trocar a chave mexeria em dado já gravado
+// (`leads.status`), nas transições e no de-para que `mover-kanban` espera — risco desproporcional
+// ao ganho, e nenhum deles aparece na tela.
+//
+// ⚠ E O DEFAULT É O DE HOJE, BYTE POR BYTE
+//
+// Ramo ausente → a lista de hoje, inalterada. Isso não é conveniência: é a direção da falha.
+// A Valinhos é a única unidade real, e **medido em produção em 02/11/2026 o `ramo_atividade` dela
+// está VAZIO** — então ela cai no default e não vê diferença nenhuma. Se um dia alguém preencher
+// o ramo dela com algo de escola, o guarda-chuva de educação abaixo a mantém no default.
+// `test/demo-mf8.test.js` escreve os seis textos de hoje LITERALMENTE e falha se o default mudar.
+//
+// A fonte do ramo é a MESMA que já decide o texto da assistente (`automacao_config.ramo_atividade`,
+// lida por `perfilAssistente.generico`) — não uma segunda régua.
+const ROTULOS_POR_RAMO = Object.freeze({
+  // Saúde: clínica, consultório, odontologia, fisioterapia… O equivalente da aula experimental é
+  // a consulta de AVALIAÇÃO, e o equivalente de matricular é o paciente entrar em TRATAMENTO.
+  saude: Object.freeze({
+    experimental: { label: 'Avaliação', emoji: '🩺', dica: 'Consulta de avaliação agendada' },
+    realizada: { label: 'Avaliação realizada', emoji: '🩺' },
+    convertido: { label: 'Em tratamento', emoji: '🩺' },
+  }),
+});
+
+// Palavras que levam ao conjunto de saúde. Texto livre digitado pela unidade, então a leitura é
+// por palavra-chave — e o modo de falha de não reconhecer é "fica o default", que é seguro.
+// ⚠ `consultorio` e NÃO `consultori`: 'consultori' é prefixo de "consultorIA", e "consultoria
+// tributária" — o ramo da própria empresa a quem a demonstração de 04/11 é feita — passaria a ver
+// "Avaliação" e "Em tratamento" no kanban. Achado testando o matcher, não imaginado.
+const _PALAVRAS_SAUDE = [
+  'clinic', 'clínic', 'consultorio', 'consultório', 'médic', 'medic', 'odonto', 'dentist',
+  'fisioterap', 'ortoped', 'pediatr', 'dermatolog', 'psicolog', 'psiquiatr', 'nutri',
+  'fonoaudio', 'veterinári', 'veterinari', 'hospital', 'laboratóri', 'laboratori',
+  'reabilitaç', 'terapia', 'saúde', 'saude',
+];
+// GUARDA-CHUVA: o ramo descreve o que a empresa FAZ, não quem ela atende. Uma frase que nomeia
+// outro ramo vence a menção a saúde, e o resultado é o default — que é sempre seguro.
+//
+// Isto não é zelo abstrato: "consultoria tributária para empresas médicas" é o ramo da própria
+// empresa a quem a demonstração de 04/11/2026 é feita. Sem este guarda-chuva, se ela virasse
+// cliente e digitasse isso, o kanban dela diria "Avaliação" e "Em tratamento" — os clientes dela
+// são empresas, não pacientes. Achado testando o matcher com o texto real do público.
+//
+// Ensino está aqui porque é a ORIGEM desta régua e o default já é dele ("escola de música para
+// terapeutas" não é clínica).
+const _PALAVRAS_OUTRO_RAMO = [
+  // ensino
+  'escola', 'músic', 'music', 'instrument', 'curso livre', 'aula de',
+  // serviços profissionais: quem presta serviço PARA a saúde não atende paciente
+  'consultoria', 'assessoria', 'contabil', 'contábil', 'advocacia', 'advogad', 'jurídic', 'juridic',
+  'software', 'tecnologia', 'marketing', 'publicidade', 'seguros', 'imobiliári', 'imobiliari',
+];
+
+const _semAcento = (s) => String(s || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+
+/**
+ * Ramo canônico do rótulo, a partir do perfil da assistente. PURA.
+ * @returns {'saude'|null}  null = use o conjunto de hoje (o default)
+ */
+function ramoDoRotulo(perfil) {
+  const cru = perfil && perfil.ramo_atividade;
+  if (!cru || !String(cru).trim()) return null;
+  const t = _semAcento(cru);
+  if (_PALAVRAS_OUTRO_RAMO.some((p) => t.includes(_semAcento(p)))) return null;
+  if (_PALAVRAS_SAUDE.some((p) => t.includes(_semAcento(p)))) return 'saude';
+  return null;
+}
+
+/** Rótulo/emoji/dica de um estágio, já resolvidos pelo ramo. PURA. */
+function rotuloDoEstagio(stage, perfil) {
+  const ramo = ramoDoRotulo(perfil);
+  const over = (ramo && ROTULOS_POR_RAMO[ramo] && ROTULOS_POR_RAMO[ramo][stage.key]) || null;
+  return {
+    label: over && over.label ? over.label : stage.label,
+    emoji: over && over.emoji ? over.emoji : stage.emoji,
+    dica: (over && 'dica' in over ? over.dica : stage.dica) || null,
+  };
+}
+
 // ---- catálogo servido ao dashboard (o dashboard CONSOME isto; não espelha) ----------------------
 // Só apresentação/estrutura — sem funções (serializável em JSON). Uma fonte, servida na API.
-function stageCatalog() {
+//
+// `perfil` é opcional: sem ele, o catálogo é o de hoje. `dashboard/views/stages.js` é ESPELHO DE
+// CONTINGÊNCIA (usado só quando este payload falta) — quem rotula é aqui.
+function stageCatalog(perfil) {
   return {
-    stages: KANBAN_STAGES.map((s) => ({
-      key: s.key, status: s.status, emoji: s.emoji, label: s.label,
-      dica: s.dica || null, auto: !!s.auto, requerMotivo: !!s.requerMotivo,
-    })),
+    stages: KANBAN_STAGES.map((s) => {
+      const r = rotuloDoEstagio(s, perfil);
+      return {
+        key: s.key, status: s.status, emoji: r.emoji, label: r.label,
+        dica: r.dica, auto: !!s.auto, requerMotivo: !!s.requerMotivo,
+      };
+    }),
     transicoes: KANBAN_TRANSICOES,
     key_to_status: KEY_TO_STATUS,
     motivos_perda: MOTIVOS_PERDA,
+    // Diz ao consumidor QUAL conjunto foi aplicado — sem isso, "por que está escrito Avaliação?"
+    // só se responde lendo código. null = o conjunto de hoje.
+    ramo_rotulo: ramoDoRotulo(perfil),
   };
 }
 
@@ -364,5 +461,6 @@ module.exports = {
   PERDIDO_DESFECHOS, CLIENTE_DESFECHO, MOTIVOS_PERDA, AULA_REALIZADA, AULA_COM_MATRICULA, KANBAN_TRANSICOES, KEY_TO_STATUS, STATUS_TO_KEY,
   stageKey, stageOfLead, isStage, stageSql,
   detectSql, funilBucketSql, temFatoExtranetSql, renovacaoSql, stageCatalog, loadStages,
+  ROTULOS_POR_RAMO, ramoDoRotulo, rotuloDoEstagio,
   terminalParaSugestaoSql, sugestaoAtivaSql, isSugestaoAtiva,
 };

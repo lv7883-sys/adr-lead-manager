@@ -179,7 +179,21 @@ router.get('/:tenantId/leads/kanban', authenticate, requireTenantAccess(READ_ROL
     // Passo 1: além das colunas, serve o CATÁLOGO da régua canônica (labels/emoji/dica/transições/
     // motivos) pro dashboard CONSUMIR em vez de espelhar. Aditivo — os consumidores atuais leem
     // k.novo/k.qualificando/… e seguem intactos.
-    res.json({ ...(await computeKanban(req.tenantId, { period })), catalog: stages.stageCatalog() });
+    //
+    // 02/11/2026 — RÓTULO POR RAMO: o catálogo passa a receber o perfil da assistente, porque é
+    // `ramo_atividade` que decide se a coluna se chama "Experimental" (escola) ou "Avaliação"
+    // (clínica). Mesma fonte que já decide o texto da assistente, não uma segunda régua.
+    //
+    // Falha FECHADA de propósito: erro ao ler o perfil → `null` → catálogo de HOJE. Unidade real
+    // perder o rótulo novo é um incômodo; unidade real ganhar rótulo de outro ramo por causa de
+    // um erro de leitura seria um defeito na tela de quem trabalha.
+    const perfilRotulo = await withTenant(req.tenantId, (c) => c
+      .query('SELECT ramo_atividade FROM automacao_config WHERE tenant_id = $1', [req.tenantId])
+      .then((r) => r.rows[0] || null)).catch(() => null);
+    res.json({
+      ...(await computeKanban(req.tenantId, { period })),
+      catalog: stages.stageCatalog(perfilRotulo),
+    });
   } catch (err) {
     logger.error('tenant.kanban.error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });

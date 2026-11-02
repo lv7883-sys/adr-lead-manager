@@ -444,6 +444,111 @@ test('o Lead Manager não tem campo de formulário com exemplo pré-escrito', ()
     `placeholder que não é de mídia — decidir o vocabulário por ramo:\n${suspeitas.join('\n')}`);
 });
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// F. O KANBAN POR RAMO (decisão do Leo em 02/11: "o kanban precisa ser adaptado para uma
+//    clínica médica"). A régua é `src/stages.js` e o catálogo é servido em
+//    GET /tenant/:id/leads/kanban — `dashboard/views/stages.js` é ESPELHO de contingência.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+const stages = require('../src/stages');
+
+// ⭐ Os SEIS textos de hoje, escritos à mão de propósito. É este teste que protege a ADR Valinhos:
+// se alguém mudar o default, ele cai. Derivar esta lista do próprio código faria o teste
+// concordar com qualquer mudança — seria um espelho, não uma trava.
+const COLUNAS_DE_HOJE = [
+  { key: 'novo', status: 'NEW', emoji: '🆕', label: 'Novo', dica: 'Novos leads aparecerão aqui' },
+  { key: 'qualificando', status: 'QUALIFYING', emoji: '🔍', label: 'Qualificando', dica: 'Leads em conversa ativa' },
+  { key: 'qualificado', status: 'QUALIFIED', emoji: '✅', label: 'Qualificado', dica: null },
+  { key: 'experimental', status: 'EXPERIMENTAL_AGENDADA', emoji: '🎯', label: 'Experimental', dica: 'Aula experimental agendada' },
+  { key: 'convertido', status: 'CONVERTED', emoji: '🎓', label: 'Matriculado', dica: null },
+  { key: 'perdido', status: 'PERDIDO', emoji: '❌', label: 'Perdido', dica: null },
+];
+const resumoDoCatalogo = (perfil) => stages.stageCatalog(perfil).stages
+  .map((s) => ({ key: s.key, status: s.status, emoji: s.emoji, label: s.label, dica: s.dica }));
+
+test('⭐ SEM ramo, o catálogo é o de HOJE byte a byte — é isto que protege a ADR Valinhos', () => {
+  // Medido em produção em 02/11/2026: `automacao_config.ramo_atividade` da ADR Valinhos está
+  // VAZIO. Então ela cai aqui, e aqui nada mudou.
+  for (const perfil of [undefined, null, {}, { ramo_atividade: '' }, { ramo_atividade: '   ' }]) {
+    assert.deepEqual(resumoDoCatalogo(perfil), COLUNAS_DE_HOJE,
+      `o default mudou para perfil ${JSON.stringify(perfil)}`);
+  }
+  assert.equal(stages.stageCatalog().ramo_rotulo, null);
+});
+
+test('ramo de escola também cai no default — o guarda-chuva de ensino vence', () => {
+  for (const r of ['escola de música', 'Escola de Música e Artes', 'aula de violão',
+    'escola de música para terapeutas']) {
+    assert.equal(stages.ramoDoRotulo({ ramo_atividade: r }), null, `${r} não deveria virar saúde`);
+    assert.deepEqual(resumoDoCatalogo({ ramo_atividade: r }), COLUNAS_DE_HOJE);
+  }
+});
+
+test('ramo de clínica troca SÓ os dois rótulos de escola, e nada mais', () => {
+  const clinica = resumoDoCatalogo({ ramo_atividade: 'clínica ortopédica' });
+  assert.equal(stages.stageCatalog({ ramo_atividade: 'clínica ortopédica' }).ramo_rotulo, 'saude');
+  // os dois que mudam
+  assert.deepEqual(clinica.find((s) => s.key === 'experimental'),
+    { key: 'experimental', status: 'EXPERIMENTAL_AGENDADA', emoji: '🩺', label: 'Avaliação', dica: 'Consulta de avaliação agendada' });
+  assert.deepEqual(clinica.find((s) => s.key === 'convertido'),
+    { key: 'convertido', status: 'CONVERTED', emoji: '🩺', label: 'Em tratamento', dica: null });
+  // os outros QUATRO ficam idênticos ao default
+  for (const k of ['novo', 'qualificando', 'qualificado', 'perdido']) {
+    assert.deepEqual(clinica.find((s) => s.key === k), COLUNAS_DE_HOJE.find((s) => s.key === k),
+      `a coluna ${k} mudou e não devia`);
+  }
+  // e nenhum rótulo de escola sobra na tela da clínica
+  const texto = clinica.map((s) => `${s.label} ${s.dica || ''}`).join(' ');
+  for (const p of ['Experimental', 'Matriculado', 'aula', 'Aula', 'escola']) {
+    assert.ok(!texto.includes(p), `o kanban da clínica ainda diz ${JSON.stringify(p)}`);
+  }
+});
+
+test('a CHAVE e o STATUS não mudam com o ramo — é o que mover-kanban espera', () => {
+  // Trocar a chave mexeria em `leads.status` já gravado, nas transições e no de-para do arraste.
+  const chaves = (p) => stages.stageCatalog(p).stages.map((s) => `${s.key}:${s.status}`);
+  assert.deepEqual(chaves({ ramo_atividade: 'clínica ortopédica' }), chaves(null));
+  // e o resto do catálogo (transições, de-para, motivos de perda) é o mesmo objeto de sempre
+  const a = stages.stageCatalog({ ramo_atividade: 'clínica' });
+  const b = stages.stageCatalog(null);
+  assert.deepEqual(a.transicoes, b.transicoes);
+  assert.deepEqual(a.key_to_status, b.key_to_status);
+  assert.deepEqual(a.motivos_perda, b.motivos_perda);
+});
+
+test('o ramo descreve o que a empresa FAZ, não quem ela atende', () => {
+  // ⚠ Este caso é o ramo da própria empresa a quem a demonstração de 04/11 é feita. Sem o
+  // guarda-chuva, ela veria "Avaliação" e "Em tratamento" — e os clientes dela são empresas.
+  assert.equal(stages.ramoDoRotulo({ ramo_atividade: 'consultoria tributária para empresas médicas' }), null);
+  assert.equal(stages.ramoDoRotulo({ ramo_atividade: 'consultoria tributária' }), null);
+  assert.equal(stages.ramoDoRotulo({ ramo_atividade: 'assessoria contábil para clínicas' }), null);
+  assert.equal(stages.ramoDoRotulo({ ramo_atividade: 'software para consultórios médicos' }), null);
+  // e o que é atendimento a paciente de verdade continua casando
+  for (const r of ['clínica ortopédica', 'consultório odontológico', 'Clinica de Fisioterapia',
+    'laboratório de análises clínicas', 'clínica de reabilitação']) {
+    assert.equal(stages.ramoDoRotulo({ ramo_atividade: r }), 'saude', `${r} deveria ser saúde`);
+  }
+  // ramo que não é nem um nem outro: default, que é sempre o seguro
+  for (const r of ['pet shop', 'academia de ginástica', 'estúdio de tatuagem']) {
+    assert.equal(stages.ramoDoRotulo({ ramo_atividade: r }), null);
+  }
+});
+
+test('o catálogo diz QUAL conjunto aplicou — senão "por que está escrito Avaliação?" só se responde lendo código', () => {
+  assert.equal(stages.stageCatalog({ ramo_atividade: 'clínica ortopédica' }).ramo_rotulo, 'saude');
+  assert.equal(stages.stageCatalog({ ramo_atividade: 'escola de música' }).ramo_rotulo, null);
+  assert.equal(stages.stageCatalog().ramo_rotulo, null);
+});
+
+test('a unidade de demonstração cai no conjunto de saúde — pelo perfil que o seed grava', () => {
+  // A ligação que importa: o ramo que `tenant-demo.perfilDaAssistente()` grava é o MESMO que o
+  // catálogo lê. Se alguém mudar o texto do ramo da demo, este teste diz que o kanban mudou junto.
+  const perfil = demo.perfilDaAssistente();
+  assert.equal(stages.ramoDoRotulo(perfil), 'saude');
+  const c = resumoDoCatalogo(perfil);
+  assert.equal(c.find((s) => s.key === 'experimental').label, 'Avaliação');
+  assert.equal(c.find((s) => s.key === 'convertido').label, 'Em tratamento');
+});
+
 test('o resumo conta linhas de verdade, e o cenário tem tamanho de roteiro de 10 minutos', () => {
   const r = cenario.resumo({ tenantId: TENANT, hoje: HOJE });
   assert.equal(r.tabelas, 10);
