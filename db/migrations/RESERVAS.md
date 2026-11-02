@@ -25,7 +25,8 @@ colisão de 20/09/2026 (faixa 140–149 ocupada por engano por duas frentes ao m
 | **185** | **boas-vindas** | 185 data_matricula no contrato (âncora da régua = matrícula, não início das aulas) | não — pronta para aplicar |
 | **186** | **boas-vindas** | 186 boas_vindas_inclusao (a recepção inclui quem a régua deixou de fora) | não — pronta para aplicar |
 | **187** | **demonstração MF8** | 187 `is_demo` em `lead_manager.tenants` — portão do seed da unidade de demonstração (apresentação de 04/11/2026) | não — pronta para aplicar |
-| 188–199 | livre | — | — |
+| **188** | **kanban por unidade** | 188 `stage_ui` em tenant_lead_config + `etapa_custom` em leads — renomear, esconder e acrescentar coluna (pedido do Leo 02/11/2026) | não — pronta para aplicar |
+| 189–199 | livre | — | — |
 
 ## Nome do contato: a fonte é `lead_manager.contato_agenda` (184)
 

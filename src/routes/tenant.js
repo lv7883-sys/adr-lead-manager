@@ -13,6 +13,7 @@ const { requireTenantRole, requireTenantAccess } = require('../rbac');
 const { patchLeadConfig } = require('../leadConfig');
 const { isUuid } = require('../validation');
 const { prepararLeadManual } = require('../leadManual');   // lead que a recepção digita (02/11/2026)
+const stagesUi = require('../stagesUi');   // colunas do kanban por unidade (migr 188)
 const { fromLegacy, canonicaliza, validaHorarioJson, normaliza, minToHm } = require('../horario'); // H1: horário por-dia
 const logger = require('../logger');
 const { resumoPlantao } = require('../plantao');   // ADR-040: plantão (resumo de saúde)
@@ -188,12 +189,25 @@ router.get('/:tenantId/leads/kanban', authenticate, requireTenantAccess(READ_ROL
     // Falha FECHADA de propósito: erro ao ler o perfil → `null` → catálogo de HOJE. Unidade real
     // perder o rótulo novo é um incômodo; unidade real ganhar rótulo de outro ramo por causa de
     // um erro de leitura seria um defeito na tela de quem trabalha.
-    const perfilRotulo = await withTenant(req.tenantId, (c) => c
-      .query('SELECT ramo_atividade FROM automacao_config WHERE tenant_id = $1', [req.tenantId])
+    // 02/11/2026 — e as COLUNAS DA UNIDADE (migr 188): renomear, esconder, acrescentar. Validado
+    // na leitura também, não só na escrita: configuração gravada por uma versão anterior do
+    // validador não pode derrubar o quadro de quem abre a tela. Inválida → quadro canônico, que
+    // é sempre desenhável.
+    const cfgTela = await withTenant(req.tenantId, (c) => c
+      .query(`SELECT a.ramo_atividade, lc.stage_ui
+                FROM tenant_lead_config lc
+                LEFT JOIN automacao_config a ON a.tenant_id = lc.tenant_id
+               WHERE lc.tenant_id = $1`, [req.tenantId])
       .then((r) => r.rows[0] || null)).catch(() => null);
+    const v = stagesUi.validarConfig(cfgTela && cfgTela.stage_ui, stages.KANBAN_KEYS);
+    const stageUi = v.ok ? v.config : null;
+    if (!v.ok) {
+      logger.warn('tenant.kanban.stage_ui_invalida', { tenant_id: req.tenantId, erro: v.erro });
+    }
+    const catalog = stages.stageCatalog(cfgTela, stageUi);
     res.json({
-      ...(await computeKanban(req.tenantId, { period })),
-      catalog: stages.stageCatalog(perfilRotulo),
+      ...(await computeKanban(req.tenantId, { period, colunasExtras: catalog.extras })),
+      catalog,
     });
   } catch (err) {
     logger.error('tenant.kanban.error', { tenant_id: req.tenantId, error: err.message });
@@ -264,7 +278,43 @@ async function _aplicarMoverEtapa(c, { tenantId, id, destCol, desfecho, autor, n
 router.put('/:tenantId/leads/:id/mover-kanban', authenticate, requireTenantAccess(WRITE_ROLES), async (req, res) => {
   const { id } = req.params;
   if (!isUuid(id)) return res.status(400).json({ error: 'invalid lead id' });
-  const destCol = _KANBAN_DEST_COL[String(req.body?.destino || '').trim()];
+  const destinoCru = String(req.body?.destino || '').trim();
+
+  // ⭐ COLUNA CRIADA PELA UNIDADE (migr 188): o destino não é um status, é uma VISTA.
+  //
+  // Arrastar para uma coluna extra grava `etapa_custom` e NÃO MEXE em `status` — o lead continua
+  // na etapa canônica dele para o funil, o BI e as taxas. É isso que torna a coluna extra barata:
+  // ela organiza o quadro sem reescrever o que a empresa mede.
+  //
+  // Não passa por `_aplicarMoverEtapa` de propósito: aquilo valida transição, exige motivo de
+  // perda e registra mudança de ETAPA. Nada disso se aplica a um card que não mudou de etapa.
+  if (destinoCru.startsWith(stagesUi.PREFIXO_EXTRA)) {
+    try {
+      const out = await withTenant(req.tenantId, async (c) => {
+        // A coluna tem de EXISTIR na configuração desta unidade. Sem esta conferência, um destino
+        // digitado errado gravaria um `etapa_custom` que nenhuma coluna desenha — e o card
+        // sumiria do quadro. (Ele voltaria à coluna canônica pelo fallback do computeKanban, mas
+        // o lead teria ficado com um valor que ninguém reconhece.)
+        const cfg = (await c.query('SELECT stage_ui FROM tenant_lead_config WHERE tenant_id = $1', [req.tenantId])).rows[0];
+        const v = stagesUi.validarConfig(cfg && cfg.stage_ui, stages.KANBAN_KEYS);
+        const existe = v.ok && v.config.extras.some((e) => e.key === destinoCru);
+        if (!existe) return { semColuna: true };
+        const r = await c.query(
+          'UPDATE leads SET etapa_custom = $3, updated_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING id, status, etapa_custom',
+          [id, req.tenantId, destinoCru]);
+        return { row: r.rows[0] || null };
+      });
+      if (out.semColuna) return res.status(400).json({ error: 'coluna_inexistente', detail: `A coluna ${destinoCru} não está configurada nesta unidade.` });
+      if (!out.row) return res.status(404).json({ error: 'lead not found' });
+      logger.info('tenant.lead.kanban_coluna_extra', { tenant_id: req.tenantId, lead_id: id, destino: destinoCru, by: req.tenantRole });
+      return res.json({ ok: true, coluna: destinoCru, extra: true, ...out.row });
+    } catch (err) {
+      logger.error('tenant.lead.kanban_extra_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+      return res.status(500).json({ error: 'internal error' });
+    }
+  }
+
+  const destCol = _KANBAN_DEST_COL[destinoCru];
   if (!destCol) return res.status(400).json({ error: 'destino inválido' });
   const desfecho = typeof req.body?.desfecho === 'string' ? req.body.desfecho.trim() : '';
   if (destCol === 'perdido' && !PERDIDO_DESFECHOS.includes(desfecho)) {
@@ -278,6 +328,13 @@ router.put('/:tenantId/leads/:id/mover-kanban', authenticate, requireTenantAcces
       const antes = (await c.query(
         'SELECT status, desfecho, desfecho_em, suggested_stage, stage_reasoning, stage_suggested_at FROM leads WHERE id = $1', [id])).rows[0];
       const r = await _aplicarMoverEtapa(c, { tenantId: req.tenantId, id, destCol, desfecho, autor: req.tenantRole, nota, limparSugestao: true });
+      // Voltar para uma coluna da régua LIMPA a coluna extra: senão o card ficaria preso na
+      // coluna criada pela unidade (ela tem precedência no desenho) e a pessoa arrastaria sem
+      // ver efeito nenhum — o pior tipo de "não funciona", porque não dá erro.
+      if (!r.notFound && !r.invalid) {
+        await c.query('UPDATE leads SET etapa_custom = NULL WHERE id = $1 AND tenant_id = $2 AND etapa_custom IS NOT NULL',
+          [id, req.tenantId]);
+      }
       if (!antes || r.notFound || r.invalid) return r;
       return { ...r, snapshot: {
         lead_id: id, kind: 'stage', restore_path: 'sugestao-etapa/restaurar', toast_msg: 'Etapa restaurada.',
@@ -415,6 +472,65 @@ router.get('/:tenantId/leads/:id/eventos', authenticate, requireTenantAccess(REA
     res.json({ ok: true, eventos });
   } catch (err) {
     logger.error('tenant.lead.eventos_error', { tenant_id: req.tenantId, lead_id: id, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET/PUT /tenant/:tid/kanban/colunas — como ESTA unidade quer ver o quadro (migr 188).
+//
+// Renomear, esconder e acrescentar coluna. ⚠ É só APARÊNCIA e POSIÇÃO: o funil, o BI e as taxas
+// de conversão continuam lendo `status`/`desfecho` e medindo as mesmas cinco etapas. Ver o
+// cabeçalho de src/stagesUi.js para a medição que obrigou esse desenho.
+router.get('/:tenantId/kanban/colunas', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    const row = await withTenant(req.tenantId, (c) => c
+      .query(`SELECT a.ramo_atividade, lc.stage_ui FROM tenant_lead_config lc
+                LEFT JOIN automacao_config a ON a.tenant_id = lc.tenant_id
+               WHERE lc.tenant_id = $1`, [req.tenantId]).then((r) => r.rows[0] || null));
+    const v = stagesUi.validarConfig(row && row.stage_ui, stages.KANBAN_KEYS);
+    res.json({
+      ok: true,
+      config: v.ok ? v.config : { rotulos: {}, ocultas: [], extras: [] },
+      invalida: v.ok ? null : { erro: v.erro, detalhe: v.detalhe },
+      // o quadro canônico desta unidade (já por ramo), para a tela saber o que ela está mudando
+      canonicas: stages.stageCatalog(row).stages,
+      limites: { max_extras: stagesUi.MAX_EXTRAS, max_label: stagesUi.MAX_LABEL, prefixo_extra: stagesUi.PREFIXO_EXTRA },
+    });
+  } catch (err) {
+    logger.error('tenant.kanban.colunas_get_error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// Mudar o quadro é decisão de gestão, não da recepção: esconder uma coluna muda o que a equipe
+// inteira vê. ADMIN_ROLES, como a configuração de automação.
+router.put('/:tenantId/kanban/colunas', authenticate, requireTenantAccess(['TENANT_ADMIN']), async (req, res) => {
+  try {
+    const saida = await withTenant(req.tenantId, async (c) => {
+      // ⭐ A CONTAGEM POR COLUNA ENTRA NA VALIDAÇÃO, e é o ponto todo da recusa 3: esconder uma
+      // coluna que tem card é esconder LEAD. Sem este número, o validador não confere essa regra
+      // — e ele diz isso no próprio contrato, em vez de fingir que conferiu.
+      const { rows } = await c.query(
+        `SELECT ${stages.stageSql('l')} AS coluna, count(*)::int AS n
+           FROM leads l
+          WHERE l.tenant_id = $1 AND l.status NOT IN ('NOT_LEAD', 'REVIEW_QUEUE')
+          GROUP BY 1`, [req.tenantId]);
+      const cards = Object.fromEntries(rows.map((r) => [r.coluna, r.n]));
+      const v = stagesUi.validarConfig(req.body && req.body.config, stages.KANBAN_KEYS, cards);
+      if (!v.ok) return { recusa: v };
+      await c.query('UPDATE tenant_lead_config SET stage_ui = $2, updated_at = now() WHERE tenant_id = $1',
+        [req.tenantId, JSON.stringify(v.config)]);
+      return { config: v.config, cards };
+    });
+    if (saida.recusa) return res.status(400).json({ error: saida.recusa.erro, detail: saida.recusa.detalhe });
+    logger.info('tenant.kanban.colunas_salvas', {
+      tenant_id: req.tenantId,
+      extras: saida.config.extras.length, ocultas: saida.config.ocultas.length,
+      renomeadas: Object.keys(saida.config.rotulos).length,
+    });
+    res.json({ ok: true, config: saida.config });
+  } catch (err) {
+    logger.error('tenant.kanban.colunas_put_error', { tenant_id: req.tenantId, error: err.message });
     res.status(500).json({ error: 'internal error' });
   }
 });

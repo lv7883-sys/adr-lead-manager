@@ -1073,7 +1073,7 @@ const { PERDIDO_DESFECHOS, KANBAN_TRANSICOES } = stages;
 // final; PERDIDO preserva o status — NÃO vira NOT_LEAD). Delegado a stages.stageKey.
 const kanbanColuna = stageKey;
 
-async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) {
+async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD, colunasExtras = [] } = {}) {
   const days = KANBAN_PERIODS[period] || KANBAN_PERIODS[KANBAN_DEFAULT_PERIOD];
   return withTenant(tenantId, async (c) => {
     const rows = (
@@ -1102,6 +1102,7 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
             WHERE tenant_id = $1 AND status = 'PENDING' GROUP BY 1
          )
          SELECT l.id, l.name, l.phone, l.status, l.intent, l.desfecho, l.desfecho_em, l.created_at, l.temperatura_manual,
+               l.etapa_custom,
                 -- o veredito da IA passa a chegar aqui: o badge de urgência do kanban decidia só
                 -- por timestamp e contradizia a Fila de Ação sobre o mesmo lead (ver src/bola.js).
                 l.conversation_state, l.state_computed_at,
@@ -1125,6 +1126,8 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
 
     const agora = Date.now();
     const cols = { novo: [], qualificando: [], qualificado: [], experimental: [], convertido: [], perdido: [] };
+    // Colunas que a UNIDADE criou (migr 188). Nascem vazias e so recebem quem tem etapa_custom.
+    for (const k of colunasExtras) if (!cols[k]) cols[k] = [];
     for (const l of rows) {
       const lin = l.last_in_turno ? new Date(l.last_in_turno).getTime() : null;   // decide: só turno de verdade
       const lout = l.last_out ? new Date(l.last_out).getTime() : null;
@@ -1144,7 +1147,17 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
         esperandoSeg = Math.max(0, Math.round((agora - posse.desde) / 1000));
       }
       const ultimaMsgMs = Math.max(lin || 0, lout || 0) || null;
-      const coluna = kanbanColuna(l.status, l.desfecho);
+      // ⭐ ONDE O CARD APARECE. `etapa_custom` (migr 188) é VISTA, não estado: ela muda a coluna
+      // do quadro e NÃO toca em `status` — então o funil, o BI e as taxas seguem medindo as
+      // mesmas cinco etapas. Guardar isso em `status` faria o lead cair em 'qualificando' por
+      // ELIMINAÇÃO (o `ELSE` de stages.stageSql(), medido) e ser contado DUAS vezes: na coluna
+      // extra do quadro E como qualificando em todo o resto, sem erro nenhum.
+      //
+      // E coluna extra que a unidade APAGOU depois deixa o lead órfão — `cols[custom]` não
+      // existe, e o card volta sozinho para a coluna canônica dele. Falha fechada: o lead
+      // reaparece onde sempre esteve, em vez de sumir do quadro.
+      const custom = l.etapa_custom || null;
+      const coluna = (custom && cols[custom]) ? custom : kanbanColuna(l.status, l.desfecho);
       // 079: a régua canônica tem estágios que NÃO são coluna ('realizada', 'cliente'). O WHERE já
       // os exclui; a guarda existe para que um estágio novo nunca derrube o kanban com cols[x].push.
       if (!cols[coluna]) continue;
@@ -1160,6 +1173,7 @@ async function computeKanban(tenantId, { period = KANBAN_DEFAULT_PERIOD } = {}) 
         tempo_coluna_seg: Math.max(0, Math.round((agora - new Date(ref).getTime()) / 1000)),
         // ADR sugestão-de-etapa: chip "IA sugere → etapa" no card do kanban.
         suggested_stage: l.suggested_stage || null, stage_reasoning: l.stage_reasoning || null,
+        etapa_custom: l.etapa_custom || null,
       });
     }
     // ordena: urgentes primeiro, depois mais recentes.

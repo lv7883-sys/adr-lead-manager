@@ -40,7 +40,7 @@ PSQL_DSN   ?= $(ADM_PLATAFORMA)
 UNIT_TESTS := test/plataforma.test.js test/origem-lead.test.js test/ia-wrapper.test.js \
               test/sdk-ia-sem-atalho.test.js test/anonimizacao-ordem-migracao.test.js \
               test/webhook.test.js test/waConteudo.test.js test/ingestao.test.js \
-              test/marketing-config.test.js test/demo-mf8.test.js test/lead-manual.test.js
+              test/marketing-config.test.js test/demo-mf8.test.js test/lead-manual.test.js \n              test/kanban-colunas.test.js
 
 # Demonstração MF8: a CAMADA 1 do seed, que depende do esquema congelado de produção
 # (test/fixtures/esquema-demo.json, gerado por deploy/dump-esquema-demo.js). Fora de UNIT_TESTS
