@@ -535,11 +535,24 @@ E rodar no host também falha, por outro motivo: o `DATABASE_URL` e o endereço 
 NOMES DE CONTAINER, que o host não resolve (`EAI_AGAIN`). O caminho que funcionou foi copiar o
 script para dentro de `/app/` e rodar ali — mas isso é contorno, não procedimento.
 
-**Consequência prática:** o passo de backfill do runbook é inexecutável como está escrito, e o
-modo de falha é silencioso — quem seguir o runbook vê um erro de módulo e pode concluir que o
-backfill "não era necessário". Conserto: incluir `deploy/` na imagem (uma linha no `Dockerfile`),
-ou reescrever o passo do runbook com o caminho real. **Não consertei** — é mudança no `Dockerfile`,
-que muda a imagem publicada, e a publicação de hoje já foi autorizada para outra coisa.
+**Consequência prática:** o passo de backfill era inexecutável como estava escrito, e o modo de
+falha era silencioso — quem seguisse o runbook veria um erro de módulo e poderia concluir que o
+backfill "não era necessário", exatamente quando ele é.
+
+**✅ CONSERTADO em 02/11/2026, autorizado pelo Leo.** Duas mudanças:
+
+1. `COPY deploy ./deploy` no `Dockerfile` — **pela mesma razão que já estava escrita duas linhas
+   acima, para `scripts/`**. O achado, em forma afiada: não faltava uma linha, faltava estender
+   uma lição que o próprio arquivo já documentava uma linha acima de onde ela falhava.
+2. O cabeçalho de `deploy/wa-sync-once.js` virou runbook de verdade: diz **onde** rodar (dentro
+   do container, com o comando exato, porque os endereços são nomes de container e no host dá
+   `EAI_AGAIN`) e **como ler o número** — que `--all` devolve `inseridos: 0` tanto para "nada
+   faltava" quanto para "não fui ver", e qual é o comando do backfill raso, que devolve
+   `chats: N` e com isso prova que foi olhar.
+
+**O que NÃO entrou nesse conserto, de propósito:** o `package-lock.json` continua fora do `COPY`
+e o `npm install` segue sem ele. Trocar para `npm ci` mudaria as versões instaladas na imagem —
+é outra decisão, com outro risco, e não se enfia numa correção de "fazer o backfill rodar".
 
 ### Como exigir isto (o que exigiu publicar)
 
