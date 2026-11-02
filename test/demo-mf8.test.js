@@ -1,0 +1,369 @@
+'use strict';
+//
+// Demonstração do Lead Manager para a MF8 (04/11/2026) — testes PUROS, sem banco.
+//
+// Cobrem três coisas diferentes, e vale saber qual é qual:
+//
+//   A. As INVARIANTES do tenant de demonstração (o que contém os efeitos externos). Errar aqui
+//      é a unidade fictícia entrar nos laços de fundo ou ganhar permissão de mandar WhatsApp.
+//   B. O AVALIADOR DE CHECK da camada 1, incluindo o que ele RECUSA. Avaliador que passa calado
+//      numa expressão que não entendeu é pior que nenhum: vira trava com nome de trava.
+//   C. A COERÊNCIA do cenário (telefone da conversa × do lead, destinatário do toque, nenhum
+//      valor em dinheiro, determinismo).
+//
+// A conferência do plano contra o esquema REAL de produção está em demo-mf8-esquema.test.js,
+// porque depende do dump congelado — e um teste que precisa de arquivo gerado não pode se
+// misturar com os que rodam em qualquer máquina.
+//
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const demo = require('../src/demo/tenant-demo');
+const cenario = require('../src/demo/cenario-mf8');
+const { avaliaCheck, normalizaDefinicao } = require('../src/demo/check-sql');
+const { confere } = require('../src/demo/conformidade');
+
+const TENANT = '11111111-2222-4333-8444-555555555555';
+const HOJE = '2026-11-04';   // o dia da apresentação
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// A. As invariantes do tenant de demonstração
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('o tenant de demonstração fica FORA de todos os laços de fundo (lead_manager_active=false)', () => {
+  const t = demo.tenantDeDemonstracao({ slug: 'clinica-exemplo' });
+  // tenants_active() é `WHERE lead_manager_active` (migr 031) e TODA rotina de fundo lê dela.
+  assert.equal(t.lead_manager_active, false);
+});
+
+test('o tenant de demonstração tem is_demo=true — sem isso o portão do seed não existe', () => {
+  const t = demo.tenantDeDemonstracao({ slug: 'clinica-exemplo' });
+  assert.equal(t.is_demo, true);
+  assert.equal(demo.ehTenantDeDemonstracao(t), true);
+});
+
+test('nenhuma credencial de envio: sem token, não há remetente para resolver', () => {
+  const t = demo.tenantDeDemonstracao({ slug: 'clinica-exemplo' });
+  assert.equal(t.evolution_token_enc, null);
+  assert.equal(t.zapi_token, null);
+  // E o nome da instância se denuncia: quem a procurar na Evolution lê que ela não existe.
+  assert.match(t.evolution_instance, /^demo-sem-whatsapp-/);
+});
+
+test('o envio automático de renovação fica DESLIGADO (a tela mostra o interruptor)', () => {
+  const p = demo.perfilDaAssistente();
+  assert.equal(p.renovacao_auto_envio, false);
+  // E o módulo de boas-vindas, que dispara mensagem de hora em hora, fica fora.
+  assert.equal(p.boas_vindas_modo, 'desligado');
+});
+
+test('a lista de cursos fica VAZIA — preenchê-la faria a IA oferecer procedimento clínico', () => {
+  const c = demo.configDaUnidade({ nomeExibido: 'Clínica X' });
+  assert.deepEqual(c.available_instruments, []);
+  assert.equal(c.notification_whatsapp, '');   // sem destino de notificação
+});
+
+test('ehTenantDeDemonstracao falha FECHADO: tenant sem a flag (ou sem a migração) é recusado', () => {
+  assert.equal(demo.ehTenantDeDemonstracao(null), false);
+  assert.equal(demo.ehTenantDeDemonstracao({}), false);               // banco sem a migr 187
+  assert.equal(demo.ehTenantDeDemonstracao({ is_demo: 'true' }), false); // texto não vale
+  assert.equal(demo.ehTenantDeDemonstracao({ is_demo: 1 }), false);
+});
+
+test('o portão é SQL: a subconsulta exige is_demo e devolve NULL em tenant real', () => {
+  const sql = demo.sqlTenantSoSeDemo(1);
+  assert.match(sql, /SELECT id FROM lead_manager\.tenants WHERE id = \$1 AND is_demo/);
+  assert.throws(() => demo.sqlTenantSoSeDemo(0), /posição de parâmetro inválida/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// B. O avaliador de CHECK — e, principalmente, o que ele RECUSA
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+// Os textos abaixo estão na forma que `pg_get_constraintdef` devolve, não na forma que a
+// migração escreveu. É a mesma diferença que faz a camada 1 ler do banco e não do arquivo.
+const CASOS = [
+  ["CHECK ((kind = ANY (ARRAY['phone'::text, 'email'::text])))", { kind: 'phone' }, true],
+  ["CHECK ((kind = ANY (ARRAY['phone'::text, 'email'::text])))", { kind: 'fax' }, false],
+  ["CHECK ((bond = ANY (ARRAY['beneficiario'::text, 'pagador'::text, 'professor'::text])))", { bond: 'pagador' }, true],
+  ["CHECK ((role = ANY (ARRAY['USER'::text, 'ASSISTANT'::text])))", { role: 'USER' }, true],
+  ["CHECK ((conversation_kind = ANY (ARRAY['DIRECT'::text, 'GROUP'::text, 'COMMUNITY'::text])))", { conversation_kind: 'DIRECT' }, true],
+  ["CHECK ((status = ANY (ARRAY['PENDING'::text, 'APPROVED'::text, 'REJECTED'::text, 'EDITED'::text])))", { status: 'APPROVED' }, true],
+  ["CHECK (((periodicidade IS NULL) OR (periodicidade = ANY (ARRAY['mensal'::text, 'anual'::text]))))", { periodicidade: 'anual' }, true],
+  ["CHECK (((periodicidade IS NULL) OR (periodicidade = ANY (ARRAY['mensal'::text, 'anual'::text]))))", { periodicidade: 'quinzenal' }, false],
+  ["CHECK ((btrim(nome) <> ''::text))", { nome: '   ' }, false],
+  ["CHECK ((btrim(nome) <> ''::text))", { nome: ' Marina ' }, true],
+  ['CHECK ((alerta_dias > 0))', { alerta_dias: 21 }, true],
+  ['CHECK ((char_length(x) <= 10))', { x: 'abc' }, true],
+  ['CHECK (NOT (a AND b))', { a: true, b: false }, true],
+  ['CHECK ((is_group OR (x IS NULL)))', { is_group: false, x: null }, true],
+];
+
+test('o avaliador acerta as formas de CHECK que este schema realmente usa', () => {
+  for (const [def, linha, esperado] of CASOS) {
+    assert.equal(avaliaCheck(normalizaDefinicao(def), linha), esperado,
+      `errou em ${def} com ${JSON.stringify(linha)}`);
+  }
+});
+
+test('LÓGICA DE TRÊS VALORES: valor nulo deixa o CHECK em desconhecido, e desconhecido PASSA', () => {
+  // No PostgreSQL um CHECK só reprova quando dá FALSE. Avaliar isso com os dois valores do
+  // JavaScript produziria reprovação FALSA — e reprovação falsa treina quem lê a ignorar.
+  const def = normalizaDefinicao("CHECK ((kind = ANY (ARRAY['phone'::text, 'email'::text])))");
+  assert.equal(avaliaCheck(def, { kind: null }), null);
+  // Coluna que o plano nem escreve conta como nula: o banco vai pôr o default dela.
+  assert.equal(avaliaCheck(def, {}), null);
+  // E em conformidade.confere, `null` não entra na lista de problemas.
+  const esquema = { tabelas: { 't': { colunas: { tenant_id: { nulo: false, temDefault: false }, kind: { nulo: true, temDefault: false } }, checks: ["CHECK ((kind = ANY (ARRAY['phone'::text])))"] } } };
+  const plano = [{ tabela: 't', colunas: ['tenant_id', 'kind'], chaveConflito: ['tenant_id'], linhas: [[TENANT, null]] }];
+  assert.deepEqual(confere(plano, esquema).problemas, []);
+});
+
+test('RECUSA em vez de chutar: expressão fora do subconjunto não passa calada', () => {
+  assert.throws(() => avaliaCheck("CHECK ((x ~ '^[0-9]+$'))", { x: '1' }), /não suportado/);
+  assert.throws(() => avaliaCheck("CHECK ((jsonb_typeof(v) = 'object'))", { v: '{}' }),
+    /não está na lista de funções conhecidas/);
+  assert.throws(() => avaliaCheck('CHECK ((a + b) > 0)', { a: 1, b: 2 }), /não suportado/);
+  // E a coluna que não existe na tabela é recusada, não tratada como nula.
+  assert.throws(
+    () => avaliaCheck('CHECK ((fantasma IS NULL))', {}, { colunasConhecidas: new Set(['real']) }),
+    /não existe na tabela/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// C. A conformidade pega o que precisa pegar — inclusive o erro de 31/10/2026
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const ESQUEMA_MINIMO = {
+  tabelas: {
+    'x.t': {
+      colunas: {
+        id: { nulo: false, temDefault: true, gerada: false },
+        tenant_id: { nulo: false, temDefault: false, gerada: false },
+        marco: { nulo: false, temDefault: false, gerada: false },
+        obrigatoria: { nulo: false, temDefault: false, gerada: false },
+        br_key: { nulo: true, temDefault: false, gerada: true },
+      },
+      checks: ["CHECK ((marco = ANY (ARRAY['D-10'::text, 'D-2'::text])))"],
+    },
+  },
+};
+const bloco = (colunas, linhas) => [{ tabela: 'x.t', colunas, chaveConflito: ['id'], linhas }];
+
+test('⭐ tabela que está no PLANO e não está no esquema congelado é PROBLEMA, nunca omissão', () => {
+  // Este é o erro exato que matou a gravação do cenário do dashboard em 31/10/2026: a sexta de
+  // oito tabelas ficou sem conferência e a suíte seguiu verde. A lista aqui sai do plano.
+  const p = [{ tabela: 'x.nao_existe', colunas: ['tenant_id'], chaveConflito: ['tenant_id'], linhas: [[TENANT]] }];
+  const r = confere(p, ESQUEMA_MINIMO);
+  assert.equal(r.ok, false);
+  assert.match(r.problemas.join('\n'), /está no PLANO e NÃO está no esquema congelado/);
+});
+
+test('coluna inexistente, coluna gerada e NOT NULL faltando viram problema', () => {
+  const r1 = confere(bloco(['tenant_id', 'marco', 'obrigatoria', 'inventada'], [[TENANT, 'D-2', 'x', 1]]), ESQUEMA_MINIMO);
+  assert.match(r1.problemas.join('\n'), /"inventada", que não existe na tabela/);
+
+  const r2 = confere(bloco(['tenant_id', 'marco', 'obrigatoria', 'br_key'], [[TENANT, 'D-2', 'x', 'k']]), ESQUEMA_MINIMO);
+  assert.match(r2.problemas.join('\n'), /é coluna GERADA/);
+
+  const r3 = confere(bloco(['tenant_id', 'marco'], [[TENANT, 'D-2']]), ESQUEMA_MINIMO);
+  assert.match(r3.problemas.join('\n'), /"obrigatoria" é NOT NULL e não tem default/);
+
+  const r4 = confere(bloco(['tenant_id', 'marco', 'obrigatoria'], [[TENANT, 'D-2', null]]), ESQUEMA_MINIMO);
+  assert.match(r4.problemas.join('\n'), /é NOT NULL e o plano manda null/);
+});
+
+test('valor fora do CHECK real é reprovado — e o plano certo passa', () => {
+  const mau = confere(bloco(['tenant_id', 'marco', 'obrigatoria'], [[TENANT, 'D-45', 'x']]), ESQUEMA_MINIMO);
+  assert.equal(mau.ok, false);
+  assert.match(mau.problemas.join('\n'), /reprovada pela restrição/);
+
+  const bom = confere(bloco(['tenant_id', 'marco', 'obrigatoria'], [[TENANT, 'D-2', 'x']]), ESQUEMA_MINIMO);
+  assert.deepEqual(bom.problemas, []);
+  assert.equal(bom.ok, true);
+});
+
+test('esquema congelado ausente LANÇA — a camada não finge que conferiu', () => {
+  assert.throws(() => confere(bloco(['tenant_id'], [[TENANT]]), null), /esquema congelado ausente/);
+  assert.throws(() => confere(bloco(['tenant_id'], [[TENANT]]), {}), /esquema congelado ausente/);
+});
+
+test('aridade errada (valores a menos que colunas) é problema, não erro silencioso', () => {
+  const r = confere(bloco(['tenant_id', 'marco', 'obrigatoria'], [[TENANT, 'D-2']]), ESQUEMA_MINIMO);
+  assert.match(r.problemas.join('\n'), /2 valores para 3 colunas/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// D. A coerência do cenário
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const plano = () => cenario.plano({ tenantId: TENANT, hoje: HOJE });
+const blocoDe = (p, tab) => p.find((b) => b.tabela === `lead_manager.${tab}`);
+const comoObjetos = (b) => b.linhas.map((l) => Object.fromEntries(b.colunas.map((c, k) => [c, l[k]])));
+
+test('NÃO HÁ SORTEIO: duas chamadas produzem o plano byte-a-byte igual', () => {
+  assert.equal(JSON.stringify(plano()), JSON.stringify(plano()));
+  // E o uuid de uma linha é derivado da chave declarada, não sorteado.
+  assert.equal(cenario.idDe('pessoa', 'marina'), cenario.idDe('pessoa', 'marina'));
+  assert.notEqual(cenario.idDe('pessoa', 'marina'), cenario.idDe('pessoa', 'helena'));
+  assert.match(cenario.idDe('pessoa', 'marina'), /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
+test('NÃO HÁ DINHEIRO: nenhum texto do cenário carrega valor', () => {
+  // A regra do projeto é que o sorteio nunca toca em total de dinheiro. Aqui não há sorteio E
+  // não há dinheiro: `service_account` não tem coluna de valor, e a trava de assunto proibido do
+  // produto barra "valores" na saída — um preço no rascunho seria frase que a trava recusaria.
+  const p = plano();
+  const textos = [];
+  for (const b of p) {
+    comoObjetos(b).forEach((o) => {
+      ['body', 'suggested_response', 'rascunho', 'estrategia', 'media_transcription',
+        'plano_label', 'servico_label', 'desfecho_notas'].forEach((c) => {
+        if (typeof o[c] === 'string' && o[c]) textos.push(`${b.tabela}.${c}: ${o[c]}`);
+      });
+    });
+  }
+  assert.ok(textos.length > 40, `esperava muitos textos no cenário, achei ${textos.length}`);
+  const comValor = textos.filter((t) => /R\$|\breais\b|\d+[.,]\d{2}\b/i.test(t));
+  assert.deepEqual(comValor, [], `textos com valor em dinheiro:\n${comValor.join('\n')}`);
+});
+
+test('o telefone da conversa e o do lead são os MESMOS dígitos — senão o lead não casa', () => {
+  const p = plano();
+  // leadk casa por regexp_replace(leads.phone) = regexp_replace(conversations.external_id).
+  const telefonesDeConversa = new Set(comoObjetos(blocoDe(p, 'conversations')).map((c) => c.external_id));
+  for (const l of comoObjetos(blocoDe(p, 'leads'))) {
+    assert.ok(telefonesDeConversa.has(l.phone),
+      `o lead ${l.name} tem telefone ${l.phone}, que não é de nenhuma conversa`);
+  }
+});
+
+test('todo contato do cadastro tem contrato, e todo contrato tem pagador e beneficiário', () => {
+  const p = plano();
+  const contratos = comoObjetos(blocoDe(p, 'service_account'));
+  const membros = comoObjetos(blocoDe(p, 'account_member'));
+  for (const ct of contratos) {
+    const meus = membros.filter((m) => m.account_id === ct.id);
+    assert.deepEqual(meus.map((m) => m.bond).sort(), ['beneficiario', 'pagador'],
+      `contrato ${ct.servico_label} sem os dois vínculos`);
+  }
+  // fonte_ausente_em NULL é condição de TODA consulta de renovação: preenchido, o contrato
+  // desaparece das telas sem erro nenhum.
+  contratos.forEach((ct) => assert.equal(ct.fonte_ausente_em, null));
+});
+
+test('o toque de renovação vai para quem PAGA, não para o paciente', () => {
+  const p = plano();
+  const toques = comoObjetos(blocoDe(p, 'renovacao_touchpoint'));
+  const membros = comoObjetos(blocoDe(p, 'account_member'));
+  assert.equal(toques.length, 3, 'o roteiro conta com 3 toques: D-10, D-2 e um já enviado');
+  for (const t of toques) {
+    const pagador = membros.find((m) => m.account_id === t.account_id && m.bond === 'pagador');
+    assert.equal(t.person_id, pagador.person_id,
+      `o toque de ${t.aluno_nome} não está endereçado ao pagador do contrato`);
+  }
+  // E o caso que prova a precedência: o Sr. Otávio é o paciente, a filha Renata é quem recebe.
+  const doOtavio = toques.find((t) => t.aluno_nome.startsWith('Otávio'));
+  assert.equal(doOtavio.destinatario_nome, 'Renata Bernardes');
+  assert.notEqual(doOtavio.phone, '5519990000007');
+});
+
+test('due_date é fim_vigencia menos os dias do marco, e os marcos saem certos para a data', () => {
+  const p = plano();
+  for (const t of comoObjetos(blocoDe(p, 'renovacao_touchpoint'))) {
+    const dias = Number(String(t.marco).replace('D-', ''));
+    assert.equal(t.due_date, cenario.maisDias(t.fim_vigencia, -dias));
+  }
+  // O roteiro precisa de um contrato em D-10 e um em D-2 CONTADOS DA DATA DA APRESENTAÇÃO.
+  const contratos = comoObjetos(blocoDe(p, 'service_account')).map((c) => c.fim_vigencia);
+  assert.ok(contratos.includes(cenario.maisDias(HOJE, 10)), 'falta o contrato em D-10');
+  assert.ok(contratos.includes(cenario.maisDias(HOJE, 2)), 'falta o contrato em D-2');
+});
+
+test('a aba Renovações terá conversa: quem tem contrato na janela também tem conversa', () => {
+  // A régua da aba é: vencimento entre hoje-60 e hoje+15, OU toque nosso, OU rascunho.
+  const p = plano();
+  const contratos = comoObjetos(blocoDe(p, 'service_account'));
+  const naJanela = contratos.filter((c) => c.fim_vigencia <= cenario.maisDias(HOJE, 15)
+    && c.fim_vigencia >= cenario.maisDias(HOJE, -60));
+  assert.ok(naJanela.length >= 3, `esperava ≥3 contratos na janela da aba, achei ${naJanela.length}`);
+});
+
+test('a resposta da IA só existe onde há lead — pending_approvals.lead_id é NOT NULL', () => {
+  const p = plano();
+  const ids = new Set(comoObjetos(blocoDe(p, 'leads')).map((l) => l.id));
+  for (const s of comoObjetos(blocoDe(p, 'pending_approvals'))) {
+    assert.ok(ids.has(s.lead_id), 'sugestão da IA apontando para lead que o plano não cria');
+  }
+  // E o roteiro quer SUGESTÃO esperando aprovação (modo 'semi' é o que a demo mostra).
+  const pendentes = comoObjetos(blocoDe(p, 'pending_approvals')).filter((s) => s.status === 'PENDING');
+  assert.ok(pendentes.length >= 2, `esperava ≥2 sugestões pendentes, achei ${pendentes.length}`);
+});
+
+test('3 conversas ficam com entrada não lida (last_read_at nulo)', () => {
+  const naoLidas = comoObjetos(blocoDe(plano(), 'conversations')).filter((c) => c.last_read_at === null);
+  assert.equal(naoLidas.length, 3);
+});
+
+test('nenhum texto do cenário usa nome de recepcionista — quando há nome, é a Janis', () => {
+  // Regra do projeto: nenhum texto que alcança o cliente usa Késsia/Rafaela. A trava de saída já
+  // barra "aqui é a <recepcionista>"; aqui o cenário não dá o que barrar.
+  const p = plano();
+  const tudo = JSON.stringify(p);
+  for (const proibido of ['Késsia', 'Kessia', 'Rafaela']) {
+    assert.ok(!tudo.includes(proibido), `o cenário menciona ${proibido}`);
+  }
+  assert.ok(tudo.includes('Janis'), 'a assistente precisa se apresentar em algum ponto');
+});
+
+test('as datas são montadas no fuso de São Paulo, não no da máquina de quem roda', () => {
+  assert.equal(cenario.FUSO, '-03:00');
+  assert.equal(cenario.instante('2026-11-04', 0, '09:12'), '2026-11-04T09:12:00-03:00');
+  assert.equal(cenario.instante('2026-11-04', 5, '09:12'), '2026-10-30T09:12:00-03:00');
+  assert.equal(cenario.maisDias('2026-02-28', 1), '2026-03-01');   // 2026 não é bissexto
+  assert.throws(() => cenario.maisDias('04/11/2026', 0), /precisa ser 'YYYY-MM-DD'/);
+  assert.throws(() => cenario.instante('2026-11-04', 0, '9:12'), /precisa ser 'HH:MM'/);
+});
+
+test('tabelasDoPlano é a ÚNICA lista, e sai do plano', () => {
+  const p = plano();
+  const tabelas = cenario.tabelasDoPlano(p);
+  assert.equal(tabelas.length, new Set(tabelas).size, 'sem repetição');
+  assert.deepEqual(tabelas, [...new Set(p.map((b) => b.tabela))]);
+  assert.throws(() => cenario.tabelasDoPlano([]), /plano vazio/);
+  // Todo bloco tem tenant_id (é a coluna do portão) — menos os marcados portao:false.
+  for (const b of p) assert.ok(b.colunas.includes('tenant_id'), `${b.tabela} sem tenant_id`);
+});
+
+test('o plano do PROVISIONAMENTO também é plano — nenhuma tabela escrita fora de conferência', () => {
+  // A primeira versão do script escrevia estas quatro tabelas à mão, fora do plano: quatro
+  // tabelas gravadas sem conferência nenhuma. É o mesmo furo de 31/10/2026, um nível acima.
+  const p = demo.planoProvisionamento({
+    tenantId: TENANT, hoje: HOJE, slug: 'clinica-exemplo',
+    maisDias: cenario.maisDias, instante: cenario.instante,
+  });
+  assert.deepEqual(cenario.tabelasDoPlano(p), [
+    'lead_manager.tenants', 'lead_manager.tenant_subscriptions',
+    'lead_manager.tenant_lead_config', 'lead_manager.automacao_config',
+  ]);
+  // `tenants` é a única sem portão, e por razão geométrica: é a linha que CRIA o portão.
+  const semPortao = p.filter((b) => b.portao === false).map((b) => b.tabela);
+  assert.deepEqual(semPortao, ['lead_manager.tenants']);
+  for (const b of p.filter((x) => x.portao !== false)) {
+    assert.ok(b.colunas.includes('tenant_id'), `${b.tabela} sem a coluna do portão`);
+  }
+  // E as invariantes aparecem na LINHA que vai para o banco, não só no objeto de decisão.
+  const t = p[0];
+  const linha = Object.fromEntries(t.colunas.map((c, k) => [c, t.linhas[0][k]]));
+  assert.equal(linha.is_demo, true);
+  assert.equal(linha.lead_manager_active, false);
+  assert.equal(linha.evolution_token_enc, null);
+  assert.equal(linha.zapi_token, null);
+});
+
+test('o resumo conta linhas de verdade, e o cenário tem tamanho de roteiro de 10 minutos', () => {
+  const r = cenario.resumo({ tenantId: TENANT, hoje: HOJE });
+  assert.equal(r.tabelas, 10);
+  assert.equal(r.linhas, Object.values(r.porTabela).reduce((a, b) => a + b, 0));
+  assert.equal(r.porTabela['lead_manager.conversations'], 12);
+  assert.ok(r.linhas > 90 && r.linhas < 200, `${r.linhas} linhas — nem vazio nem base de produção`);
+});
