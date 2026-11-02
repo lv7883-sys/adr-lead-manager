@@ -360,6 +360,78 @@ test('o plano do PROVISIONAMENTO também é plano — nenhuma tabela escrita for
   assert.equal(linha.zapi_token, null);
 });
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// E. Vocabulário: o que a assistente da CLÍNICA recebe não é texto de escola de música
+//
+// Pedido do Leo em 02/11: os exemplos pré-escritos nos campos têm de ser de clínica, não de
+// escola de música. O Lead Manager não tem formulário nenhum (é API JSON — as telas são do
+// dashboard), então o único texto pré-escrito dele que alcança a demonstração é o PROMPT da
+// assistente. Este teste mede esse texto.
+//
+// ⚠ O que ele NÃO cobre, e está dito aqui para não ser confundido com cobertura: os 4 prompts de
+// CLASSIFICAÇÃO de src/gemini.js (TRIAGE_PROMPT:67, _INTERESSES_PROMPT:303, INTENT_PROMPT:859,
+// EXTRACT_PROMPT:879) vão direto para generateContent SEM passar pelo adaptador de ramo
+// (`_adaptar`), e seguem dizendo "escola de música" em qualquer unidade. Medido em 02/11/2026.
+// Eles não rodam nesta demonstração (webhook recusado por tenant inativo, rascunhos pré-escritos),
+// mas o defeito existe e é do produto, não da demo — ver docs/demo-mf8-lead-manager.md.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('o prompt da assistente da clínica sai SEM vocabulário de escola de música', () => {
+  const { resolveSystemPrompt } = require('../src/templates');
+  const cfg = demo.configDaUnidade({ nomeExibido: demo.NOME_DO_TENANT });
+  const prompt = resolveSystemPrompt({
+    school_name: cfg.school_name,
+    system_prompt_override: cfg.system_prompt_override,
+    available_instruments: cfg.available_instruments,
+    business_hours: cfg.business_hours,
+    perfil: demo.perfilDaAssistente(),
+  });
+  // O mecanismo: `templates.renderDefaultPrompt` escolhe o GENERIC_SYSTEM_PROMPT quando
+  // `perfilAssistente.generico()` é verdade — e ela é verdade porque o perfil da demo preenche
+  // ramo_atividade. Sem ramo, o template padrão diz "uma escola de música".
+  for (const palavra of ['escola de música', 'instrumento', 'aula experimental', 'matrícul',
+    'aluno', 'professor', 'violão', 'música', 'curso']) {
+    const n = (prompt.match(new RegExp(palavra, 'gi')) || []).length;
+    assert.equal(n, 0, `o prompt da clínica diz ${JSON.stringify(palavra)} ${n}x`);
+  }
+  // E o que ele PRECISA dizer, para não passar por omissão (prompt vazio zeraria tudo acima):
+  assert.match(prompt, /uma empresa do ramo "clínica ortopédica"/);
+  assert.match(prompt, /SEU NOME: Janis/);
+  assert.match(prompt, /ASSUNTOS PROIBIDOS/);
+  assert.ok(prompt.length > 1200, `prompt curto demais (${prompt.length} caracteres)`);
+});
+
+test('o Lead Manager não tem campo de formulário com exemplo pré-escrito', () => {
+  // Medido em 02/11/2026: BASE = 128 arquivos .js em src/; PADRÃO = /placeholder/i; 20 linhas,
+  // TODAS sobre rótulo de mídia ([áudio], [imagem], [documento: …]). Nenhuma é exemplo de campo.
+  // Este teste trava a afirmação: se alguém adicionar um placeholder de formulário aqui, ele cai
+  // e quem o escreveu descobre que precisa decidir o vocabulário por ramo.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const raiz = path.join(__dirname, '..', 'src');
+  const arquivos = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => {
+    const p = path.join(d, e.name);
+    return e.isDirectory() ? arquivos(p) : (e.name.endsWith('.js') ? [p] : []);
+  });
+  const todos = arquivos(raiz);
+  assert.ok(todos.length >= 120, `BASE menor que o medido: ${todos.length} arquivos`);
+  const MIDIA = /\[(áudio|imagem|vídeo|documento|figurinha|mídia)/i;
+  const suspeitas = [];
+  for (const f of todos) {
+    fs.readFileSync(f, 'utf8').split('\n').forEach((linha, i) => {
+      if (!/placeholder/i.test(linha)) return;
+      if (MIDIA.test(linha)) return;                       // rótulo de mídia, não exemplo de campo
+      // `media.placeholder` é o rótulo de mídia do webhook/staffSamples, só sem o "[…]" na linha.
+      if (/\bmedia(\s*&&\s*\(media)?\.placeholder\b/.test(linha)) return;
+      if (/placeholderMessage|_placeholderMidia|PLACEHOLDER_MIDIA|Placeholders? \{/i.test(linha)) return;
+      if (/^\s*(\/\/|\*)/.test(linha)) return;             // comentário
+      suspeitas.push(`${path.relative(raiz, f).replace(/\\/g, '/')}:${i + 1}: ${linha.trim().slice(0, 90)}`);
+    });
+  }
+  assert.deepEqual(suspeitas, [],
+    `placeholder que não é de mídia — decidir o vocabulário por ramo:\n${suspeitas.join('\n')}`);
+});
+
 test('o resumo conta linhas de verdade, e o cenário tem tamanho de roteiro de 10 minutos', () => {
   const r = cenario.resumo({ tenantId: TENANT, hoje: HOJE });
   assert.equal(r.tabelas, 10);
