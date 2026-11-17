@@ -28,9 +28,49 @@ Tudo abaixo está escrito e com as duas suítes verdes (**Lead Manager 88/88**, 
 | LM `src/engine.js` | 2º tempo, ao lado do `notificar('novo_lead')` |
 | LM `db/migrations/192_ingestao_latencia.sql` + `scripts/latencia-ingestao.js` | o cronômetro (§D2d) |
 
-**Falta para funcionar:** aplicar as duas migrações (LM 192, dashboard 201), gerar o par de chaves
-VAPID (`npx web-push generate-vapid-keys`) e pôr `INTERNAL_API_TOKEN` no ambiente do Lead Manager
-com o mesmo valor do dashboard.
+### Como pôr no ar (nesta ordem, e a ordem importa)
+
+**1. As chaves do push.** Em um terminal seu, no dashboard:
+
+```
+node scripts/gerar-vapid.js
+```
+
+Usa só o Node, nenhuma dependência, e imprime as três variáveis. A **privada é segredo**: vai
+direto para o ambiente do dashboard, sem passar por chat, log ou ticket. ⚠ **Gere uma vez e
+guarde** — trocar o par depois desliga o aviso de todos os aparelhos **em silêncio**, e a única
+saída é cada pessoa aceitar de novo, uma por uma.
+
+**2. `INTERNAL_API_TOKEN` no ambiente do Lead Manager**, com o **mesmo valor** que o dashboard já
+usa. É o canal interno que já existia; nenhum segredo novo. Sem ele o disparo fica inerte e
+registra `aviso_dispositivo.inerte` no log — não falha calado.
+
+**3. As duas migrações.** Como `postgres`; as duas são aditivas (criam tabela nova, não alteram
+nada existente):
+
+```
+psql "$DATABASE_URL" -f db/migrations/192_ingestao_latencia.sql     # no adr-lead-manager
+psql "$DATABASE_URL" -f db/migrations/201_push_inscricao.sql        # no adr-whatsapp-scheduler
+```
+
+⚠ **Depois de aplicar, atualize a coluna "Aplicada?" dos dois `RESERVAS.md` no mesmo movimento.**
+É a única invariante daqueles arquivos que nenhum teste alcança, e já esteve errada seis vezes.
+
+**4. Publicar os dois serviços — o dashboard PRIMEIRO.** Se o Lead Manager subir antes, ele dispara
+aviso para um endereço que ainda não existe: ninguém recebe nada e o log enche de `http_404`.
+
+**5. Conferir que chegou, sem esperar lead.** Abra o Regente e aceite o convite "Receber aviso de
+lead novo neste aparelho?" — o próprio aceite dispara um aviso de teste. No iPhone, antes disso:
+Compartilhar → Adicionar à Tela de Início.
+
+**6. Dois ou três dias depois, ler o cronômetro:**
+
+```
+make latencia-ingestao ARGS="--dias 3"
+```
+
+É o que decide se o aviso em dois tempos (§D2c) era luxo ou necessidade. ⚠ Zero linhas **não** é
+"está rápido" — é "não mediu", e o script grita isso em vez de imprimir um painel vazio.
 
 ### Três decisões que eu tomei por padrão (diga se discorda)
 
