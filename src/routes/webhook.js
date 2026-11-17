@@ -20,6 +20,8 @@ const waChats = require('../waChats');         // paridade: estado da lista de c
 const { comUnidade } = require('../plataforma/contexto');   // dona do trabalho -> custo de IA com dono
 const origemLead = require('../origemLead');   // origem do 1º toque (anúncio Click-to-WhatsApp)
 const ingestao = require('../marketing/ingestao');   // foto/vídeo do grupo -> matéria-prima
+const latencia = require('../ingestaoLatencia');     // cronômetro: mensagem chega -> lead existe (16/11/2026)
+const avisoDispositivo = require('../avisoDispositivo');   // 1º tempo do aviso no aparelho (sem IA, ~1s)
 const { decrypt } = require('../crypto');
 
 const router = express.Router();
@@ -733,15 +735,52 @@ async function handleZapiWebhook(req, res) {
   // ADR-016 — mídia recebida: baixa, grava em disco e (áudio) transcreve ANTES do
   // funil, pra a mensagem ser persistida já com a mídia. Best-effort, não trava.
   const processar = async () => {
+    // CRONÔMETRO (16/11/2026). Mede quanto tempo passa entre esta mensagem chegar e o lead
+    // existir — número que ninguém tinha e do qual depende a decisão do aviso "no instante"
+    // (docs/proposta-aviso-lead-novo.md, D2). Só marca relógio: nada aqui altera o fluxo, e o
+    // registro é gravado DEPOIS do funil, fora do await, para não entrar na própria medição.
+    const cron = latencia.iniciar();
+    // ── 1º TEMPO DO AVISO NO APARELHO (16/11/2026) ──────────────────────────────────────────
+    //
+    // Sai AQUI, antes de tudo, porque é o único ponto em que "no instante" é literal: daqui para
+    // baixo vem o download da mídia, a transcrição e a classificação — e o lead só existe depois
+    // delas. Em dia de IA fora do ar, não existe nunca.
+    //
+    // Ele é deliberadamente MENOS informado que o 2º tempo: diz "contato novo" e os quatro
+    // últimos dígitos, porque é tudo o que se sabe sem IA. Segundos depois, o 2º tempo
+    // (src/engine.js, ao lado do notificar 'novo_lead') SUBSTITUI este aviso na tela pela versão
+    // com nome e interesse — mesma `tag`, sem vibrar de novo.
+    //
+    // ⚠ SEM await, e isto é o requisito, não preguiça: esperar o aviso aqui colocaria o tempo do
+    //   dashboard na frente da mensagem do cliente. O módulo decide sozinho se vale avisar
+    //   (contato sem lead e fora da lista de supressão) e engole o próprio erro.
+    avisoDispositivo.avisarContatoNovo(tenant, {
+      chaveContato: msg.externalId || null,
+      // pushName: a pessoa se autodeclara. Serve para o aviso ficar legível, nunca para decidir
+      // nada — e é melhor que "número desconhecido" na tela de bloqueio de quem vai atender.
+      nomeContato: msg.sender || null,
+    }).catch(() => { /* aviso nunca derruba ingestão */ });
     // ORIGEM PRIMEIRO. O dado do anúncio (contextInfo.externalAdReply / código no texto)
     // chega UMA ÚNICA VEZ, nesta mensagem. Se a IA cair depois, a conversa espera o
     // reprocessamento — a origem não teria segunda chance. Por isso ela é gravada ANTES
     // de baixar mídia, transcrever áudio ou classificar. Nunca lança (trata por dentro).
     await origemLead.registrarOrigem(tenant.id, msg, req.body, log);
+    cron.fase('origem_ms');
     await baixarMidiaInbound(tenant, msg, log);
+    cron.fase('midia_ms');   // inclui a transcrição do áudio pela IA (a 1ª das duas chamadas)
     const textoCartao = textoDeCartaoForaDoFunil(msg);
     if (textoCartao) msg.body = null;   // funil e Janis recebem o mesmo vazio de antes
     await engine.processInbound(tenant, msg, req.body);
+    cron.fase('funil_ms');   // classificação da IA + nascimento do lead + aviso à recepção
+    // Sem await: gravar a medição não pode atrasar o cliente nem contar como latência. O módulo
+    // engole o próprio erro; o .catch aqui é cinto de segurança contra rejeição síncrona.
+    latencia.registrar(tenant.id, {
+      cron,
+      externalMessageId: msg.externalMessageId || null,
+      messageTimestamp: msg.messageTimestamp || null,
+      tipoMidia: msg.media ? (msg.media.kind || null) : null,
+      identBruto: msg.externalId || null,
+    }).catch(() => { /* medição nunca derruba ingestão */ });
     // O lead (se nasceu) só existe agora: liga a origem já gravada a ele. Nunca lança.
     // msg + req.body (não o externalId): o vínculo deriva o telefone pela MESMA régua de jid
     // da gravação — o externalId daqui ainda é `jid.split('@')[0]`, que não é telefone.

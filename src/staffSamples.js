@@ -127,4 +127,9 @@ async function captureOutbound(tenantId, msg, rawBody) {
   }
 }
 
-module.exports = { captureOutbound, _garantirConversa };
+// FONTES_HUMANAS é exportada porque passou a ter um SEGUNDO leitor (src/semAtendimentoHumano.js,
+// o contador do aviso de lead novo). A lista responde "esta saída foi uma pessoa digitando no
+// WhatsApp dela?" — 'api' NÃO está nela de propósito: 'api' é o Regente mandando, e aí quem
+// distingue pessoa de Janis é a coluna `sender`. Copiar a lista no outro arquivo faria duas
+// réguas para a mesma pergunta, que é o defeito mais caro deste projeto.
+module.exports = { captureOutbound, _garantirConversa, FONTES_HUMANAS };

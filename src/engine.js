@@ -12,6 +12,7 @@ const gemini = require('./gemini');
 const { getRescuePolicy } = require('./roleLeadPolicy');   // ADR-036 E1.4: rescue question por papel (config por tenant)
 const notifyModule = require('./notify');
 const notificacao = require('./notificacao');   // Bloco 4: push WhatsApp pra recepção
+const avisoDispositivo = require('./avisoDispositivo');   // aviso no aparelho (popup + nº no ícone), 16/11/2026
 const redisClient = require('./redisClient');
 const gating = require('./gating');
 const { kanbanColuna } = require('./metrics');   // ADR sugestão-de-etapa: travas de posição
@@ -1910,6 +1911,21 @@ async function processInbound(tenant, msg, rawBody, deps = {}) {
   const _instrumento = (qual && qual.values && qual.values.instrument) || null;
   if (primeiraMensagem) {
     await notificar(tenantId, 'novo_lead', { leadId: ctx.leadId, name: _nome, instrument: _instrumento, confidence: cls ? cls.confidence : 1 });
+    // 2º TEMPO do aviso no aparelho (16/11/2026). O 1º tempo já saiu quando a mensagem chegou,
+    // com o telefone e sem classificação; este substitui aquele na tela — mesma `tag`, sem
+    // vibrar de novo — agora com nome e interesse, e com o número do ícone recalculado.
+    //
+    // ⚠ FICA AQUI, ao lado do `notificar`, e não num ponto "mais limpo": este é o único lugar do
+    //   código onde "o lead nasceu AGORA e foi classificado" é um fato, e não uma inferência. Os
+    //   outros candidatos (os 12 INSERT INTO leads) nascem em contextos diferentes — importação em
+    //   lote, cadastro à mão, fila de revisão — que não devem acordar o celular de ninguém.
+    //
+    // ⚠ SEM await: o aviso não pode atrasar o resto da ingestão, e a falha dele não pode derrubá-la.
+    //   O módulo já engole o próprio erro e registra a causa; o .catch é cinto de segurança.
+    avisoDispositivo.avisarLeadNovo(
+      { id: tenantId },
+      { chaveContato: phone || msg.externalId || null, leadId: ctx.leadId, nome: _nome, interesse: _instrumento }
+    ).catch(() => { /* aviso nunca derruba o funil */ });
   } else {
     await notificar(tenantId, 'nova_msg', { leadId: ctx.leadId, name: _nome });
   }

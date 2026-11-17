@@ -40,7 +40,16 @@ PSQL_DSN   ?= $(ADM_PLATAFORMA)
 UNIT_TESTS := test/plataforma.test.js test/origem-lead.test.js test/ia-wrapper.test.js \
               test/sdk-ia-sem-atalho.test.js test/anonimizacao-ordem-migracao.test.js \
               test/webhook.test.js test/waConteudo.test.js test/ingestao.test.js \
-              test/marketing-config.test.js test/demo-mf8.test.js test/lead-manual.test.js \n              test/kanban-colunas.test.js
+              test/marketing-config.test.js test/demo-mf8.test.js test/lead-manual.test.js \
+              test/kanban-colunas.test.js test/ingestao-latencia.test.js \
+              test/aviso-lead-aparelho.test.js
+# ⚠ CONSERTO DE PASSAGEM (17/11/2026): a linha dos três primeiros testes acima vinha do `main`
+#   com um `\n` LITERAL no meio dela, em vez de uma quebra de linha — dois caracteres, não um
+#   escape. `make` não interpreta `\n`, o shell come a barra, e `node --test` recebia um arquivo
+#   chamado `n`. Medido: `node --test n` responde "Could not find 'n'" e sai com erro, ou seja,
+#   `make test` estava VERMELHO no `main` por esta linha, independentemente dos testes. Achado ao
+#   resolver o conflito desta mesma atribuição; consertar enquanto eu já estava dentro dela custou
+#   um caractere, e deixar quebrado sabendo custaria a próxima pessoa.
 
 # Demonstração MF8: a CAMADA 1 do seed, que depende do esquema congelado de produção
 # (test/fixtures/esquema-demo.json, gerado por deploy/dump-esquema-demo.js). Fora de UNIT_TESTS
@@ -49,7 +58,7 @@ UNIT_TESTS := test/plataforma.test.js test/origem-lead.test.js test/ia-wrapper.t
 # cabeçalho de test/demo-mf8-esquema.test.js.
 DEMO_TESTS := test/demo-mf8-esquema.test.js
 
-.PHONY: test test-db-up test-db-down test-isolation test-origem test-ingestao test-all ci migrate guard-nao-producao ingest-status test-demo test-demo-sabotagem
+.PHONY: test test-db-up test-db-down test-isolation test-origem test-ingestao test-all ci migrate guard-nao-producao ingest-status test-demo test-demo-sabotagem latencia-ingestao
 
 # ── testes puros ──────────────────────────────────────────────────────────────
 test:
@@ -141,6 +150,11 @@ test-ingestao:
 # script é READ-ONLY (nenhum INSERT, nenhum UPDATE).
 ingest-status:
 	@docker exec adr-lead-manager node /app/scripts/ingest-status.js $(ARGS)
+
+# Cronômetro da entrada (migr 192): mensagem chega -> lead existe. READ-ONLY, roda NA VPS.
+#   make latencia-ingestao ARGS="--dias 3"
+latencia-ingestao:
+	@docker exec adr-lead-manager node /app/scripts/latencia-ingestao.js $(ARGS)
 
 # Sobe, roda tudo, derruba — o down acontece mesmo com teste vermelho.
 test-all:

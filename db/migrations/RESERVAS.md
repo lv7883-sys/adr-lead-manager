@@ -24,9 +24,19 @@ colisão de 20/09/2026 (faixa 140–149 ocupada por engano por duas frentes ao m
 | **184** | **agenda de contatos** | 184 contato_agenda (o nome do contato como a unidade salva — pedido do Leo 05/10/2026) | **SIM — aplicada em 05/10/2026** |
 | **185** | **boas-vindas** | 185 data_matricula no contrato (âncora da régua = matrícula, não início das aulas) | não — pronta para aplicar |
 | **186** | **boas-vindas** | 186 boas_vindas_inclusao (a recepção inclui quem a régua deixou de fora) | não — pronta para aplicar |
-| **187** | **demonstração MF8** | 187 `is_demo` em `lead_manager.tenants` — portão do seed da unidade de demonstração (apresentação de 04/11/2026) | não — pronta para aplicar |
-| **188** | **kanban por unidade** | 188 `stage_ui` em tenant_lead_config + `etapa_custom` em leads — renomear, esconder e acrescentar coluna (pedido do Leo 02/11/2026) | não — pronta para aplicar |
-| 189–199 | livre | — | — |
+| **187** ⚠ | **demonstração MF8 — E COLIDE** | 187 `is_demo` em `lead_manager.tenants` — portão do seed da unidade de demonstração (apresentação de 04/11/2026). ⚠ **O ramo `feat/metricas-prova-receita` reservou 187 para `metricas.reativacao_mensal`** e escreveu a linha só lá. Duas frentes, o mesmo número, nenhuma das duas aplicada. Ver o aviso abaixo | não — pronta para aplicar |
+| **188** ⚠ | **kanban por unidade — E COLIDE** | 188 `stage_ui` em tenant_lead_config + `etapa_custom` em leads — renomear, esconder e acrescentar coluna (pedido do Leo 02/11/2026). ⚠ **O mesmo ramo reservou 188 para `metricas.matricula_origem`.** Ver o aviso abaixo | não — pronta para aplicar |
+| 189–190 | livre no `main` | ⚠ reservados no ramo `feat/metricas-prova-receita` (189 `metricas.renovacao_mensal`, 190 `plataforma.modulo_golive`) — confirme com aquela frente antes de pegar | — |
+| **191** ⚠ | **reabordagem (outra frente)** | `191_reabordagem_fila_nao_e_resultado.sql`, no ramo `claude/reabordagem-fonte-unica-b11b4a` — **não mergeado**. Aquela frente renumerou de 187 para 191 (commit `fbac824b8`) e não escreveu a linha aqui; esta linha foi escrita por terceiros em 16/11/2026, varrendo os ramos, **não** por quem é dono dela. ⚠ O número 191 também já foi usado e devolvido nesta mesma série: `191_site_contato.sql` nasceu no ramo `feat/metricas-prova-receita` e saiu no revert `81b1b0a03` — nunca foi aplicada | **não** — confirmar com a frente da reabordagem |
+| **192** | **aviso de lead novo** | `lead_manager.ingestao_latencia` — o cronômetro da entrada: quanto tempo entre o webhook chegar e o lead existir. Instrumento de MEDIÇÃO com prazo de validade (ver o cabeçalho do arquivo): depois da decisão do aviso "no instante" (`docs/proposta-aviso-lead-novo.md`, D2), ou ganha dono e retenção, ou é apagada. Não guarda telefone, nome nem texto. **Nasceu como 191 e foi renumerada no mesmo dia**, ao descobrir a colisão acima — renumerar antes de aplicar é barato, depois não | **não** — pronta para aplicar |
+| 193–199 | livre | — | — |
+
+> 🔴 **16/11/2026 — a tabela dizia "191–199 livre" e 191 estava tomado por dois arquivos diferentes.**
+> O método que achou isso é o que esta tabela já recomenda e quase ninguém roda, então vale repetir:
+> `git log --all --diff-filter=A --name-only --format="" -- 'db/migrations/*.sql'` **não basta** —
+> ele não mostrou o arquivo do ramo da reabordagem. O que mostrou foi varrer os ramos um a um:
+> `for b in $(git branch -a --format='%(refname:short)'); do git ls-tree -r --name-only "$b" -- db/migrations/; done`.
+> Conferir só o disco e só o `main` teria deixado a colisão passar.
 
 ## Nome do contato: a fonte é `lead_manager.contato_agenda` (184)
 
