@@ -35,6 +35,7 @@ const { fetchTimeline } = require('../timeline');   // ADR-042: timeline compart
 const { naoEhReacaoSql } = require('../reacao');    // reação não é turno do cliente (fonte única do marcador)
 // DE QUEM E A BOLA: regua unica (src/bola.js) -- aqui vivia uma das quatro copias.
 const { devemosRespostaSql, bolaSql } = require('../bola');
+const semAtendimentoHumano = require('../semAtendimentoHumano');   // número B do ícone: "ninguém da casa olhou ainda" (D1)
 const { fetchDescartados } = require('../descartados');   // lista de Descartados (1 consulta agregada)
 // regua de nome de professor: a MESMA do sync-professores, importada (nunca reescrita)
 const { normNome: normNomeProfessor } = require('../cadastro/sync-professores');
@@ -158,6 +159,26 @@ router.get(
     }
   }
 );
+
+// GET /tenant/:tid/sem-atendimento — o NÚMERO DO ÍCONE (badge): quantos leads ninguém da casa
+// olhou ainda (decisão D1, docs/proposta-aviso-lead-novo.md). Régua ÚNICA em
+// src/semAtendimentoHumano.js — a mesma que o disparo do push usa; NÃO reimplementar aqui.
+//
+// POR QUE A ROTA EXISTE: a Apple proíbe push invisível, então o número só SOBE no push (que já
+// mostra notificação). Para ele DESCER quando a recepção atende e abre o Regente — o pedido literal
+// do Leo ("à medida que o lead teve a primeira resposta da recepção, ele apaga") — o cliente precisa
+// recalcular ao carregar/focar a página. Esta é a fonte desse recálculo. Sem ela o número do ícone
+// ficava preso no valor do último push até o próximo lead chegar. READ-ONLY.
+//
+// Caminho fora de /leads/ de propósito: /leads/<algo> colidiria com /leads/:id.
+router.get('/:tenantId/sem-atendimento', authenticate, requireTenantAccess(READ_ROLES), async (req, res) => {
+  try {
+    res.json({ n: await semAtendimentoHumano.contar(req.tenantId) });
+  } catch (err) {
+    logger.error('tenant.sem_atendimento.error', { tenant_id: req.tenantId, error: err.message });
+    res.status(500).json({ error: 'internal error' });
+  }
+});
 
 // GET /tenant/:tid/leads/kanban?period=30d|90d — ADR-010: leads agrupados por coluna
 // do ciclo de vida (novo/qualificando/qualificado/convertido/perdido). READ-ONLY.
