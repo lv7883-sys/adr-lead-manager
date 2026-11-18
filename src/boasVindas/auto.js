@@ -64,7 +64,7 @@ async function enviarAutomatico(tenantId, { config, agora = Date.now(), deps = {
   const ids = await withTenant(tenantId, async (c) => (await c.query(SQL_ELEGIVEIS, [tenantId, new Date(agora).toISOString(), restante])).rows.map((r) => r.id));
   for (let i = 0; i < ids.length; i++) {
     if (pausado()) { resumo.pulado = 'pausa_geral'; break; }
-    const r = await recepcao.enviar(tenantId, ids[i], { sender: 'boas-vindas-auto', auto: true, estados: ['pendente'] }, { inbox: deps.inbox });
+    const r = await recepcao.enviar(tenantId, ids[i], { sender: 'boas-vindas-auto', autorTipo: 'automacao', auto: true, estados: ['pendente'] }, { inbox: deps.inbox });
     if (r && r.ok) {
       resumo.enviados += 1;
     } else if (r && r.status === 409) {

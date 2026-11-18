@@ -299,7 +299,7 @@ async function _autoSendOne(tenantId, tp) {
   const { ensureConversation, sendMessage } = require('../routes/inbox');
   const conv = await withTenant(tenantId, (c) => ensureConversation(c, tenantId, tp.phone));
   if (!conv) return { ok: false, reason: 'telefone_invalido' };
-  return sendMessage(tenantId, conv.conversation_id, { text: tp.rascunho, sender: 'renovacao-auto' });
+  return sendMessage(tenantId, conv.conversation_id, { text: tp.rascunho, sender: 'renovacao-auto', autorTipo: 'automacao' });
 }
 
 async function autoEnviarTenant(tenantId, deps = {}) {

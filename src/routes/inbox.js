@@ -823,7 +823,7 @@ async function ensureRenovacaoDraft(client, tenantId, phoneRaw) {
 // mas ancorado em conversation_id (telefone = conversations.external_id) — serve não-lead também.
 // `deps` injeta evolution/creds/registrar p/ o itest (mock da API externa). Retorna um objeto
 // de resultado que o handler traduz em status HTTP (não lança nos casos de negócio).
-async function sendMessage(tenantId, conversationId, { text, replyToMessageId = null, sender = null, mentions = null }, deps = {}) {
+async function sendMessage(tenantId, conversationId, { text, replyToMessageId = null, sender = null, autorTipo = 'humano', mentions = null }, deps = {}) {
   const evolution = deps.evolution || evolutionDefault;
   const credsForTenant = deps.credsForTenant || outbound.credsForTenant;
   const registrarSaida = deps.registrarSaida || outbound.registrarSaida;
@@ -849,7 +849,7 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
       return { reason: 'meta_falhou', detail: e.message };
     }
     const messageId = (r && (r.message_id || r.mid)) || null;
-    await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: text,
+    await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, autorTipo, body: text,
       replyToMessageId: null, isGroup: cv.conversation_kind === 'GROUP' });
     return { ok: true, message_id: messageId, channel: cv.channel };
   }
@@ -873,7 +873,7 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
       return { reason: 'meta_falhou', detail: e.message };
     }
     const messageId = (r && r.id) || null;
-    await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: text,
+    await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, autorTipo, body: text,
       replyToMessageId: null, isGroup: cv.conversation_kind === 'GROUP' });
     return { ok: true, message_id: messageId, channel: cv.channel };
   }
@@ -898,7 +898,7 @@ async function sendMessage(tenantId, conversationId, { text, replyToMessageId = 
   const r = await evolution.sendText({ instance: creds.instance, apikey: creds.apikey }, phone, text, quoted, { mentioned: mencionados });
   const messageId = evolution.pickMessageId(r);
   await registrarSaida(tenantId, {
-    phone, externalMessageId: messageId, sender, body: text,
+    phone, externalMessageId: messageId, sender, autorTipo, body: text,
     conteudo: mencionados.length ? { tipo: 'texto', contexto: { mencoes: mencionados.map((d) => d + '@s.whatsapp.net') } } : null,
     replyToMessageId: citada ? citada.id : null, replyToExternalId: citada && !citada.id ? citada.ext_id : null,
     isGroup: cv.conversation_kind === 'GROUP',
@@ -968,7 +968,7 @@ function _validarEspecial(tipo, d = {}) {
   }
   return { erro: 'tipo_invalido' };
 }
-async function sendEspecial(tenantId, conversationId, { tipo, dados, sender = null }, deps = {}) {
+async function sendEspecial(tenantId, conversationId, { tipo, dados, sender = null, autorTipo = 'humano' }, deps = {}) {
   const evolution = deps.evolution || evolutionDefault;
   const credsForTenant = deps.credsForTenant || outbound.credsForTenant;
   const registrarSaida = deps.registrarSaida || outbound.registrarSaida;
@@ -989,7 +989,7 @@ async function sendEspecial(tenantId, conversationId, { tipo, dados, sender = nu
       : tipo === 'contato' ? await evolution.sendContact(cr, cv.external_id, v.args)
         : await evolution.sendPoll(cr, cv.external_id, v.args);
   const messageId = evolution.pickMessageId(r);
-  await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, body: v.body,
+  await registrarSaida(tenantId, { phone: cv.external_id, externalMessageId: messageId, sender, autorTipo, body: v.body,
     isGroup: cv.conversation_kind === 'GROUP', conteudo: v.conteudo, raw: r && r.key ? { source: 'api', data: r } : null });
   return { ok: true, message_id: messageId };
 }

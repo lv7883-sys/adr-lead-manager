@@ -84,12 +84,52 @@ test('reação não conta como o cliente ter falado', () => {
 test('"respondeu" inclui a recepcionista digitando no WhatsApp dela, não só o painel', () => {
   // Se só contasse source='api' (o painel), o lead atendido pelo celular da recepcionista ficaria
   // no ícone para sempre — e ela juraria ter respondido, com razão.
-  assert.match(semAtendimento.SAIDA_HUMANA_SQL, /s\.source = ANY\(\$3::text\[\]\)/);
-  assert.match(semAtendimento.SAIDA_HUMANA_SQL, /s\.source = 'api' AND coalesce\(s\.sender, ''\) <> \$2/);
+  assert.match(semAtendimento.SAIDA_CONTA_SQL, /s\.source = ANY\(\$3::text\[\]\)/);
   // E a lista de fontes humanas é IMPORTADA, não recopiada: é a mesma de quem já grava a saída.
   assert.ok(FONTES_HUMANAS.has('web') && FONTES_HUMANAS.has('android')
     && FONTES_HUMANAS.has('ios') && FONTES_HUMANAS.has('desktop'));
-  assert.ok(!FONTES_HUMANAS.has('api'), "'api' não é humano por si: quem distingue é o sender");
+  assert.ok(!FONTES_HUMANAS.has('api'), "'api' não é humano por si: quem distingue é a autoria");
+});
+
+test('autoria vem da COLUNA, não do nome — trocar o nome da IA não reescreve o passado', () => {
+  // ESTE É O DEFEITO QUE A REVISÃO INDEPENDENTE MEDIU em 18/11/2026, e o motivo da migr 193.
+  // A regra antiga era "sender diferente do nome_ia ATUAL". Em produção isso fazia:
+  //   • 'Janis J.' (26), 'Janis Joplin' (6), 'Janis' (5) — nomes ANTIGOS da assistente — contarem
+  //     como atendimento HUMANO, porque não casavam com o nome de hoje;
+  //   • 'SERVICE' (3.581) contar como pessoa, sendo o PAPEL DO TOKEN e não autoria.
+  // Renomear a Janis na tela reescrevia o passado: 37 respostas dela viravam "a recepção
+  // atendeu". Nenhum erro aparecia — o número ficava plausível e errado.
+  assert.match(semAtendimento.SAIDA_CONTA_SQL, /s\.autor_tipo = 'humano'/,
+    'a autoria declarada na escrita tem de ser o caminho principal');
+  // O fallback do passado existe, mas só para linha SEM autoria declarada — nunca por cima dela.
+  assert.match(semAtendimento.SAIDA_CONTA_SQL, /s\.autor_tipo IS NULL/);
+  assert.match(semAtendimento.SAIDA_CONTA_SQL, /'boas-vindas-auto', 'renovacao-auto'/,
+    'automação conhecida não conta como pessoa nem no fallback');
+});
+
+test('o modo é configurável por unidade, e o padrão é o conservador', () => {
+  // Pedido do Leo em 18/11/2026: "configurável para o caso de um dia termos a agente de IA
+  // respondendo os leads interinamente".
+  assert.deepEqual(semAtendimento.MODOS, ['humano', 'humano_ou_ia']);
+  // No modo 'humano_ou_ia' QUALQUER saída nossa conta — é a cláusula que liga o atalho.
+  assert.match(semAtendimento.SAIDA_CONTA_SQL, /\$4 = 'humano_ou_ia'/);
+  // ⚠ E o padrão tem de ser 'humano': deixar o lead NO ícone erra para o lado de pedir atenção.
+  //   O erro contrário — assumir 'humano_ou_ia' por default — é silencioso: leads desapareceriam
+  //   do ícone sem ninguém ter olhado, que é exatamente o que a decisão D1 proíbe.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'semAtendimentoHumano.js'), 'utf8');
+  assert.match(src, /let modo = 'humano';/, "o default do modo tem de ser 'humano'");
+});
+
+test('quem escreve DECLARA a autoria — os quatro caminhos de saída', () => {
+  // Sem isto, a coluna nasce vazia e a régua cai no fallback para sempre. Cada caminho declara:
+  const ler = (p) => fs.readFileSync(path.join(__dirname, '..', 'src', p), 'utf8');
+  assert.match(ler('autoReply.js'), /autorTipo: 'ia'/, 'a Janis declara que é IA');
+  assert.match(ler('jobs/renovacao-sweep.js'), /autorTipo: 'automacao'/, 'renovação declara automação');
+  assert.match(ler('boasVindas/auto.js'), /autorTipo: 'automacao'/, 'boas-vindas declara automação');
+  // O painel do Regente: default 'humano' nos dois atalhos de envio do inbox.
+  assert.match(ler('routes/inbox.js'), /autorTipo = 'humano'/, 'o painel declara humano');
+  // E o registrador só aceita os três valores — palpite não entra no banco.
+  assert.match(ler('outbound.js'), /\['ia', 'humano', 'automacao'\]\.includes\(autorTipo\)/);
 });
 
 test('a contagem casa contato pela régua da casa (br_phone_key), não por dígitos crus', () => {

@@ -139,7 +139,7 @@ function _erroEnvio(out) {
 // para 'aprovado' antes de ir para o WhatsApp; se o envio falhar, volta ao estado anterior.
 // `auto` = envio da rotina automática (grava auto = true); `estados` = de onde a linha pode sair (a rotina
 // só tira de 'pendente'; a recepção também completa e envia a bloqueada).
-async function enviar(tenantId, toqueId, { texto, comAnexo = true, sender = 'RECEPCAO', auto = false, estados = ESTADOS_ABERTOS } = {}, deps = {}) {
+async function enviar(tenantId, toqueId, { texto, comAnexo = true, sender = 'RECEPCAO', autorTipo = 'humano', auto = false, estados = ESTADOS_ABERTOS } = {}, deps = {}) {
   const inbox = deps.inbox || require('../routes/inbox');
   const atual = await detalhe(tenantId, toqueId);
   if (!atual) return { erro: 'mensagem_nao_encontrada', status: 404 };
@@ -182,7 +182,7 @@ async function enviar(tenantId, toqueId, { texto, comAnexo = true, sender = 'REC
       } else if (passo.kind === 'arquivo') {
         out = await inbox.sendInboxMedia(tenantId, conversationId, arquivo, passo.legenda || '', sender);
       } else {
-        out = await inbox.sendMessage(tenantId, conversationId, { text: passo.texto, sender });
+        out = await inbox.sendMessage(tenantId, conversationId, { text: passo.texto, sender, autorTipo });
       }
       const e = _erroEnvio(out);
       if (e) {

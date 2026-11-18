@@ -291,7 +291,7 @@ async function maybeAutoReply(tenant, { channel, externalId, inboundText, contac
       }
       // cooldown já reservado ANTES de gerar (anti-duplicado) — não seta de novo aqui.
       const registrar = deps.registrarSaida || outbound.registrarSaida;
-      await registrar(tenantId, { phone: externalId, externalMessageId: sent.messageId, sender: nomeIa, body: texto });
+      await registrar(tenantId, { phone: externalId, externalMessageId: sent.messageId, sender: nomeIa, autorTipo: 'ia', body: texto });
       logger.info('autoreply.sent', { tenant_id: tenantId, channel, nome_ia: nomeIa, ...extra });
       return { ok: true, message_id: sent.messageId, ...(extra.encaminhado ? { encaminhado: extra.encaminhado } : {}) };
     };

@@ -17,13 +17,25 @@ const { isUuid } = require('./validation');
 // de uma conversa privada: aparecia na thread de quem tivesse os mesmos dígitos e ressuscitava a
 // conversa na Caixa de Entrada (era a "mensagem duplicada" que a recepção via). O chamador manda
 // `isGroup` (sabe o tipo da conversa); o sufixo @g.us do destino serve de rede.
-async function registrarSaida(tenantId, { phone, externalMessageId, sender, body, media, replyToMessageId, replyToExternalId, isGroup, conteudo, raw }) {
+// `autorTipo` (migr 193): 'ia' | 'humano' | 'automacao' — QUEM escreveu, gravado na hora.
+//
+// ⚠ POR QUE ELE EXISTE, e por que não basta o `sender`: o `sender` é TEXTO EDITÁVEL. O número do
+//   ícone do Regente decidia "foi gente?" comparando `sender` com o nome da assistente, e medido em
+//   produção em 18/11/2026: trocar o nome da Janis fez 37 respostas DELA passarem a contar como
+//   atendimento humano — o lead saía do ícone sem ninguém ter olhado. Nome é rótulo; autoria é
+//   fato. Quem chama DECLARA, aqui não se adivinha.
+//
+// ⚠ Sem valor explícito fica NULL ("não sei"), nunca um palpite. Quem lê (src/semAtendimentoHumano.js)
+//   trata NULL por escrito. Se um caminho novo de envio esquecer de declarar, o efeito é "não sei"
+//   — conservador — e não "humano" por otimismo, que era o defeito antigo.
+async function registrarSaida(tenantId, { phone, externalMessageId, sender, autorTipo, body, media, replyToMessageId, replyToExternalId, isGroup, conteudo, raw }) {
   const ehGrupo = isGroup === true || /@g\.us$/i.test(String(phone || ''));
+  const autor = ['ia', 'humano', 'automacao'].includes(autorTipo) ? autorTipo : null;
   await withTenant(tenantId, (c) => c.query(
     `INSERT INTO staff_outbound_samples
        (tenant_id, channel, external_id, external_message_id, source, sender, body, raw,
-        media_url, media_type, media_filename, reply_to_message_id, is_group, reply_to_external_id, conteudo)
-     VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, $12, $6, $7, $8, $9, $10, $11, $13)
+        media_url, media_type, media_filename, reply_to_message_id, is_group, reply_to_external_id, conteudo, autor_tipo)
+     VALUES ($1, 'whatsapp', $2, $3, 'api', $4, $5, $12, $6, $7, $8, $9, $10, $11, $13, $14)
      ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO UPDATE
        -- o evento de envio (SEND_MESSAGE) pode chegar ANTES deste registro: aí a linha já existe, mas sem
        -- quem enviou (recepção x Janis), sem a citação e sem o arquivo que só o Regente conhece.
@@ -35,6 +47,9 @@ async function registrarSaida(tenantId, { phone, externalMessageId, sender, body
            media_filename = COALESCE(staff_outbound_samples.media_filename, EXCLUDED.media_filename),
            is_group = staff_outbound_samples.is_group OR EXCLUDED.is_group,
            reply_to_external_id = COALESCE(staff_outbound_samples.reply_to_external_id, EXCLUDED.reply_to_external_id),
+           -- A autoria do eco do webhook (que chega pelo aparelho, sem saber quem clicou) nunca
+           -- sobrepõe a declarada aqui; e uma declaração nova preenche o "não sei" de antes.
+           autor_tipo = COALESCE(EXCLUDED.autor_tipo, staff_outbound_samples.autor_tipo),
            -- paridade 5: cartão (enquete/localização/contato/menções) e a mensagem que a Evolution devolveu — a
            -- enquete precisa do messageSecret dela para somar os votos
            conteudo = COALESCE(staff_outbound_samples.conteudo, EXCLUDED.conteudo),
@@ -43,7 +58,7 @@ async function registrarSaida(tenantId, { phone, externalMessageId, sender, body
     [tenantId, phone, externalMessageId || null, sender || 'Recepção', body || null,
      (media && media.url) || null, (media && media.type) || null, (media && media.filename) || null,
      replyToMessageId || null, ehGrupo, replyToExternalId || null,
-     raw ? JSON.stringify(raw) : null, conteudo ? JSON.stringify(conteudo) : null]
+     raw ? JSON.stringify(raw) : null, conteudo ? JSON.stringify(conteudo) : null, autor]
   ));
 }
 
