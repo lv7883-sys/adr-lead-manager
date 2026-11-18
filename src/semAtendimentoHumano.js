@@ -105,12 +105,24 @@ const CONTAGEM_SQL = `
          JOIN conversations cv ON cv.id = m.conversation_id
         WHERE m.role = 'USER'
           AND ${naoEhReacaoSql('m')}
+          -- ⚠ cv.tenant_id e cv.channel NÃO são decoração: o índice que serve esta junção
+          --   (idx_conversations_brphonekey) é (tenant_id, br_phone_key(external_id)) **PARCIAL**,
+          --   com WHERE channel='whatsapp'. Sem estas duas linhas o planejador não pode usá-lo e
+          --   cai em varredura — foi parte dos 2,8-6,6 s medidos em 18/11/2026. E é consistente
+          --   com o resto da consulta, que já exige br_phone_key(l.phone) <> '' (lead COM
+          --   telefone = WhatsApp; DM da Meta é identificada por psid e não entra aqui).
+          AND cv.tenant_id = $1
+          AND cv.channel = 'whatsapp'
           AND br_phone_key(cv.external_id) = br_phone_key(l.phone)
      )
      -- (3) e NENHUMA pessoa da escola respondeu àquele contato
      AND NOT EXISTS (
        SELECT 1 FROM staff_outbound_samples s
-        WHERE br_phone_key(s.external_id) = br_phone_key(l.phone)
+        -- s.tenant_id explícito pelo mesmo motivo: idx_staff_brphonekey (migr 194) é
+        -- (tenant_id, br_phone_key(external_id)). Sem a coluna, Seq Scan em 87 mil linhas
+        -- chamando a função linha por linha.
+        WHERE s.tenant_id = $1
+          AND br_phone_key(s.external_id) = br_phone_key(l.phone)
           AND ${SAIDA_HUMANA_SQL}
      )`;
 
