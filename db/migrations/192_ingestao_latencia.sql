@@ -100,5 +100,33 @@ CREATE POLICY tenant_isolation ON lead_manager.ingestao_latencia
 -- lead_manager_user, NÃO como postgres. Sem este GRANT a tabela nasce invisível para a aplicação
 -- e o cronômetro registraria zero linhas em silêncio — que é exatamente o modo de falha que esta
 -- medição não pode ter (ausência de erro não é prova; a prova é linha gravada).
--- Sem UPDATE e sem DELETE de propósito: medição não se corrige depois.
 GRANT SELECT, INSERT ON lead_manager.ingestao_latencia TO lead_manager_user;
+
+-- 🔴 O REVOKE ABAIXO NÃO É REDUNDANTE, E ELE NASCEU DE UM ERRO MEDIDO EM PRODUÇÃO.
+--
+-- A primeira versão desta migração tinha só o GRANT acima, com o comentário "sem UPDATE e sem
+-- DELETE de propósito: medição não se corrige depois". **Era falso.** Medido no banco em
+-- 17/11/2026, minutos depois de aplicar: `lead_manager_user` tinha SELECT, INSERT, UPDATE **e
+-- DELETE** na tabela recém-criada.
+--
+-- A causa: o schema `lead_manager` tem privilégio PADRÃO dando `arwd` (ler, gravar, atualizar,
+-- apagar) a `lead_manager_user` em TODA tabela nova — conferido em `pg_default_acl`:
+-- `{lead_manager_user=arwd/postgres}`. Ou seja, **um GRANT mais estreito não estreita nada**: ele
+-- só repete um privilégio que o schema já concedeu. Para restringir é preciso REVOKE explícito, e
+-- isso vale para qualquer tabela nova deste schema que queira ser append-only.
+--
+-- Por que a distinção importa: esta medição é a base de uma decisão (o aviso "no instante" chega
+-- em quantos segundos?). Número que pode ser editado ou apagado depois não serve de base — e o
+-- pior era o comentário já afirmar a proteção, porque aí ninguém vai conferir. Mesma família do
+-- `FALHAS_ATE_DESISTIR` do dashboard no dia anterior: proteção que existe no texto e não no
+-- mecanismo. Nenhum teste de defeito a pega, porque nada falha.
+--
+-- ✅ PROVADO EM PRODUÇÃO (17/11/2026), sob `SET ROLE lead_manager_user`, cada caso em sua PRÓPRIA
+--    transação desfeita — uma por transação de propósito: na primeira tentativa o erro do UPDATE
+--    abortou a transação e contaminou os testes seguintes, deixando o resultado ilegível.
+--      • CONTROLE: INSERT passa  (se falhar, o cronômetro não mede nada — pior que não existir)
+--      • TRAVA:    UPDATE recusado → permission denied for table ingestao_latencia
+--      • TRAVA:    DELETE recusado → permission denied for table ingestao_latencia
+--      • CONTROLE: SELECT passa  (se falhar, scripts/latencia-ingestao.js morre)
+--    Sem os dois controles, uma permissão que recusasse TUDO também "passaria" nas duas travas.
+REVOKE UPDATE, DELETE ON lead_manager.ingestao_latencia FROM lead_manager_user;
