@@ -1,5 +1,12 @@
 'use strict';
 //
+//
+// ⚠⚠ NADA DE CRASE NOS COMENTÁRIOS DAQUI PARA BAIXO. As consultas deste arquivo são template
+//    literals, e uma crase solta num comentário ENCERRA a string: o módulo deixa de carregar com
+//    um erro que aponta para a palavra seguinte, não para a crase. Eu quebrei este arquivo assim
+//    em 18/11/2026, e o recep-layout.js do dashboard no mesmo dia — quatro vezes em dois dias.
+//    O routes/tenant.js já avisava isso por extenso; o aviso não estava AQUI, onde eu estava
+//    escrevendo. Use aspas, ou nada. O `node --check` pega, mas só depois de perder a rodada.
 // semAtendimentoHumano.js — "QUANTOS LEADS NINGUÉM DA CASA OLHOU AINDA?"
 //
 // É o número do ícone do Regente no celular (badge). Decisão D1 do Leo, 16/11/2026, em
@@ -118,11 +125,13 @@ const CONTAGEM_SQL = `
      -- (3) e NENHUMA pessoa da escola respondeu àquele contato
      AND NOT EXISTS (
        SELECT 1 FROM staff_outbound_samples s
-        -- s.tenant_id explícito pelo mesmo motivo: idx_staff_brphonekey (migr 194) é
-        -- (tenant_id, br_phone_key(external_id)). Sem a coluna, Seq Scan em 87 mil linhas
-        -- chamando a função linha por linha.
+        -- ⚠ s.br_key, NÃO br_phone_key(s.external_id) — e a diferença foi medida: calcular a
+        --   chave nas 86 mil linhas custava 1.909 ms por consulta, contra 107 ms para LER a
+        --   tabela. O custo era função, não I/O (br_phone_key é SQL mas tem CTE no corpo, então o
+        --   Postgres não a inlina). A coluna é mantida por gatilho (migr 194) e tem índice
+        --   (tenant_id, br_key) — é o mesmo padrão que conversations.br_key já usava ao lado.
         WHERE s.tenant_id = $1
-          AND br_phone_key(s.external_id) = br_phone_key(l.phone)
+          AND s.br_key = br_phone_key(l.phone)
           AND ${SAIDA_HUMANA_SQL}
      )`;
 
