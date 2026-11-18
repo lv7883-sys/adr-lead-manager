@@ -39,13 +39,45 @@ const semAtendimento = require('./semAtendimentoHumano');
 const { withTenant } = require('./db');
 const telBR = require('./telefoneBR');
 
-const BASE = (process.env.DASHBOARD_INTERNAL_URL || 'http://adr-scheduler-dashboard:3000').replace(/\/+$/, '');
+// ⚠ O PADRÃO TEM DE SER UM NOME QUE EXISTE NA REDE. A primeira versão usava
+//   `adr-scheduler-dashboard:3000`, com o comentário "o padrão é o nome do contêiner" — e **não
+//   era**. Medido na VPS em 18/11/2026 pela revisão independente: os apelidos reais do contêiner
+//   na rede são `adr-dashboard` e `dashboard`; nenhum contêiner ou alias chamado
+//   `adr-scheduler-dashboard` existe. Sem a variável explícita, todo POST morria em DNS — e o
+//   comentário afirmava o contrário, então ninguém iria conferir.
+const BASE = (process.env.DASHBOARD_INTERNAL_URL || 'http://adr-dashboard:3000').replace(/\/+$/, '');
 const TOKEN = process.env.INTERNAL_API_TOKEN || '';
 // Curto de propósito: isto roda no caminho de entrada da mensagem. Um dashboard lento não pode
 // atrasar a ingestão — o aviso é importante, a mensagem do cliente é mais.
 const TIMEOUT_MS = Number(process.env.AVISO_DISPOSITIVO_TIMEOUT_MS || 4000);
 
 let _ultimaFalha = null;
+
+/**
+ * DÁ PARA AVISAR ALGUÉM? Esta pergunta vem ANTES de qualquer trabalho — e a ORDEM é o conserto.
+ *
+ * ⚠ ERRO MEDIDO, achado pela revisão independente em 18/11/2026. A primeira versão perguntava
+ *   "é contato novo?" (1 consulta), depois contava o número do ícone (`semAtendimento.contar`) e
+ *   só então descobria, lá dentro de `_enviar`, que não havia `INTERNAL_API_TOKEN` — jogando os
+ *   dois resultados no lixo. E o estado de produção naquele dia era exatamente esse: sem token.
+ *
+ *   O custo não era teórico. Medido em produção: a contagem leva **2,8 s a quente e 6,6 s a frio**,
+ *   com varredura sequencial em `messages` (59 mil linhas) e `staff_outbound_samples` (87 mil),
+ *   14 mil blocos de disco — dentro de uma transação aberta, num pool de 10 conexões, no MESMO
+ *   banco que atende a Caixa de Entrada da recepção. Duas dessas por lead novo, para produzir um
+ *   número que seria descartado.
+ *
+ *   É a forma mais cara de "degradar com elegância": não entrega o recurso E cobra a conta.
+ *   **"Inerte" tem de significar inerte.**
+ */
+function _podeAvisar(log) {
+  if (TOKEN) return true;
+  if (_ultimaFalha !== 'sem_token') {
+    _ultimaFalha = 'sem_token';
+    log.warn('aviso_dispositivo.inerte', { causa: 'INTERNAL_API_TOKEN ausente' });
+  }
+  return false;
+}
 
 // ⚠ QUEM MANDA É O `tenant_id`, e a tradução para a unidade do dashboard é LÁ, não aqui.
 //   O Lead Manager não tem (e não deve ter) a coluna de franquia: o vínculo mora em
@@ -155,8 +187,19 @@ async function _ehContatoNovo(tenantId, chave, deps = {}) {
           JOIN contact_role cr ON cr.id = m.role_id
          WHERE m.tenant_id = $1
            AND cr.suppression = 'hard'
-           AND regexp_replace(m.phone, '[^0-9]', '', 'g') = ANY($3::text[]))::int AS suprimidos`,
+           AND regexp_replace(m.phone, '[^0-9]', '', 'g') = ANY($3::text[]))::int AS suprimidos,
+       -- ⚠ A LISTA DA EQUIPE, QUE FALTAVA. Medido pela revisão independente em 18/11/2026: os
+       --    papéis com suppression='hard' (beneficiário, responsável financeiro, prestador) NÃO
+       --    têm sobreposição nenhuma com internal_contacts — e internal_contacts é justamente
+       --    a lista que o PORTÃO 0 do engine usa para descartar (src/engine.js:1290). Quatro
+       --    pessoas da equipe mandaram mensagem nos últimos 30 dias e teriam gerado popup
+       --    "Contato novo". O comentário anterior dizia que a supressão cobria "equipe, aluno,
+       --    fornecedor"; cobria dois de três.
+       (SELECT count(*) FROM internal_contacts ic
+         WHERE ic.tenant_id = $1
+           AND regexp_replace(ic.phone, '[^0-9]', '', 'g') = ANY($3::text[]))::int AS internos`,
     [tenantId, String(chave), chaves])).rows[0]);
+  if (r.internos > 0) return { sim: false, motivo: 'contato_interno' };
   if (r.suprimidos > 0) return { sim: false, motivo: 'contato_suprimido' };
   if (r.leads > 0) return { sim: false, motivo: 'lead_ja_existe' };
   return { sim: true, motivo: null };
@@ -171,6 +214,7 @@ async function _ehContatoNovo(tenantId, chave, deps = {}) {
 async function avisarContatoNovo(tenant, p = {}, deps = {}) {
   const log = (deps.logger || logger).child({ tenant_id: tenant.id, fn: 'avisarContatoNovo' });
   try {
+    if (!_podeAvisar(log)) return { ok: false, causa: 'sem_token' };   // ANTES de qualquer consulta
     const vale = await _ehContatoNovo(tenant.id, p.chaveContato, deps);
     if (!vale.sim) { log.info('aviso_dispositivo.1o_tempo_pulado', { motivo: vale.motivo }); return { ok: false, causa: vale.motivo }; }
     // O número do ícone é a conta de D1. Falha dela NÃO cancela o aviso: melhor aviso sem número
@@ -205,6 +249,7 @@ async function avisarContatoNovo(tenant, p = {}, deps = {}) {
 async function avisarLeadNovo(tenant, p = {}, deps = {}) {
   const log = (deps.logger || logger).child({ tenant_id: tenant.id, fn: 'avisarLeadNovo' });
   try {
+    if (!_podeAvisar(log)) return { ok: false, causa: 'sem_token' };   // ANTES de contar o ícone
     let badge;
     try { badge = await semAtendimento.contar(tenant.id); } catch (e) {
       log.warn('aviso_dispositivo.badge_indisponivel', { error: e.message });

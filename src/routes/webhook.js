@@ -753,13 +753,25 @@ async function handleZapiWebhook(req, res) {
     //
     // ⚠ SEM await, e isto é o requisito, não preguiça: esperar o aviso aqui colocaria o tempo do
     //   dashboard na frente da mensagem do cliente. O módulo decide sozinho se vale avisar
-    //   (contato sem lead e fora da lista de supressão) e engole o próprio erro.
-    avisoDispositivo.avisarContatoNovo(tenant, {
-      chaveContato: msg.externalId || null,
-      // pushName: a pessoa se autodeclara. Serve para o aviso ficar legível, nunca para decidir
-      // nada — e é melhor que "número desconhecido" na tela de bloqueio de quem vai atender.
-      nomeContato: msg.sender || null,
-    }).catch(() => { /* aviso nunca derruba ingestão */ });
+    //   (contato sem lead, fora da lista da equipe e fora da supressão) e engole o próprio erro.
+    //
+    // ⚠ REAÇÃO NÃO DISPARA AVISO — eu tinha errado isto, e a revisão independente achou em
+    //   18/11/2026. Este disparo fica ANTES do portão de reação do engine, então um 👍 de número
+    //   desconhecido gerava "Contato novo — •••• 1234 mandou mensagem agora". Esta casa já pagou
+    //   por essa régua uma vez ("reação não é turno", src/reacao.js, nascida porque a fila dizia
+    //   "responder agora" em lead já respondido). Um emoji acordando o celular da recepção às 23h
+    //   é a mesma lição, cobrada de novo — e aqui seria pior, porque emoji não vira lead e o
+    //   2º tempo nunca viria corrigir o aviso.
+    if (msg.reaction) {
+      log.info('aviso_dispositivo.1o_tempo_pulado', { motivo: 'reacao_nao_e_turno' });
+    } else {
+      avisoDispositivo.avisarContatoNovo(tenant, {
+        chaveContato: msg.externalId || null,
+        // pushName: a pessoa se autodeclara. Serve para o aviso ficar legível, nunca para decidir
+        // nada — e é melhor que "número desconhecido" na tela de bloqueio de quem vai atender.
+        nomeContato: msg.sender || null,
+      }).catch(() => { /* aviso nunca derruba ingestão */ });
+    }
     // ORIGEM PRIMEIRO. O dado do anúncio (contextInfo.externalAdReply / código no texto)
     // chega UMA ÚNICA VEZ, nesta mensagem. Se a IA cair depois, a conversa espera o
     // reprocessamento — a origem não teria segunda chance. Por isso ela é gravada ANTES
