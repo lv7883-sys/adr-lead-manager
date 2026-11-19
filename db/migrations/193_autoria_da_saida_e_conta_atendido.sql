@@ -62,11 +62,27 @@ ALTER TABLE lead_manager.staff_outbound_samples
   ADD CONSTRAINT staff_outbound_autor_tipo_ck
   CHECK (autor_tipo IS NULL OR autor_tipo IN ('ia', 'humano', 'automacao'));
 
+-- ⚠ ESTE COMENTÁRIO FOI REESCRITO EM 19/11/2026, e a crítica que o causou era boa: a sessão do
+--    núcleo (ADR-118) apontou que o backfill grava INFERÊNCIA numa coluna, e coluna perde a marca
+--    de inferência — no dia em que uma tela disser "78% atendido por humano", ninguém vai saber
+--    que o período anterior à migração é derivado e não registrado.
+--    Não mudei o domínio (um valor 'humano_presumido' separado seria mais forte, e também
+--    contaminaria toda consulta com um terceiro caso). Em vez disso o comentário DECLARA o corte e
+--    separa o que é recalculável do que é inferência de uma vez — porque as três procedências do
+--    backfill não são equivalentes, e tratá-las como uma só era o problema de verdade.
 COMMENT ON COLUMN lead_manager.staff_outbound_samples.autor_tipo IS
-  'QUEM escreveu, gravado na hora: ia | humano | automacao. NULL = linha antiga que o backfill da '
-  'migr 193 não classificou — quem lê trata como "não sei". Existe porque decidir autoria pelo '
-  'NOME (sender x nome_ia) fazia trocar o nome da assistente reescrever o passado: 37 respostas da '
-  'IA contavam como atendimento humano. Nome é rótulo editável; autoria é fato.';
+  'QUEM escreveu: ia | humano | automacao. NULL = não sei.
+  ⚠ COMO DISTINGUIR REGISTRO DE DERIVAÇÃO (levantado pela sessão do núcleo/ADR-118 em 19/11/2026):
+  linha gravada A PARTIR de 19/11/2026 traz autoria DECLARADA por quem escreveu (o código passa
+  autorTipo em outbound.registrarSaida). Linha ANTERIOR foi preenchida pelo backfill da migr 193, e
+  aí o valor tem três procedências diferentes, que NÃO são equivalentes:
+   (a) 33.287 ''humano'' DERIVADAS de source IN (web,android,ios,desktop) — o aparelho em que foi
+       digitado é fato gravado pelo webhook; a derivação é mecânica e RECALCULÁVEL a qualquer momento;
+   (b) 417 ''ia'' por sender = nome_ia atual — também recalculável;
+   (c) 37 ''ia'' por uma LISTA DE NOMES ANTIGOS da assistente (Janis J., Janis Joplin, Janis),
+       medida em produção em 18/11/2026. ESTA é INFERÊNCIA de uma vez, não recalculável.
+  ⚠ Indicador tipo "x% atendido por humano" que cruze o corte de 19/11/2026 está somando registro
+  com derivação. Quem construir o indicador DECLARA o corte ou não usa o período anterior.';
 
 -- (2) A CHAVE CONFIGURÁVEL ----------------------------------------------------------------------
 ALTER TABLE lead_manager.automacao_config
