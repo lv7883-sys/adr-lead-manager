@@ -85,6 +85,39 @@ make latencia-ingestao ARGS="--dias 3"
 
 ---
 
+## ⚠ Quando outras empresas entrarem, isto vira custo de implantação
+
+*(Registrado em 19/11/2026, a partir de uma pergunta do Leo: "hoje nenhuma, mas no futuro serão
+muitas quando outras empresas entrarem".)*
+
+**Hoje a equipe de Valinhos não tem nenhum iPhone**, então o passo a passo com imagens não vale a
+pena agora. Mas o Regente vai para outras empresas, e aí o quadro muda de natureza — não é mais
+"a recepção instala no celular dela", é **um item do roteiro de implantação de cada cliente novo**.
+
+O que não escala sozinho, e por quê:
+
+| | O que a pessoa faz | Dá para pré-autorizar? |
+|---|---|---|
+| Computador da empresa | nada, se o TI pré-autorizar o site uma vez na máquina | **sim** — configuração do Chrome, ou política se houver domínio |
+| Android pessoal | 2 toques (Ativar → Permitir), uma vez | **não** — celular pessoal não aceita política da empresa |
+| iPhone pessoal | 3 passos, e o do meio é abrir **pelo ícone**, não pelo Safari | **não** |
+
+⚠ **O passo do meio do iPhone é onde a implantação vai travar.** Quem abre pelo Safari em vez do
+ícone recém-criado não recebe nem a oferta de permissão — e vai relatar "não funciona", com razão,
+sem nada no log para investigar. É o tipo de falha que consome atendimento e parece defeito do
+produto.
+
+**Onde isto deveria morar, e não mora ainda:** no roteiro da implantação guiada (ADR-052), como um
+passo com texto pronto por plataforma. Enquanto não existir, cada implantação vai redescobrir isto.
+
+⚠ **E a conta muda de dono:** em Valinhos o custo é de minutos, uma vez. Num produto vendido, é por
+cliente, por pessoa e por aparelho, para sempre. Vale decidir cedo se o caminho padrão de um cliente
+novo é o push (barato de operar, caro de ativar) ou o WhatsApp, que **não pede permissão nenhuma,
+não exige instalar nada e não tem versão mínima de sistema** — e já está programado
+(`src/notificacao.js`). Hoje a resposta certa pode ser "os dois, e o push é opcional".
+
+---
+
 ## Decisões já tomadas
 
 ### D1 — O número do ícone conta "ninguém da casa olhou ainda" *(Leo, 16/11/2026)*
