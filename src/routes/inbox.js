@@ -28,6 +28,7 @@ const { authenticate } = require('../auth');
 const { requireTenantAccess } = require('../rbac');
 const { isUuid } = require('../validation');
 const { terminalSql, statusVivoSql } = require('../lifecycle');
+const oportunidade = require('../oportunidade');   // "tem negócio novo aqui?" (régua única, 20/11)
 const { fetchTimeline, fetchJanela, JANELA_PADRAO } = require('../timeline');
 const { naoEhReacaoSql } = require('../reacao');
 // Régua ÚNICA do nome exibido (agenda da unidade > pushName > cadastro > lead > número).
@@ -163,7 +164,9 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     // `IS NOT TRUE` e nao `NOT (...)`: a regua compara `desfecho = 'matriculado'`, que com
     // desfecho NULL devolve NULL — e `NOT NULL` e NULL, que descarta a linha. Medindo a
     // auditoria com `NOT` eu perdi 366 conversas em aberto, sem erro nenhum aparecer.
-    if (v === 'leads') extra.push('is_lead = true AND ja_e_aluno IS NOT TRUE');
+    // Sai da fila quem já é aluno E NÃO tem sinal de oportunidade. O aluno que a IA leu como
+    // "tem negócio novo" FICA — é lead, pela regra do dono e pelo ADR-036.
+    if (v === 'leads') extra.push('is_lead = true AND (ja_e_aluno IS NOT TRUE OR tem_oportunidade IS TRUE)');
     else if (v === 'nao_lead') extra.push('is_lead = false');
   }
 
@@ -220,7 +223,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       SELECT DISTINCT ON (${IDENT_LEAD})
              ${IDENT_LEAD} AS ident,
              l.id, l.name, l.phone, l.meta_psid, l.status, l.desfecho, l.origem, l.aborda_renovacao,
-             l.etapa_custom
+             l.etapa_custom, l.classification_signals
         FROM leads l
        WHERE l.tenant_id = $1 AND ${IDENT_LEAD} <> ''
        ORDER BY ${IDENT_LEAD}, l.created_at ASC
@@ -290,7 +293,8 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
              -- (Leads usa IN, Outras usa NOT EXISTS). Excluir aqui dentro tiraria o aluno do
              -- conjunto e, por tabela, ele entraria no pré-filtro de "Outras" — o defeito
              -- mudaria de aba em vez de sumir. Quem filtra é quem pergunta, abaixo.
-             ${stages.alunoSql('lk')} AS ja_e_aluno
+             ${stages.alunoSql('lk')} AS ja_e_aluno,
+             ${oportunidade.oportunidadeSql('lk')} AS tem_oportunidade
         FROM conversations cv
         JOIN leadk lk ON lk.ident = ${IDENT_CONV} AND ${IDENT_CONV} <> ''
        WHERE cv.tenant_id = $1
@@ -341,7 +345,7 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       // O comentário lá em cima já avisava que o pré-filtro só pode ser MAIS LARGO que o filtro
       // real — e eu o li e ainda assim estreitei só o de fora. O que escapou não foi a página:
       // foi a SONDA do cursor.
-      if (v === 'leads') cortePre.push('cv.id IN (SELECT id FROM leadsel WHERE ja_e_aluno IS NOT TRUE)');
+      if (v === 'leads') cortePre.push('cv.id IN (SELECT id FROM leadsel WHERE ja_e_aluno IS NOT TRUE OR tem_oportunidade IS TRUE)');
       else if (v === 'nao_lead') cortePre.push('NOT EXISTS (SELECT 1 FROM leadsel ls WHERE ls.id = cv.id)');
     }
     if (condBusca) cortePre.push('cv.id IN (SELECT id FROM busca)');
@@ -376,7 +380,7 @@ ${cortaCedo}
       SELECT c.*, lk.id AS lead_id, lk.name AS lead_name, lk.phone AS lead_phone,
              lk.meta_psid AS lead_psid, lk.status AS lead_status, lk.desfecho AS lead_desfecho,
              lk.origem AS lead_origem, lk.aborda_renovacao AS lead_aborda_renovacao,
-             lk.etapa_custom AS lead_etapa_custom
+             lk.etapa_custom AS lead_etapa_custom, lk.classification_signals AS lead_signals
         FROM conv c
         LEFT JOIN leadk lk ON c.ident <> '' AND lk.ident = c.ident
     ),
@@ -469,7 +473,7 @@ ${renovCtesDepois}
         -- enquanto o KANBAN mostrava a coluna criada pela unidade. Nenhum erro, nenhum log — as
         -- duas telas simplesmente discordavam. Achado abrindo a rota DEPOIS de publicar, não no
         -- teste: os meus testes são puros e nenhum deles atravessa esta consulta.
-        m.lead_etapa_custom,
+        m.lead_etapa_custom, m.lead_signals,
         -- Nome exibido: AGENDA DA UNIDADE primeiro (migr 184 — como NÓS salvamos), depois o pushName
         -- do WhatsApp, depois cadastro/lead. A ordem e o porquê de cada degrau: src/contato-nome.js.
         ${nomeCt.nomeContatoSql({
@@ -517,7 +521,25 @@ ${renovCtesDepois}
         --
         -- Usa a regua CANONICA de propósito, e nao a coluna que a unidade ve (migr 188): se a
         -- unidade criar uma coluna propria, quem matriculou continua sendo aluno.
+        -- ALUNO EM ROTINA — e não "aluno", que é o que eu escrevi às 18h de hoje e estava errado.
+        --
+        -- O filtro de hoje escondia TODOS os 54 alunos da aba Leads, por ETAPA. Mas em 20 deles a
+        -- IA tinha gravado NOVA_OPORTUNIDADE: a mãe indicando a sobrinha, o pai perguntando se
+        -- pode levar o amigo do filho, a aula experimental de um curso novo. Ontem apareciam com
+        -- rótulo errado; depois do meu conserto ficaram INVISÍVEIS — e são mais frequentes que
+        -- lead novo (4/mês contra 12-20/mês). Trocar "rótulo enganoso" por "sumiço" é pior.
+        --
+        -- A régua do dono (20/11): "o lead tem de ser reconhecido e tratado como lead
+        -- independentemente de o contato ser conhecido ou não". Já era o ADR-036 de 07/07:
+        -- "Aluno novo = lead novo, sempre, mesmo que a conta/contrato já exista".
+        --
+        -- (Sem crases aqui: template literal. Eu escrevi o aviso disso no commit de hoje de
+        --  manhã e repeti o erro à tarde — por isso ele virou teste, logo abaixo.)
+        --
+        -- ja_e_aluno continua existindo como FATO (a tela usa para o selo) — o que muda é quem
+        -- some da fila: só o aluno SEM sinal de oportunidade.
         ${stages.alunoSql('m2')} AS ja_e_aluno,
+        ${oportunidade.oportunidadeSql('m2o')} AS tem_oportunidade,
         COALESCE(la.received_at, m.updated_at) AS last_activity_at,
         la.kind AS ultima_kind, la.body AS ultima_body, la.media_type AS ultima_media_type,
         la.edited_at AS ultima_edited_at, la.deleted_at AS ultima_deleted_at,
@@ -542,6 +564,9 @@ ${renovCtesDepois}
       -- alias m2 = a MESMA linha de lead, so p/ os fragmentos SQL do lifecycle.js (que
       -- esperam colunas status/desfecho num alias). LATERAL de 1 linha, sem custo.
       LEFT JOIN LATERAL (SELECT m.lead_status AS status, m.lead_desfecho AS desfecho) m2 ON true
+      -- mesmo truque do m2, para o fragmento do oportunidade.js (que espera a coluna com o nome
+      -- original num alias). LATERAL de 1 linha, sem custo.
+      LEFT JOIN LATERAL (SELECT m.lead_signals AS classification_signals) m2o ON true
     )
     SELECT * FROM projected
     ${where}
@@ -574,6 +599,9 @@ function mapConversationRow(r, cfgColunas) {
     // JÁ É ALUNO: vem pronto do SQL (coluna ja_e_aluno) para a tela NÃO reimplementar a régua.
     // Quem decide "convertido ou cliente" é o stages.js — aqui, no filtro da aba e no pré-filtro.
     ja_e_aluno: r.ja_e_aluno === true,
+    // TEM OPORTUNIDADE NOVA: veredito que a IA já gravava e ninguém lia. A tela usa para decidir
+    // a etiqueta — aluno em rotina não leva "LEAD"; aluno com negócio novo leva.
+    tem_oportunidade: r.tem_oportunidade === true,
     lead_id: r.lead_id || null,
     lead_status: r.lead_status || null,
     desfecho: r.lead_desfecho || null,
@@ -802,6 +830,7 @@ async function getConversationThread(client, tenantId, conversationId, usuario, 
       // revisão apontou que ter duas definições para o mesmo nome é contrato inconsistente —
       // quem desenha o pill já exige `is_lead` do seu lado.
       ja_e_aluno: stages.ehAluno(lead),
+      tem_oportunidade: oportunidade.temOportunidade(lead),
       sugestao_etapa: (is_lead && stages.isSugestaoAtiva(lead)) ? { etapa: lead.suggested_stage, motivo: lead.stage_reasoning || null } : null,
       last_read_at: cv.last_read_at,
       arquivada: !!cv.arquivada_em, fixada: !!cv.fixada_em,   // migr. 118

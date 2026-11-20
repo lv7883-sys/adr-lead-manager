@@ -57,6 +57,11 @@ before(async () => {
       -- dívida de duas frentes diferentes, invisível porque este arquivo só roda sob demanda
       -- (precisa de um Postgres descartável, que não sobe no Windows sem Docker aberto).
       etapa_custom text,
+      -- O veredito do classificador de CONVERSA (NOVA_OPORTUNIDADE / ROTINA_CLIENTE / …).
+      -- Campo antigo, mas que só ganhou leitor em 20/11 — e por isso só agora o schema do teste
+      -- precisa dele. jsonb porque em produção ele tem três formas (array de veredito, array de
+      -- sinais livres e um objeto de lote antigo), e a régua do oportunidade.js atravessa as três.
+      classification_signals jsonb,
       created_at timestamptz DEFAULT now());
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, dormancy_days int DEFAULT 7);
     -- Canônico (ADR-049): contrato ↔ pessoa ↔ telefone. Schema mínimo — só as colunas que a
@@ -465,6 +470,46 @@ test('(5f) aba Leads é fila de trabalho: sem aluno, e sem perder quem está em 
 // Medido com controle antes/depois: 60 conversas e limite 50 iam de "2 páginas, 60 alcançadas"
 // para "1 página, 46 itens, 9 leads invisíveis". Limite pequeno é o que escancara — por isso o
 // teste usa 3 e caminha a lista inteira em vez de olhar só a primeira página.
+// ALUNO COM NEGÓCIO NOVO CONTINUA SENDO LEAD (20/11/2026, regressão do mesmo dia).
+//
+// O conserto das 18h escondia da aba TODOS os alunos, por ETAPA. Mas em 20 dos 54 a IA tinha
+// gravado NOVA_OPORTUNIDADE — mãe indicando a sobrinha, pai perguntando se pode levar o amigo
+// do filho, aula experimental de curso novo. Ontem apareciam com rótulo errado; depois do meu
+// conserto ficaram INVISÍVEIS, e são mais frequentes que lead novo (4/mês contra 12-20/mês).
+//
+// Regra do dono: "o lead tem de ser reconhecido e tratado como lead independentemente de o
+// contato ser conhecido ou não". Já era o ADR-036 de 07/07: "Aluno novo = lead novo, sempre".
+test('(5h) aluno COM sinal de oportunidade continua na aba Leads; em rotina, não', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000ee'; await cfg(tenant, 7);
+  const rotina = H(860), oportuno = H(861), relacion = H(862), aberto = H(863);
+  const seed = async (ph, over, sinais) => {
+    const cv = await conv(tenant, ph); await msg(cv);
+    const id = await lead(tenant, { phone: ph, ...over });
+    if (sinais !== undefined) {
+      await c.query('UPDATE leads SET classification_signals = $2::jsonb WHERE id = $1', [id, sinais]);
+    }
+  };
+  await seed(rotina, { status: 'CONVERTED' }, JSON.stringify(['ROTINA_CLIENTE']));
+  await seed(oportuno, { status: 'CONVERTED' }, JSON.stringify(['NOVA_OPORTUNIDADE']));
+  // Professor com oportunidade mandada para confirmação humana: é o MESMO fato por outra porta.
+  await seed(relacion, { status: 'QUALIFYING', desfecho: 'cliente' }, JSON.stringify(['RELACIONAMENTO_OPORTUNIDADE']));
+  await seed(aberto, { status: 'QUALIFYING' }, undefined);
+
+  const naAba = (await list(tenant, { limit: 50, view: 'leads' })).items.map((i) => i.external_id);
+  assert.ok(!naAba.includes(rotina), 'aluno em rotina sai da fila (o caso que começou tudo)');
+  assert.ok(naAba.includes(oportuno), 'aluno com negócio novo É lead e FICA na fila');
+  assert.ok(naAba.includes(relacion), 'oportunidade de contato de relacionamento também conta');
+  assert.ok(naAba.includes(aberto), 'lead em aberto sem sinal nenhum continua (classification_signals NULL)');
+
+  const itens = (await list(tenant, { limit: 50 })).items;
+  assert.equal(byExt(itens, oportuno).tem_oportunidade, true);
+  assert.equal(byExt(itens, rotina).tem_oportunidade, false);
+  assert.equal(byExt(itens, aberto).tem_oportunidade, false, 'coluna NULL vira false, nunca NULL');
+  // E o selo da etapa continua, nos dois: é ele que escreve "Matriculado".
+  assert.equal(byExt(itens, oportuno).etapa, 'convertido');
+  assert.equal(byExt(itens, rotina).etapa, 'convertido');
+});
+
 test('(5g) aba Leads pagina até o fim mesmo com aluno no meio (o cursor não pode nascer nulo)', async () => {
   const tenant = '00000000-0000-0000-0000-0000000000ed'; await cfg(tenant, 7);
   // 9 conversas, 3 delas de aluno, intercaladas: a 1ª página (limite 3) PEGA um aluno.
