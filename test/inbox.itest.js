@@ -51,6 +51,12 @@ before(async () => {
     CREATE TABLE leads (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, name text, phone text,
       meta_psid text, status text, desfecho text, origem text, aborda_renovacao boolean,
+      -- Coluna que a UNIDADE criou (migr 188). Faltava aqui: a listagem passou a selecioná-la
+      -- e o itest parou com 'column l.etapa_custom does not exist'. Junto com contato_agenda
+      -- (migr 184, logo abaixo), deixava 19 de 20 testes vermelhos NO PRÓPRIO origin/main —
+      -- dívida de duas frentes diferentes, invisível porque este arquivo só roda sob demanda
+      -- (precisa de um Postgres descartável, que não sobe no Windows sem Docker aberto).
+      etapa_custom text,
       created_at timestamptz DEFAULT now());
     CREATE TABLE tenant_lead_config (tenant_id uuid PRIMARY KEY, dormancy_days int DEFAULT 7);
     -- Canônico (ADR-049): contrato ↔ pessoa ↔ telefone. Schema mínimo — só as colunas que a
@@ -74,6 +80,16 @@ before(async () => {
     -- Contatos internos (equipe/dono, ADR-018) — excluídos da aba Renovações.
     CREATE TABLE internal_contacts (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, phone text, name text, type text);
+    -- Agenda de contatos da unidade (migr. 184) — o nome que a ESCOLA deu ao contato, que tem
+    -- precedência sobre o pushName na listagem. Faltava aqui: a listagem passou a fazer JOIN
+    -- nela e o itest inteiro parou com 'relation "contato_agenda" does not exist' — 19 de 20
+    -- testes vermelhos desde então, sem ninguém notar, porque este arquivo só roda sob demanda
+    -- (precisa de Postgres descartável). Dívida da sessão que publicou a 184.
+    CREATE TABLE contato_agenda (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL,
+      chave text NOT NULL, nome text NOT NULL, origem text NOT NULL DEFAULT 'recepcao',
+      salvo_por text, criado_em timestamptz DEFAULT now(), atualizado_em timestamptz DEFAULT now(),
+      UNIQUE (tenant_id, chave));
     -- Renovação resolvida pela recepção (migr. 095) — retira da aba (amarrada ao venc do ciclo).
     CREATE TABLE renovacao_dismiss (
       tenant_id uuid, br_key text, venc date, situacao text, por text, em timestamptz DEFAULT now(),
@@ -383,6 +399,100 @@ test('(5d) lista traz a ETAPA do lead (mesma régua do kanban); não-lead sem et
   assert.equal(byExt(itens, H(801)).etapa, 'perdido');
   assert.equal(byExt(itens, H(802)).etapa, null);
   assert.equal(byExt(itens, H(803)).etapa, null);
+});
+
+// ALUNO NÃO É LEAD NO PRESENTE (20/11/2026).
+//
+// Caso real: pai avisando que a filha matriculada faltaria à aula. A IA classificou certo
+// (ROTINA_CLIENTE, confiança 1.000), mas a tela mostrava o pill "LEAD" colado no selo
+// "Matriculado". O gate `is_lead` responde "tem ficha no funil e ninguém descartou" — e quem
+// matriculou continua com ficha. Eram 54 conversas assim.
+//
+// Duas etapas contam como aluno, não uma: 'convertido' (matriculou PELO funil) e 'cliente'
+// (já era aluno ANTES dele). A segunda estava vazia em produção — é a que uma régua escrita à
+// mão esqueceria, e por isso ela tem caso aqui.
+test('(5e) ja_e_aluno: convertido e cliente são aluno; em aberto e perdido NÃO são', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000eb'; await cfg(tenant, 7);
+  const casos = [
+    [H(820), { status: 'CONVERTED' }, true, 'convertido'],
+    [H(821), { status: 'QUALIFIED', desfecho: 'matriculado' }, true, 'convertido'],
+    [H(822), { status: 'QUALIFYING', desfecho: 'cliente' }, true, 'cliente'],
+    [H(823), { status: 'QUALIFYING' }, false, 'qualificando'],          // desfecho NULL
+    [H(824), { status: 'QUALIFIED', desfecho: 'nao_compareceu_aula' }, false, 'perdido'],
+  ];
+  for (const [ph, over] of casos) { const cv = await conv(tenant, ph); await msg(cv); await lead(tenant, { phone: ph, ...over }); }
+  const itens = (await list(tenant, { limit: 50 })).items;
+  for (const [ph, , esperado, etapa] of casos) {
+    const it = byExt(itens, ph);
+    assert.equal(it.ja_e_aluno, esperado, `ja_e_aluno de ${etapa}`);
+    // O SELO DA ETAPA TEM DE SOBREVIVER: é ele que escreve "Matriculado" na tela. Se o conserto
+    // tivesse sido apagar `is_lead`, a etapa viria null (ela só é calculada quando is_lead) e a
+    // recepção ficaria sem as DUAS informações em vez de sem uma.
+    assert.equal(it.etapa, etapa, `etapa de ${ph} continua visível`);
+  }
+});
+
+test('(5f) aba Leads é fila de trabalho: sem aluno, e sem perder quem está em aberto', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000ec'; await cfg(tenant, 7);
+  const aberto = H(830), convertido = H(831), cliente = H(832), perdido = H(833);
+  for (const [ph, over] of [[aberto, { status: 'QUALIFYING' }], [convertido, { status: 'CONVERTED' }],
+    [cliente, { status: 'QUALIFYING', desfecho: 'cliente' }],
+    [perdido, { status: 'QUALIFIED', desfecho: 'nao_compareceu_aula' }]]) {
+    const cv = await conv(tenant, ph); await msg(cv); await lead(tenant, { phone: ph, ...over });
+  }
+  const leads = (await list(tenant, { limit: 50, view: 'leads' })).items.map((i) => i.external_id);
+  // A ARMADILHA DO NULO, e ela não é hipotética: medindo esta mesma auditoria com
+  // `NOT (status IN (...) OR desfecho = 'matriculado')` eu perdi 366 conversas em aberto, porque
+  // com desfecho NULL a expressão dá NULL e `NOT NULL` é NULL — a linha some sem erro nenhum.
+  // Por isso o filtro usa `IS NOT TRUE`, e por isso este caso existe.
+  assert.ok(leads.includes(aberto), 'lead em aberto (desfecho NULL) TEM de continuar na fila');
+  assert.ok(leads.includes(perdido), 'perdido continua na aba (fechar sem matricular é outra decisão)');
+  assert.ok(!leads.includes(convertido), 'aluno convertido sai da fila');
+  assert.ok(!leads.includes(cliente), 'aluno pré-existente também sai');
+  // E a aba "Outras" não muda: ela é o complemento do gate, não da régua de aluno.
+  const outras = (await list(tenant, { limit: 50, view: 'nao_lead' })).items.map((i) => i.external_id);
+  assert.ok(!outras.includes(convertido), 'aluno não cai em Outras — ele some da fila, não troca de aba');
+});
+
+// A ABA LEADS TEM DE CONTINUAR PAGINANDO (achado da revisão independente, 20/11/2026).
+//
+// O primeiro desenho filtrava o aluno SÓ no WHERE de fora e deixava o pré-filtro do corte de
+// cima mais largo. Parece inofensivo — a página vinha certa —, mas o LIMIT é aplicado no corte,
+// e `tem_mais` nasce de `linhas > limite`. Com aluno entre os primeiros, a página voltava mais
+// curta que o limite, o cursor nascia NULO e o scroll infinito morria na primeira tela: os
+// leads mais antigos ficavam INALCANÇÁVEIS para a recepção.
+//
+// Medido com controle antes/depois: 60 conversas e limite 50 iam de "2 páginas, 60 alcançadas"
+// para "1 página, 46 itens, 9 leads invisíveis". Limite pequeno é o que escancara — por isso o
+// teste usa 3 e caminha a lista inteira em vez de olhar só a primeira página.
+test('(5g) aba Leads pagina até o fim mesmo com aluno no meio (o cursor não pode nascer nulo)', async () => {
+  const tenant = '00000000-0000-0000-0000-0000000000ed'; await cfg(tenant, 7);
+  // 9 conversas, 3 delas de aluno, intercaladas: a 1ª página (limite 3) PEGA um aluno.
+  const esperadas = [];
+  for (let i = 0; i < 9; i++) {
+    const ph = H(840 + i);
+    const cv = await conv(tenant, ph); await msg(cv, { diasAtras: i });
+    // A ORDEM PRECISA SER DETERMINÍSTICA, e `diasAtras` não basta: a conversa nasce com
+    // last_activity_at = now() e o gatilho da migr. 111 só AVANÇA — mensagem no passado nunca
+    // recua a coluna. Sem este UPDATE as 9 ficam com o mesmo instante e o keyset passa a
+    // desempatar por uuid aleatório, tornando o teste instável (medido: a 1ª página vinha com
+    // o MEIO da lista). Ordenar é o ponto do teste, então a ordem tem de ser posta à mão.
+    await c.query('UPDATE conversations SET last_activity_at = now() - make_interval(days => $2) WHERE id = $1', [cv, i]);
+    const aluno = i % 3 === 1;
+    await lead(tenant, { phone: ph, ...(aluno ? { status: 'CONVERTED' } : { status: 'QUALIFYING' }) });
+    if (!aluno) esperadas.push(ph);
+  }
+  const vistas = [];
+  let cursor = null;
+  for (let pagina = 0; pagina < 10; pagina++) {
+    const r = await list(tenant, { limit: 3, view: 'leads', ...(cursor ? { cursor } : {}) });
+    for (const it of r.items) vistas.push(it.external_id);
+    cursor = r.next_cursor ? inbox.decodeCursor(r.next_cursor) : null;
+    if (!cursor) break;
+  }
+  assert.deepEqual(vistas.sort(), esperadas.sort(),
+    'a aba Leads tem de alcançar TODOS os leads em aberto, não só a primeira página');
+  assert.equal(vistas.length, 6, '9 conversas menos 3 alunos');
 });
 
 test('(6) keyset pagination sem sobreposição', async () => {

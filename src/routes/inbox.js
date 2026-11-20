@@ -158,7 +158,12 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
     if (!q) extra.push(arquivadas ? 'arquivada_em IS NOT NULL' : 'arquivada_em IS NULL');
     if (fixadas === 'so') extra.push('fixada_em IS NOT NULL');
     else if (fixadas === 'fora') extra.push('fixada_em IS NULL');
-    if (v === 'leads') extra.push('is_lead = true');
+    // A aba Leads e FILA DE TRABALHO da recepcao (confirmado pelo Leo em 20/11/2026), e por
+    // isso nao pode misturar aluno com oportunidade nova: quem ja matriculou sai daqui.
+    // `IS NOT TRUE` e nao `NOT (...)`: a regua compara `desfecho = 'matriculado'`, que com
+    // desfecho NULL devolve NULL — e `NOT NULL` e NULL, que descarta a linha. Medindo a
+    // auditoria com `NOT` eu perdi 366 conversas em aberto, sem erro nenhum aparecer.
+    if (v === 'leads') extra.push('is_lead = true AND ja_e_aluno IS NOT TRUE');
     else if (v === 'nao_lead') extra.push('is_lead = false');
   }
 
@@ -280,7 +285,12 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
   // régua do is_lead do projected (leadk = lead mais antigo do telefone; NOT_LEAD/REVIEW_QUEUE não).
   const leadselCte = leadselAntes ? `
     leadsel AS (
-      SELECT cv.id
+      SELECT cv.id,
+             -- Aluno vai junto, como COLUNA e não como filtro: este CTE serve as DUAS abas
+             -- (Leads usa IN, Outras usa NOT EXISTS). Excluir aqui dentro tiraria o aluno do
+             -- conjunto e, por tabela, ele entraria no pré-filtro de "Outras" — o defeito
+             -- mudaria de aba em vez de sumir. Quem filtra é quem pergunta, abaixo.
+             ${stages.alunoSql('lk')} AS ja_e_aluno
         FROM conversations cv
         JOIN leadk lk ON lk.ident = ${IDENT_CONV} AND ${IDENT_CONV} <> ''
        WHERE cv.tenant_id = $1
@@ -318,7 +328,20 @@ function buildConversationsSql(tenantId, { view = 'todas', fonte = null, q = nul
       if (!q) cortePre.push(arquivadas ? 'cv.arquivada_em IS NOT NULL' : 'cv.arquivada_em IS NULL');   // migr. 118
       if (fixadas === 'so') cortePre.push('cv.fixada_em IS NOT NULL');
       else if (fixadas === 'fora') cortePre.push('cv.fixada_em IS NULL');
-      if (v === 'leads') cortePre.push('cv.id IN (SELECT id FROM leadsel)');
+      // O PRÉ-FILTRO TEM DE EXCLUIR O ALUNO TAMBÉM, e isto NÃO é otimização — é o cursor.
+      //
+      // O LIMIT do corte de cima é aplicado AQUI, e `tem_mais` nasce de `rows.length > limit`.
+      // Se o filtro de fora for mais estreito que este pré-filtro, as linhas que ele descarta
+      // já foram contadas: com um aluno entre os ~51 mais recentes, a primeira página voltava
+      // com menos que o limite, o cursor nascia NULO e o scroll infinito da aba MORRIA na
+      // primeira tela — leads antigos ficavam inalcançáveis para a recepção.
+      //
+      // Medido pela revisão independente, com controle antes/depois: 60 conversas e limite 50
+      // passaram de "2 páginas, 60 alcançadas" para "1 página, 46 itens, 9 leads invisíveis".
+      // O comentário lá em cima já avisava que o pré-filtro só pode ser MAIS LARGO que o filtro
+      // real — e eu o li e ainda assim estreitei só o de fora. O que escapou não foi a página:
+      // foi a SONDA do cursor.
+      if (v === 'leads') cortePre.push('cv.id IN (SELECT id FROM leadsel WHERE ja_e_aluno IS NOT TRUE)');
       else if (v === 'nao_lead') cortePre.push('NOT EXISTS (SELECT 1 FROM leadsel ls WHERE ls.id = cv.id)');
     }
     if (condBusca) cortePre.push('cv.id IN (SELECT id FROM busca)');
@@ -478,6 +501,23 @@ ${renovCtesDepois}
              THEN (${statusVivoSql('m2')} AND NOT ${terminalSql('m2')}
                    AND la.received_at >= now() - (cfg.dormancy_days || ' days')::interval)
         END AS is_lead_ativo,
+        -- JA E ALUNO — a regua canonica de etapa (stages.stageSql), nao uma segunda copia.
+        -- (Sem crases neste bloco: ele vive DENTRO de um template literal, e uma crase aqui
+        -- fecha a string e derruba o modulo inteiro no require. Aconteceu ao escrever isto.)
+        --
+        -- Existe porque is_lead responde "tem ficha no funil e ninguem descartou", e quem
+        -- MATRICULOU continua com ficha: o pill "LEAD" ficava aceso ao lado do selo
+        -- "Matriculado", dizendo no presente o que e passado (caso medido em 20/11/2026 —
+        -- pai avisando falta da filha ja matriculada, com a IA tendo classificado certo como
+        -- ROTINA_CLIENTE, confianca 1.000). Eram 54 conversas assim, de 563 com o pill aceso.
+        --
+        -- Duas etapas, nao uma: 'convertido' e quem matriculou PELO funil e 'cliente' e quem
+        -- ja era aluno ANTES dele (stages.js). A segunda esta vazia hoje e e justamente a que
+        -- uma regua escrita a mao esqueceria.
+        --
+        -- Usa a regua CANONICA de propósito, e nao a coluna que a unidade ve (migr 188): se a
+        -- unidade criar uma coluna propria, quem matriculou continua sendo aluno.
+        ${stages.alunoSql('m2')} AS ja_e_aluno,
         COALESCE(la.received_at, m.updated_at) AS last_activity_at,
         la.kind AS ultima_kind, la.body AS ultima_body, la.media_type AS ultima_media_type,
         la.edited_at AS ultima_edited_at, la.deleted_at AS ultima_deleted_at,
@@ -531,6 +571,9 @@ function mapConversationRow(r, cfgColunas) {
         { status: r.lead_status, desfecho: r.lead_desfecho, etapa_custom: r.lead_etapa_custom },
         cfgColunas, stages.stageKey)
       : null,
+    // JÁ É ALUNO: vem pronto do SQL (coluna ja_e_aluno) para a tela NÃO reimplementar a régua.
+    // Quem decide "convertido ou cliente" é o stages.js — aqui, no filtro da aba e no pré-filtro.
+    ja_e_aluno: r.ja_e_aluno === true,
     lead_id: r.lead_id || null,
     lead_status: r.lead_status || null,
     desfecho: r.lead_desfecho || null,
@@ -751,6 +794,14 @@ async function getConversationThread(client, tenantId, conversationId, usuario, 
       // Mover o lead de etapa pelo cabeçalho da conversa (mesma régua e mesma rota do kanban) —
       // e, desde a migr 188, a MESMA coluna que o kanban mostra, inclusive as que a unidade criou.
       etapa: is_lead ? stagesUi.etapaDoLead(lead, cfgColunasThread, stages.stageKey) : null,
+      // JÁ É ALUNO — mesma régua canônica da lista (stages.ehAluno), para o cabeçalho não dizer
+      // "LEAD" em quem matriculou. NÃO usa a etapa acima: aquela é a coluna que a unidade vê, e
+      // uma coluna customizada não pode fazer um aluno voltar a ser lead.
+      //
+      // Sem o `is_lead &&` de propósito: na lista o campo também é independente do gate, e a
+      // revisão apontou que ter duas definições para o mesmo nome é contrato inconsistente —
+      // quem desenha o pill já exige `is_lead` do seu lado.
+      ja_e_aluno: stages.ehAluno(lead),
       sugestao_etapa: (is_lead && stages.isSugestaoAtiva(lead)) ? { etapa: lead.suggested_stage, motivo: lead.stage_reasoning || null } : null,
       last_read_at: cv.last_read_at,
       arquivada: !!cv.arquivada_em, fixada: !!cv.fixada_em,   // migr. 118

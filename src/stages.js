@@ -274,6 +274,23 @@ function stageKey(status, desfecho) {
 function stageOfLead(l) { return stageKey(l && l.status, l && l.desfecho); }
 function isStage(l, key) { return stageOfLead(l) === key; }
 
+// JÁ É ALUNO — as etapas em que a pessoa deixou de ser oportunidade e virou cliente.
+//
+// Vive AQUI, e não em quem pergunta, porque já nasceu com três cópias numa só mudança (o SQL da
+// listagem, a projeção da lista e a rota da conversa aberta) — e lista repetida é a forma como
+// este projeto perde régua: já aconteceu com "de quem é a bola" (cinco cópias) e com o nome do
+// contato (quatro). A revisão apontou a quarta chegando antes de ela existir.
+//
+// São DUAS etapas, não uma: 'convertido' é quem matriculou PELO funil, e 'cliente' é quem já era
+// aluno ANTES dele (contractConvert grava esse desfecho para pré-existente). Quem escrever a
+// régua à mão lembra da primeira e esquece da segunda.
+const ETAPAS_ALUNO = ['convertido', 'cliente'];
+function ehAluno(l) { return ETAPAS_ALUNO.includes(stageOfLead(l)); }
+// Gêmeo SQL de ehAluno. NÃO devolve NULL com desfecho nulo: o CASE de stageSql tem ELSE, então a
+// comparação dá false — mas quem negar isto deve usar `IS NOT TRUE` mesmo assim, porque a régua
+// vizinha (lifecycle.convertidoSql) compara `desfecho = 'matriculado'` e ESSA devolve NULL.
+function alunoSql(alias = 'l') { return `(${stageSql(alias)} IN (${q(ETAPAS_ALUNO)}))`; }
+
 // CASE canônico: mesma partição em SQL. Ordem idêntica à de stageKey → SQL ≡ JS (o itest cobre
 // todas as combinações). Útil pra qualquer agregação SQL-side; o computeKanban segue em JS.
 function stageSql(alias = 'l') {
@@ -510,6 +527,7 @@ module.exports = {
   STAGES, KANBAN_STAGES, KANBAN_KEYS, ETAPAS_TRABALHO,
   PERDIDO_DESFECHOS, CLIENTE_DESFECHO, MOTIVOS_PERDA, AULA_REALIZADA, AULA_COM_MATRICULA, KANBAN_TRANSICOES, KEY_TO_STATUS, STATUS_TO_KEY,
   stageKey, stageOfLead, isStage, stageSql,
+  ETAPAS_ALUNO, ehAluno, alunoSql,
   detectSql, funilBucketSql, temFatoExtranetSql, renovacaoSql, stageCatalog, loadStages,
   ROTULOS_POR_RAMO, ramoDoRotulo, rotuloDoEstagio, rotulosDeTela, ROTULOS_DE_TELA,
   terminalParaSugestaoSql, sugestaoAtivaSql, isSugestaoAtiva,
